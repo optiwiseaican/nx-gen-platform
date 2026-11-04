@@ -9,3 +9,7 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+.nxgen-data/
+apps/server/config/trusted-license-keys.dev.json
+*.nxlic
+*.nxreq

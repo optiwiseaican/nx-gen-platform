@@ -1,0 +1,4 @@
+# Signing keys and the issuance ledger must never be committed.
+keys/
+*.pem
+issued-licenses.jsonl

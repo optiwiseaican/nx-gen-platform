@@ -1,0 +1,14 @@
+{
+  "name": "@crescent/license-authority",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VENDOR-ONLY NxGen License Authority CLI. Holds signing keys. Never package into customer builds.",
+  "bin": { "nxgen-license": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "cli": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@crescent/licensing": "0.1.0"
+  }
+}

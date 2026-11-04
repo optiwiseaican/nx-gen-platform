@@ -12,6 +12,38 @@ The full specification is in `docs/master-specification-v1.0.docx`.
 | `apps/server` | NestJS | API and Compliance Core (audit, e-signatures, licensing, etc.) |
 | `apps/desktop` | Electron | Desktop shell for standalone mode |
 | `packages/shared` | TypeScript | Types shared by all apps |
+| `packages/licensing` | TypeScript | `.nxlic` format, Ed25519 verify, platform binding, fingerprint (shipped) |
+| `tools/license-authority` | Node CLI | **Vendor-only** key generation and license issuing — never shipped |
+
+## Licensing (offline activation)
+
+Specs: License & Activation PRD V3.0 + Technical Architecture. Summary of the implementation:
+
+- **License file** `.nxlic`: JSON envelope; Ed25519 signature over `NXGEN-LICENSE-v1\n` + canonical JSON (RFC 8785-compatible) of the payload, with a `keyId` for key rotation.
+- **Binding**: primary = Platform Instance UID (`NXG-PLT-XXXX-XXXX`); secondary = weighted, hashed machine fingerprint (RAM/disk/NIC changes tolerated, motherboard swap → `REACTIVATION_REQUIRED`).
+- **Activation code** `NXG-XXXX-XXXX-XXXX`: Crockford Base32 + Luhn check char; it selects the package, the signature is the trust anchor.
+- **Workstation storage**: activated license is AES-256-GCM encrypted (bound to the platform UID) and **re-verified from its signature at every start**. Clock-rollback evidence is HMAC-protected.
+- **Audit**: every activation step is recorded as `SYSTEM_LICENSE_SERVICE` in a hash-chained append-only log (interim until the Postgres audit engine).
+- **Errors** `NX-LIC-E001…E010` per PRD, plus E011–E015 extensions (hardware changed, version scope, installation not verified, code mismatch, identity invalid).
+
+### Try it locally
+
+```bash
+npm run build -w @crescent/shared -w @crescent/licensing
+npm run dev:license -w @crescent/server   # simulates install + issues a dev license, prints the activation code
+npm run dev:server                        # restart if it printed "new dev signing key"
+npm run dev:web                           # http://localhost:3000 → enter the code
+```
+
+### Vendor workflow
+
+```bash
+npm run build -w @crescent/license-authority
+node tools/license-authority/dist/cli.js keygen --out tools/license-authority/keys/prod --label "NxGen 2026"
+# On the workstation (service function): POST /api/licensing/request  → NXR1… code / .nxreq file
+node tools/license-authority/dist/cli.js issue --key <keyId>.private.pem --request site.nxreq \
+  --customer-id CUST-001 --customer-name "Crescent Pharma" --modules ph,tlc --out site.nxlic
+```
 
 ## Getting started
 

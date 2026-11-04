@@ -1,26 +1,43 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* NxGen enterprise palette (Smart Installer PRD §70). Light, neutral, no decorative effects. */
+@theme {
+  --color-navy: #0b2545;
+  --color-navy-700: #13315c;
+  --color-brand: #0b5cd5;
+  --color-brand-700: #0848a8;
+  --color-brand-50: #eef4fe;
+  --color-pass: #15803d;
+  --color-pass-50: #ecfdf3;
+  --color-warn: #b45309;
+  --color-warn-50: #fffbeb;
+  --color-fail: #b91c1c;
+  --color-fail-50: #fef2f2;
+  --color-ink: #111827;
+  --color-muted: #4b5563;
+  --color-line: #d9dee7;
+  --color-canvas: #f3f5f9;
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", Consolas, ui-monospace, monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

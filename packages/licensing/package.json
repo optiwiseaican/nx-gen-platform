@@ -1,0 +1,26 @@
+{
+  "name": "@crescent/licensing",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NxGen offline license format (.nxlic), Ed25519 signing/verification, platform binding and machine fingerprinting",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "jest"
+  },
+  "jest": {
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
+    "testEnvironment": "node"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2"
+  },
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
+}
