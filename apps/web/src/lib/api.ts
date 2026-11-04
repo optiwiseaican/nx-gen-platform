@@ -147,6 +147,58 @@ export const authApi = {
   },
 };
 
+export interface UserSummary {
+  id: string;
+  username: string;
+  fullName: string;
+  email: string | null;
+  status: "ACTIVE" | "DISABLED";
+  roles: string[];
+  locked: boolean;
+  lockedUntil: string | null;
+  mustChangePassword: boolean;
+  passwordChangedAt: string | null;
+  lastLoginAt: string | null;
+  failedLoginCount: number;
+  createdAt: string;
+  createdBy: string;
+  createdByName: string | null;
+  versionNo: number;
+}
+
+export interface RoleSummary {
+  code: string;
+  name: string;
+  description: string;
+  isSystem: boolean;
+  permissions: string[];
+  activeUsers: number;
+  versionNo: number;
+}
+
+const put = <T>(path: string, body: unknown) => call<T>(path, { method: "PUT", body: JSON.stringify(body) });
+
+export const usersApi = {
+  list: () => call<UserSummary[]>("/users"),
+  get: (id: string) => call<UserSummary>(`/users/${id}`),
+  history: (id: string) => call<AuditEntry[]>(`/users/${id}/history`),
+  create: (body: { username: string; fullName: string; email?: string; roles: string[]; reason: string }) =>
+    post<{ user: UserSummary; temporaryPassword: string }>("/users", body),
+  updateProfile: (id: string, body: { fullName: string; email: string; reason: string }) =>
+    put<UserSummary>(`/users/${id}/profile`, body),
+  setRoles: (id: string, roles: string[], reason: string) => put<UserSummary>(`/users/${id}/roles`, { roles, reason }),
+  disable: (id: string, reason: string) => post<UserSummary>(`/users/${id}/disable`, { reason }),
+  enable: (id: string, reason: string) => post<UserSummary>(`/users/${id}/enable`, { reason }),
+  unlock: (id: string, reason: string) => post<UserSummary>(`/users/${id}/unlock`, { reason }),
+  resetPassword: (id: string, reason: string) =>
+    post<{ user: UserSummary; temporaryPassword: string }>(`/users/${id}/reset-password`, { reason }),
+  roles: () => call<{ roles: RoleSummary[]; permissions: { code: string; description: string }[] }>("/roles"),
+  createRole: (body: { code: string; name: string; description: string; permissions: string[]; reason: string }) =>
+    post<RoleSummary>("/roles", body),
+  setRolePermissions: (code: string, permissions: string[], reason: string) =>
+    put<RoleSummary>(`/roles/${code}/permissions`, { permissions, reason }),
+};
+
 export const ROLE_NAMES: Record<string, string> = {
   SUPER_ADMINISTRATOR: "Super Administrator",
   IT_ADMINISTRATOR: "IT Administrator",

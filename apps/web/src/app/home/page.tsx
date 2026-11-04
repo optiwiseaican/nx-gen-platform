@@ -8,7 +8,7 @@ import { ROLE_NAMES } from "@/lib/api";
 const NEXT_STAGES = [
   { label: "NxGen Activated", done: true },
   { label: "Administrator Setup", done: true },
-  { label: "User & Role Management", done: false },
+  { label: "User & Role Management", done: true },
   { label: "Security Configuration", done: false },
   { label: "Module Configuration", done: false },
   { label: "Device Configuration", done: false },
@@ -20,6 +20,8 @@ function Home() {
   const p = usePrincipal();
   const can = (perm: string) => p.permissions.includes(perm);
   const cards = [
+    { href: "/users/", title: "Users", text: "Create accounts, assign roles, disable, unlock and reset passwords.", show: can("users.view") },
+    { href: "/roles/", title: "Roles & Permissions", text: "See what each role may do; Super Administrators can adjust it.", show: can("users.view") },
     { href: "/audit/", title: "Audit Trail", text: "Review every recorded action, with chain-integrity verification.", show: can("audit.view") },
     { href: "/system/", title: "System Information", text: "Platform identity, installation, license and licensed modules.", show: can("system.view") },
     { href: "/change-password/", title: "Change Password", text: "Update your password. Expired passwords must be changed.", show: true },

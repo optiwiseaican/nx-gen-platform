@@ -48,6 +48,8 @@ export function BrandHeader({ title, children }: { title?: string; children?: Re
 
 const NAV = [
   { href: "/home/", label: "Home", permission: null },
+  { href: "/users/", label: "Users", permission: "users.view" },
+  { href: "/roles/", label: "Roles", permission: "users.view" },
   { href: "/audit/", label: "Audit Trail", permission: "audit.view" },
   { href: "/system/", label: "System Information", permission: "system.view" },
 ];
@@ -109,9 +111,9 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
               <li key={n.href}>
                 <Link
                   href={n.href}
-                  aria-current={pathname === n.href ? "page" : undefined}
+                  aria-current={pathname.startsWith(n.href) ? "page" : undefined}
                   className={`block border-b-2 px-3 py-3 text-sm font-semibold ${
-                    pathname === n.href ? "border-brand text-brand" : "border-transparent text-muted hover:text-ink"
+                    pathname.startsWith(n.href) ? "border-brand text-brand" : "border-transparent text-muted hover:text-ink"
                   }`}
                 >
                   {n.label}

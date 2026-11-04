@@ -69,7 +69,16 @@ function AuditTrail() {
               <Fragment key={e.sequence}>
                 <tr className="cursor-pointer hover:bg-canvas/60" onClick={() => setOpen(open === e.sequence ? null : e.sequence)}>
                   <td className="px-4 py-2.5 font-mono text-xs text-muted">{e.sequence}</td>
-                  <td className="whitespace-nowrap px-4 py-2.5">{new Date(e.occurredAt).toLocaleString()}</td>
+                  <td className="whitespace-nowrap px-4 py-2.5">
+                    {typeof e.details?.journalTimestamp === "string" ? (
+                      <>
+                        {new Date(e.details.journalTimestamp).toLocaleString()}
+                        <span className="block text-xs text-muted">from bootstrap journal</span>
+                      </>
+                    ) : (
+                      new Date(e.occurredAt).toLocaleString()
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 font-medium">
                     <span className="text-xs text-muted">{e.category} · </span>
                     {e.action}

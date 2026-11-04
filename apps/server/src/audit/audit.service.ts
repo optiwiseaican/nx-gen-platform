@@ -38,6 +38,8 @@ export interface AuditQuery {
   action?: string;
   actor?: string;
   category?: string;
+  /** Entries about this record, including composite keys that start with it (e.g. "<userId>:ROLE"). */
+  recordId?: string;
 }
 
 interface AuditRow {
@@ -174,6 +176,7 @@ export class AuditService {
             (!q.actor || e.actor === q.actor),
         )
         .filter((e) => !q.beforeSequence || e.sequence < q.beforeSequence)
+        .filter((e) => !q.recordId || e.recordId === q.recordId)
         .reverse()
         .slice(0, limit);
     }
@@ -183,6 +186,7 @@ export class AuditService {
           AND ($2::text IS NULL OR action = $2)
           AND ($3::text IS NULL OR actor_id = $3 OR actor_name = $3)
           AND ($4::text IS NULL OR category = $4)
+          AND ($6::text IS NULL OR record_id = $6 OR record_id LIKE $6 || ':%')
         ORDER BY sequence DESC LIMIT $5`,
       [
         q.beforeSequence ?? null,
@@ -190,6 +194,7 @@ export class AuditService {
         q.actor ?? null,
         q.category ?? null,
         limit,
+        q.recordId ?? null,
       ],
     );
     return rows.map(fromRow);
