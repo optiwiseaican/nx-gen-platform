@@ -1,0 +1,14 @@
+{
+  "name": "@crescent/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json && electron ."
+  },
+  "devDependencies": {
+    "electron": "^36.0.0",
+    "typescript": "^5.7.3"
+  }
+}
