@@ -148,10 +148,10 @@ export class LicensingService implements OnApplicationBootstrap {
     };
   }
 
-  private event(
+  private async event(
     e: Omit<AuditEventInput, 'category' | 'actor' | 'platformInstanceId'>,
-  ): void {
-    this.audit.record({
+  ): Promise<void> {
+    await this.audit.record({
       category: 'LICENSING',
       actor: SYSTEM_LICENSE_SERVICE,
       platformInstanceId:
@@ -211,7 +211,7 @@ export class LicensingService implements OnApplicationBootstrap {
         this.setState(state, null, errorCode);
       }
 
-      this.event({
+      await this.event({
         action:
           this.state === LicenseState.REACTIVATION_REQUIRED
             ? 'REACTIVATION_REQUIRED'
@@ -319,7 +319,7 @@ export class LicensingService implements OnApplicationBootstrap {
     licenseFileText?: string,
     licenseFileName?: string,
   ): Promise<ActivationOutcome> {
-    this.event({
+    await this.event({
       action: 'ACTIVATION_INITIATED',
       result: 'INFO',
       licenseReference: code,
@@ -330,12 +330,12 @@ export class LicensingService implements OnApplicationBootstrap {
       ? previousState
       : LicenseState.ACTIVATION_ERROR;
 
-    const gateFailure = (
+    const gateFailure = async (
       errorCode: LicenseErrorCode,
       step: ActivationStepId,
     ) => {
       this.state = failedState;
-      this.event({
+      await this.event({
         action: 'ACTIVATION_FAILED',
         result: 'FAILURE',
         licenseReference: code,
@@ -348,19 +348,19 @@ export class LicensingService implements OnApplicationBootstrap {
 
     // Screen 1 validation order (PRD §16): installation and identity before package discovery.
     if (!ctx.installationVerified)
-      return gateFailure(
+      return await gateFailure(
         LicenseErrorCode.INSTALLATION_NOT_VERIFIED,
         'INSTALLATION',
       );
     if (!isValidPlatformIdentity(ctx.platform))
-      return gateFailure(
+      return await gateFailure(
         LicenseErrorCode.PLATFORM_IDENTITY_INVALID,
         'PLATFORM_INSTANCE',
       );
 
     let text = licenseFileText;
     if (text) {
-      this.event({
+      await this.event({
         action: 'LICENSE_PACKAGE_SELECTED_MANUALLY',
         result: 'INFO',
         licenseReference: code,
@@ -371,7 +371,7 @@ export class LicensingService implements OnApplicationBootstrap {
       if (!text) {
         // Remain on Screen 1 and offer "Select License File" — not an activation error.
         this.state = previousState;
-        this.event({
+        await this.event({
           action: 'LICENSE_PACKAGE_NOT_FOUND',
           result: 'FAILURE',
           licenseReference: code,
@@ -385,14 +385,14 @@ export class LicensingService implements OnApplicationBootstrap {
           },
         );
       }
-      this.event({
+      await this.event({
         action: 'LICENSE_PACKAGE_FOUND',
         result: 'INFO',
         licenseReference: code,
       });
     }
 
-    this.event({
+    await this.event({
       action: 'PLATFORM_INSTANCE_VERIFIED',
       result: 'SUCCESS',
       licenseReference: code,
@@ -400,14 +400,14 @@ export class LicensingService implements OnApplicationBootstrap {
     const result = verifyLicense(text, ctx);
     if (!result.ok) {
       this.state = failedState;
-      this.event({
+      await this.event({
         action: 'LICENSE_VERIFICATION_FAILURE',
         result: 'FAILURE',
         licenseReference: code,
         certificateId: result.license?.licenseId ?? null,
         errorCode: result.errorCode,
       });
-      this.event({
+      await this.event({
         action: 'ACTIVATION_FAILED',
         result: 'FAILURE',
         licenseReference: code,
@@ -419,7 +419,7 @@ export class LicensingService implements OnApplicationBootstrap {
     }
 
     const license = result.license!;
-    this.event({
+    await this.event({
       action: 'LICENSE_VERIFICATION_SUCCESS',
       result: 'SUCCESS',
       licenseReference: code,
@@ -435,13 +435,13 @@ export class LicensingService implements OnApplicationBootstrap {
     try {
       undo = this.store.saveActive(text, ctx.platform!.instanceUid);
       mark('STORED', 'PASS');
-      this.event({
+      await this.event({
         action: 'LOCAL_LICENSE_STORED',
         result: 'SUCCESS',
         licenseReference: code,
         certificateId: license.licenseId,
       });
-      this.event({
+      await this.event({
         action: 'ACTIVATION_SUCCESSFUL',
         result: 'SUCCESS',
         licenseReference: code,
@@ -471,7 +471,7 @@ export class LicensingService implements OnApplicationBootstrap {
         'FAIL',
       );
       try {
-        this.event({
+        await this.event({
           action: 'ACTIVATION_FAILED',
           result: 'FAILURE',
           licenseReference: code,
@@ -514,7 +514,7 @@ export class LicensingService implements OnApplicationBootstrap {
       platformVersion: this.config.platformVersion,
       fingerprint: await this.fingerprint(),
     });
-    this.event({
+    await this.event({
       action: 'ACTIVATION_REQUEST_GENERATED',
       result: 'SUCCESS',
       details: { requestId: request.requestId },
@@ -563,7 +563,7 @@ export class LicensingService implements OnApplicationBootstrap {
    * details for administrators and support. Unlike Screens 1–3, this view may
    * show module entitlements.
    */
-  getSystemInformation() {
+  async getSystemInformation() {
     const status = this.getStatus();
     const installation = this.platform.getInstallation();
     const lic = this.license;
@@ -606,8 +606,8 @@ export class LicensingService implements OnApplicationBootstrap {
       },
       entitlements: this.getEntitlements(),
       audit: {
-        events: this.audit.readAll().length,
-        chain: this.audit.verifyChain().valid ? 'INTACT' : 'BROKEN',
+        events: await this.audit.count(),
+        chain: (await this.audit.verifyChain()).valid ? 'INTACT' : 'BROKEN',
       },
       warnings: status.warnings,
     };

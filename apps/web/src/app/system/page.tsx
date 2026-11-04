@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useAuthRedirect } from "@/components/AppShell";
 import { Badge, Callout, FieldTable, StatusIcon } from "@/components/ui";
 import { licensingApi, SERVICE_UNAVAILABLE, SystemInformation } from "@/lib/api";
 
@@ -33,12 +34,15 @@ export default function SystemInformationPage() {
   const [info, setInfo] = useState<SystemInformation | null>(null);
   const [failed, setFailed] = useState(false);
 
+  const redirect = useAuthRedirect();
   useEffect(() => {
     licensingApi
       .systemInformation()
       .then(setInfo)
-      .catch(() => setFailed(true));
-  }, []);
+      .catch((err) => {
+        if (!redirect(err)) setFailed(true);
+      });
+  }, [redirect]);
 
   const lic = info?.license;
   const active = lic?.state === "ACTIVE";

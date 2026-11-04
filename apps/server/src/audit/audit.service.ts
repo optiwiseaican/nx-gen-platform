@@ -1,139 +1,285 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { createHash, randomUUID } from 'crypto';
+import { Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'crypto';
+import { existsSync, readFileSync } from 'fs';
+import { DatabaseService, Queryable } from '../database/database.service';
 import {
-  appendFileSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-} from 'fs';
-import { dirname, join } from 'path';
-import { canonicalize } from '@crescent/licensing';
-import { NXGEN_CONFIG } from '../config/nxgen.config';
-import type { NxGenConfig } from '../config/nxgen.config';
+  AuditEventInput,
+  AuditRecord,
+  BootstrapJournal,
+} from './bootstrap-journal';
 
-/** Identity used for events before any administrator exists (License PRD §43). */
-export const SYSTEM_LICENSE_SERVICE = 'SYSTEM_LICENSE_SERVICE';
+export { SYSTEM_LICENSE_SERVICE } from './bootstrap-journal';
+export type { AuditEventInput } from './bootstrap-journal';
 
-export interface AuditEventInput {
-  category: 'LICENSING' | 'PLATFORM';
-  action: string;
-  result: 'SUCCESS' | 'FAILURE' | 'INFO';
-  actor: string;
-  platformInstanceId?: string | null;
-  licenseReference?: string | null;
-  certificateId?: string | null;
-  previousState?: string | null;
-  newState?: string | null;
-  reason?: string | null;
-  errorCode?: string | null;
-  details?: Record<string, string | number | boolean | null>;
-}
-
-export interface AuditRecord extends AuditEventInput {
-  eventId: string;
-  timestamp: string;
+export interface AuditEntry {
   sequence: number;
-  prevHash: string;
-  hash: string;
+  eventId: string;
+  occurredAt: string;
+  category: string;
+  action: string;
+  result: string;
+  actor: string;
+  actorName: string | null;
+  tableName: string | null;
+  recordId: string | null;
+  oldValue: unknown;
+  newValue: unknown;
+  reason: string | null;
+  machineName: string | null;
+  ipAddress: string | null;
+  platformInstanceId: string | null;
+  errorCode: string | null;
+  details: Record<string, unknown> | null;
 }
 
-const GENESIS = '0'.repeat(64);
+export interface AuditQuery {
+  limit?: number;
+  beforeSequence?: number;
+  action?: string;
+  actor?: string;
+  category?: string;
+}
+
+interface AuditRow {
+  sequence: string;
+  event_id: string;
+  occurred_at: Date;
+  category: string;
+  action: string;
+  result: string;
+  actor_id: string;
+  actor_name: string | null;
+  table_name: string | null;
+  record_id: string | null;
+  old_value: unknown;
+  new_value: unknown;
+  reason: string | null;
+  machine_name: string | null;
+  ip_address: string | null;
+  platform_instance_id: string | null;
+  error_code: string | null;
+  details: Record<string, unknown> | null;
+}
+
+const fromRow = (r: AuditRow): AuditEntry => ({
+  sequence: Number(r.sequence),
+  eventId: r.event_id,
+  occurredAt: r.occurred_at.toISOString(),
+  category: r.category,
+  action: r.action,
+  result: r.result,
+  actor: r.actor_id,
+  actorName: r.actor_name,
+  tableName: r.table_name,
+  recordId: r.record_id,
+  oldValue: r.old_value,
+  newValue: r.new_value,
+  reason: r.reason,
+  machineName: r.machine_name,
+  ipAddress: r.ip_address,
+  platformInstanceId: r.platform_instance_id,
+  errorCode: r.error_code,
+  details: r.details,
+});
+
+const fromJournal = (r: AuditRecord): AuditEntry => ({
+  sequence: r.sequence,
+  eventId: r.eventId,
+  occurredAt: r.timestamp,
+  category: r.category,
+  action: r.action,
+  result: r.result,
+  actor: r.actor,
+  actorName: null,
+  tableName: null,
+  recordId: r.certificateId ?? r.licenseReference ?? null,
+  oldValue: r.previousState ? { state: r.previousState } : null,
+  newValue: r.newState ? { state: r.newState } : null,
+  reason: r.reason ?? null,
+  machineName: null,
+  ipAddress: null,
+  platformInstanceId: r.platformInstanceId ?? null,
+  errorCode: r.errorCode ?? null,
+  details: r.details ?? null,
+});
 
 /**
- * INTERIM system audit trail: append-only, hash-chained JSON Lines file.
+ * System audit trail (master spec §6).
  *
- * Each record carries the hash of the previous one, so deletion, reordering or
- * editing of any record is detectable by verifyChain(). This is tamper-EVIDENT,
- * not tamper-proof; it will be replaced by the PostgreSQL audit engine
- * (append-only table, revoked UPDATE/DELETE) once the database layer exists,
- * and this file then becomes the bootstrap journal imported into it.
- *
- * Never pass secrets (keys, passwords, license file contents) in events.
+ * With a database configured, events go to the append-only, hash-chained
+ * `audit_trail` table — and there is NO silent fallback: if the database write
+ * fails, the caller's operation fails. Without a database (pre-installation /
+ * licensing-only development) events go to the Bootstrap Journal file.
  */
 @Injectable()
 export class AuditService {
-  private readonly path: string;
-  private lastHash = GENESIS;
-  private sequence = 0;
-  private loaded = false;
+  private readonly logger = new Logger(AuditService.name);
 
-  constructor(@Inject(NXGEN_CONFIG) config: NxGenConfig) {
-    this.path = join(config.dataDir, 'audit', 'system-audit.jsonl');
+  constructor(
+    private readonly journal: BootstrapJournal,
+    private readonly db: DatabaseService | null,
+  ) {}
+
+  private get useDb(): boolean {
+    return !!this.db?.enabled;
   }
 
-  private load(): void {
-    if (this.loaded) return;
-    if (existsSync(this.path)) {
-      const lines = readFileSync(this.path, 'utf8')
-        .trim()
-        .split('\n')
-        .filter(Boolean);
-      if (lines.length) {
-        const last = JSON.parse(lines[lines.length - 1]) as AuditRecord;
-        this.lastHash = last.hash;
-        this.sequence = last.sequence;
-      }
+  async record(event: AuditEventInput, client?: Queryable): Promise<void> {
+    if (!this.useDb) {
+      this.journal.record(event);
+      return;
     }
-    this.loaded = true;
-  }
-
-  private static hashOf(record: Omit<AuditRecord, 'hash'>): string {
-    return createHash('sha256').update(canonicalize(record)).digest('hex');
-  }
-
-  record(event: AuditEventInput): AuditRecord {
-    this.load();
-    const base: Omit<AuditRecord, 'hash'> = {
-      ...event,
-      eventId: randomUUID(),
-      timestamp: new Date().toISOString(),
-      sequence: this.sequence + 1,
-      prevHash: this.lastHash,
+    const details = {
+      ...(event.details ?? {}),
+      ...(event.licenseReference
+        ? { licenseReference: event.licenseReference }
+        : {}),
+      ...(event.certificateId ? { certificateId: event.certificateId } : {}),
     };
-    // Drop undefined so the hashed form equals the stored JSON form.
-    const clean = JSON.parse(JSON.stringify(base)) as Omit<AuditRecord, 'hash'>;
-    const record: AuditRecord = { ...clean, hash: AuditService.hashOf(clean) };
-
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    appendFileSync(this.path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-    const fd = openSync(this.path, 'r');
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-
-    this.lastHash = record.hash;
-    this.sequence = record.sequence;
-    return record;
+    const sql = `INSERT INTO audit_trail (category, action, result, actor_id, actor_name, table_name, record_id,
+                                old_value, new_value, reason, platform_instance_id, error_code, details, ip_address, machine_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`;
+    const params = [
+      event.category,
+      event.action,
+      event.result,
+      event.actor,
+      event.actorName ?? null,
+      event.tableName ?? (event.category === 'LICENSING' ? 'license' : null),
+      event.recordId ?? event.certificateId ?? event.licenseReference ?? null,
+      event.previousState
+        ? JSON.stringify({ state: event.previousState })
+        : null,
+      event.newState ? JSON.stringify({ state: event.newState }) : null,
+      event.reason ?? null,
+      event.platformInstanceId ?? null,
+      event.errorCode ?? null,
+      Object.keys(details).length ? JSON.stringify(details) : null,
+      event.ipAddress ?? null,
+      event.machineName ?? null,
+    ];
+    if (client) await client.query(sql, params);
+    else await this.db!.query(sql, params);
   }
 
-  readAll(): AuditRecord[] {
-    if (!existsSync(this.path)) return [];
-    return readFileSync(this.path, 'utf8')
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as AuditRecord);
+  async list(q: AuditQuery = {}): Promise<AuditEntry[]> {
+    const limit = Math.min(Math.max(q.limit ?? 100, 1), 500);
+    if (!this.useDb) {
+      return this.journal
+        .readAll()
+        .map(fromJournal)
+        .filter(
+          (e) =>
+            (!q.action || e.action === q.action) &&
+            (!q.actor || e.actor === q.actor),
+        )
+        .filter((e) => !q.beforeSequence || e.sequence < q.beforeSequence)
+        .reverse()
+        .slice(0, limit);
+    }
+    const rows = await this.db!.query<AuditRow>(
+      `SELECT * FROM audit_trail
+        WHERE ($1::bigint IS NULL OR sequence < $1)
+          AND ($2::text IS NULL OR action = $2)
+          AND ($3::text IS NULL OR actor_id = $3 OR actor_name = $3)
+          AND ($4::text IS NULL OR category = $4)
+        ORDER BY sequence DESC LIMIT $5`,
+      [
+        q.beforeSequence ?? null,
+        q.action ?? null,
+        q.actor ?? null,
+        q.category ?? null,
+        limit,
+      ],
+    );
+    return rows.map(fromRow);
   }
 
-  verifyChain(): { valid: boolean; brokenAtSequence?: number } {
-    let prev = GENESIS;
-    let expectedSeq = 1;
-    for (const record of this.readAll()) {
-      const { hash, ...rest } = record;
-      if (
-        record.sequence !== expectedSeq ||
-        record.prevHash !== prev ||
-        AuditService.hashOf(rest) !== hash
-      ) {
-        return { valid: false, brokenAtSequence: record.sequence };
-      }
-      prev = hash;
-      expectedSeq++;
-    }
-    return { valid: true };
+  /** Oldest-first; intended for tests and exports of small trails. */
+  async readAll(): Promise<AuditEntry[]> {
+    if (!this.useDb) return this.journal.readAll().map(fromJournal);
+    return (
+      await this.db!.query<AuditRow>(
+        'SELECT * FROM audit_trail ORDER BY sequence',
+      )
+    ).map(fromRow);
+  }
+
+  async count(): Promise<number> {
+    if (!this.useDb) return this.journal.readAll().length;
+    const [row] = await this.db!.query<{ n: string }>(
+      'SELECT count(*) AS n FROM audit_trail',
+    );
+    return Number(row.n);
+  }
+
+  async verifyChain(): Promise<{ valid: boolean; brokenAtSequence?: number }> {
+    if (!this.useDb) return this.journal.verifyChain();
+    const [row] = await this.db!.query<{ broken: string | null }>(
+      'SELECT verify_audit_chain() AS broken',
+    );
+    return row.broken === null
+      ? { valid: true }
+      : { valid: false, brokenAtSequence: Number(row.broken) };
+  }
+
+  /**
+   * Imports the Bootstrap Journal into the database trail once (Smart Installer
+   * PRD §46: "Journal is finalized, journal hash is generated, installation
+   * summary is registered, journal becomes installation evidence").
+   */
+  async importBootstrapJournal(): Promise<number> {
+    if (!this.useDb || !existsSync(this.journal.path)) return 0;
+    const [{ last }] = await this.db!.query<{ last: string | null }>(
+      `SELECT max((details ->> 'journalSequence')::bigint) AS last FROM audit_trail WHERE details ? 'journalSequence'`,
+    );
+    const lastImported = Number(last ?? 0);
+    const records = this.journal
+      .readAll()
+      .filter((r) => r.sequence > lastImported);
+    if (!records.length) return 0;
+
+    const content = readFileSync(this.journal.path, 'utf8');
+    const journalHash = createHash('sha256').update(content).digest('hex');
+    const chain = this.journal.verifyChain();
+    await this.db!.transaction(
+      { actorId: 'SYSTEM_AUDIT_SERVICE', actorName: 'Audit service' },
+      async (client) => {
+        for (const r of records) {
+          await this.record(
+            {
+              ...r,
+              details: {
+                ...(r.details ?? {}),
+                journalSequence: r.sequence,
+                journalTimestamp: r.timestamp,
+                journalHash: r.hash,
+              },
+            },
+            client,
+          );
+        }
+        await this.record(
+          {
+            category: 'PLATFORM',
+            action: 'BOOTSTRAP_JOURNAL_IMPORTED',
+            result: chain.valid ? 'SUCCESS' : 'FAILURE',
+            actor: 'SYSTEM_AUDIT_SERVICE',
+            reason: 'Bootstrap journal registered into the NxGen audit trail',
+            details: {
+              journalFileHash: journalHash,
+              fromSequence: records[0].sequence,
+              toSequence: records[records.length - 1].sequence,
+              chainValid: chain.valid,
+            },
+          },
+          client,
+        );
+      },
+    );
+    this.logger.log(
+      `Imported ${records.length} bootstrap journal records into the audit trail`,
+    );
+    return records.length;
   }
 }

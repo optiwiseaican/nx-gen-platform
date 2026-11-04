@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ActivationOutcome,
+  ApiError,
+  authApi,
   LicenseErrorInfo,
   licensingApi,
   LicensingStatus,
@@ -70,11 +72,16 @@ export function ActivationWizard() {
       const s = await licensingApi.status();
       setStatus(s);
       setLoadError(false);
-      if (s.license.state === "ACTIVE") setScreen("complete");
+      if (s.license.state === "ACTIVE") {
+        // Once setup is complete, the activation summary is no longer the entry point.
+        const setup = await authApi.setupStatus().catch(() => null);
+        if (setup?.administratorExists) return router.replace("/home/");
+        setScreen("complete");
+      }
     } catch {
       setLoadError(true);
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     void loadStatus();
@@ -102,9 +109,21 @@ export function ActivationWizard() {
         licenseFile: file?.text,
         licenseFileName: file?.name,
       });
-    } catch {
+    } catch (err) {
       setChecks(PENDING_CHECKS);
       setRevealed(0);
+      // After the first administrator exists, (re)activation requires licensing.manage.
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        setFailure({
+          code: err.status === 401 ? "NX-AUTH-REQUIRED" : "NX-AUTH-FORBIDDEN",
+          info: {
+            title: "Administrator sign-in required",
+            message: "Re-activating NxGen requires an administrator with licensing permission.",
+            action: "Sign in as an IT or Super Administrator, then return to this screen.",
+          },
+        });
+        return;
+      }
       setFailure({ code: "NX-LIC-E010", info: SERVICE_UNAVAILABLE });
       return;
     }

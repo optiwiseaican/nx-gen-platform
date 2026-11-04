@@ -13,3 +13,4 @@ coverage/
 apps/server/config/trusted-license-keys.dev.json
 *.nxlic
 *.nxreq
+apps/server/config/database-ca.pem

@@ -11,6 +11,7 @@ async function bootstrap() {
   // UI is served from the same origin (or loaded by Electron), so no CORS.
   if (process.env.NODE_ENV !== 'production') {
     app.enableCors({
+      credentials: true,
       origin: [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/],
     });
   }

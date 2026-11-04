@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto';
-import { AuditService } from '../audit/audit.service';
+import { BootstrapJournal } from '../audit/bootstrap-journal';
 import { NxGenConfig } from '../config/nxgen.config';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
 import { SecureStorageService } from '../security/secure-storage.service';
@@ -14,7 +14,7 @@ export function initPlatformForDev(config: NxGenConfig) {
     throw new Error('Refusing to simulate installation in production');
   const storage = new SecureStorageService(config);
   const platform = new PlatformIdentityService(config, storage);
-  const audit = new AuditService(config);
+  const audit = new BootstrapJournal(config);
 
   let identity = platform.getIdentity().identity;
   if (!identity) {

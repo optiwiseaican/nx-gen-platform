@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
+import { parseEnv } from 'util';
 import {
   computeKeyId,
   DEFAULT_CLOCK_ROLLBACK_TOLERANCE_MS,
@@ -12,8 +13,40 @@ export const PLATFORM_NAME = 'NxGen Compliance Platform';
 /** Installed platform version. Licenses are scoped to the major version. */
 export const PLATFORM_VERSION = '2.0.0';
 
+export interface DatabaseConfig {
+  /** Connection string without TLS parameters (those are carried in `ssl`). */
+  connectionString: string;
+  ssl: { ca: string; rejectUnauthorized: true } | false;
+  /** PostgreSQL schema holding all NxGen objects. */
+  schema: string;
+}
+
+/** Part 11 account & session controls (configurable per site SOP). */
+export interface SecurityPolicy {
+  passwordMinLength: number;
+  passwordHistory: number;
+  passwordMaxAgeDays: number;
+  maxFailedLogins: number;
+  lockoutMinutes: number;
+  sessionIdleMinutes: number;
+  sessionMaxHours: number;
+}
+
+export const DEFAULT_SECURITY_POLICY: SecurityPolicy = {
+  passwordMinLength: 12,
+  passwordHistory: 5,
+  passwordMaxAgeDays: 90,
+  maxFailedLogins: 5,
+  lockoutMinutes: 30,
+  sessionIdleMinutes: 15,
+  sessionMaxHours: 12,
+};
+
 export interface NxGenConfig {
   production: boolean;
+  /** null → no database configured: audit goes to the bootstrap journal file only. */
+  database: DatabaseConfig | null;
+  security: SecurityPolicy;
   dataDir: string;
   platformVersion: string;
   trustedKeys: TrustedKey[];
@@ -54,10 +87,68 @@ export function loadTrustedKeys(
   return keys;
 }
 
+const REPO_ENV_FILE = resolve(__dirname, '..', '..', '..', '..', '.env');
+
+/** Loads the repository .env in development (never overrides real environment variables). */
+export function loadEnvFile(): void {
+  if (process.env.NODE_ENV === 'production' || !existsSync(REPO_ENV_FILE))
+    return;
+  const parsed = parseEnv(readFileSync(REPO_ENV_FILE, 'utf8'));
+  for (const [key, value] of Object.entries(parsed)) {
+    if (process.env[key] === undefined && value !== undefined)
+      process.env[key] = value;
+  }
+}
+
+/**
+ * TLS is all-or-nothing: if the URL asks for TLS (sslmode=require/verify-*),
+ * the server certificate is ALWAYS verified against a configured CA. There is
+ * deliberately no "accept any certificate" mode — audit data and credentials
+ * travel over this connection.
+ */
+export function loadDatabaseConfig(
+  configDir = CONFIG_DIR,
+): DatabaseConfig | null {
+  const raw = process.env.DATABASE_URL;
+  if (!raw) return null;
+  const url = new URL(raw);
+  const sslmode = url.searchParams.get('sslmode');
+  url.searchParams.delete('sslmode');
+
+  const schema = process.env.NXGEN_DB_SCHEMA ?? 'nxgen';
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(schema))
+    throw new Error(`Invalid NXGEN_DB_SCHEMA "${schema}"`);
+
+  if (!sslmode || sslmode === 'disable') {
+    return { connectionString: url.toString(), ssl: false, schema };
+  }
+  const caPath = [
+    process.env.DATABASE_CA_CERT,
+    resolve(configDir, 'database-ca.pem'),
+    resolve(configDir, 'aiven-ca.pem'),
+  ]
+    .filter((p): p is string => !!p)
+    .find((p) => existsSync(p));
+  if (!caPath) {
+    throw new Error(
+      'DATABASE_URL requires TLS but no CA certificate is configured. Download the CA certificate from your ' +
+        'PostgreSQL provider and save it as apps/server/config/database-ca.pem (or set DATABASE_CA_CERT).',
+    );
+  }
+  return {
+    connectionString: url.toString(),
+    ssl: { ca: readFileSync(caPath, 'utf8'), rejectUnauthorized: true },
+    schema,
+  };
+}
+
 export function loadConfig(): NxGenConfig {
+  loadEnvFile();
   const production = process.env.NODE_ENV === 'production';
   return {
     production,
+    database: loadDatabaseConfig(),
+    security: DEFAULT_SECURITY_POLICY,
     dataDir: resolve(
       process.env.NXGEN_DATA_DIR ??
         resolve(__dirname, '..', '..', '.nxgen-data'),

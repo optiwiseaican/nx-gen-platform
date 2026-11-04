@@ -21,7 +21,12 @@ import {
   serializeLicenseFile,
 } from '@crescent/licensing';
 import { AuditService } from '../audit/audit.service';
-import { NxGenConfig, PLATFORM_VERSION } from '../config/nxgen.config';
+import { BootstrapJournal } from '../audit/bootstrap-journal';
+import {
+  DEFAULT_SECURITY_POLICY,
+  NxGenConfig,
+  PLATFORM_VERSION,
+} from '../config/nxgen.config';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
 import { SecureStorageService } from '../security/secure-storage.service';
 import { LicenseStoreService } from './license-store.service';
@@ -45,6 +50,8 @@ function makeHarness(
 ) {
   const config: NxGenConfig = {
     production: false,
+    database: null,
+    security: DEFAULT_SECURITY_POLICY,
     dataDir,
     platformVersion: PLATFORM_VERSION,
     trustedKeys: [{ keyId: vendor.keyId, publicKeyPem: vendor.publicKeyPem }],
@@ -52,7 +59,7 @@ function makeHarness(
   };
   const storage = new SecureStorageService(config);
   const platform = new PlatformIdentityService(config, storage);
-  const audit = new AuditService(config);
+  const audit = new AuditService(new BootstrapJournal(config), null);
   const store = new LicenseStoreService(config, storage);
   const time = new TimeIntegrityService(config, storage);
   const service = new LicensingService(
@@ -140,7 +147,7 @@ describe('LicensingService', () => {
       ok: false,
       inputError: 'FORMAT',
     });
-    expect(h.audit.readAll()).toHaveLength(0);
+    expect(await h.audit.readAll()).toHaveLength(0);
   });
 
   it('blocks activation when installation verification has not passed (E013)', async () => {
@@ -186,7 +193,7 @@ describe('LicensingService', () => {
     expect(stored).not.toContain(code);
     expect(stored).toContain('AES-256-GCM');
 
-    const actions = h.audit.readAll().map((e) => e.action);
+    const actions = (await h.audit.readAll()).map((e) => e.action);
     expect(actions).toEqual([
       'ACTIVATION_INITIATED',
       'LICENSE_PACKAGE_FOUND',
@@ -196,9 +203,11 @@ describe('LicensingService', () => {
       'ACTIVATION_SUCCESSFUL',
     ]);
     expect(
-      h.audit.readAll().every((e) => e.actor === 'SYSTEM_LICENSE_SERVICE'),
+      (await h.audit.readAll()).every(
+        (e) => e.actor === 'SYSTEM_LICENSE_SERVICE',
+      ),
     ).toBe(true);
-    expect(h.audit.verifyChain()).toEqual({ valid: true });
+    expect(await h.audit.verifyChain()).toEqual({ valid: true });
   });
 
   it('accepts a manually selected license file', async () => {
@@ -208,7 +217,7 @@ describe('LicensingService', () => {
     rmSync(h.store.inboxDir, { recursive: true });
     const r = await h.service.activate(code, text, 'customer.nxlic');
     expect(r.ok).toBe(true);
-    expect(h.audit.readAll().map((e) => e.action)).toContain(
+    expect((await h.audit.readAll()).map((e) => e.action)).toContain(
       'LICENSE_PACKAGE_SELECTED_MANUALLY',
     );
   });
@@ -292,7 +301,7 @@ describe('LicensingService', () => {
     install(h);
     const { code } = provision(h);
     await h.service.activate(code);
-    const eventsBefore = h.audit.readAll().length;
+    const eventsBefore = (await h.audit.readAll()).length;
 
     const newBoard = hashFingerprint({
       ...MACHINE,
@@ -308,8 +317,8 @@ describe('LicensingService', () => {
     expect(status.license.errorCode).toBe(LicenseErrorCode.HARDWARE_CHANGED);
     expect(status.license.restricted).toBe(true);
     expect(restarted.service.hasModule('tlc')).toBe(false);
-    expect(restarted.audit.readAll().length).toBe(eventsBefore + 1);
-    expect(restarted.audit.verifyChain()).toEqual({ valid: true });
+    expect((await restarted.audit.readAll()).length).toBe(eventsBefore + 1);
+    expect(await restarted.audit.verifyChain()).toEqual({ valid: true });
   });
 
   it('expired subscription → EXPIRED on restart', async () => {
@@ -359,7 +368,14 @@ describe('LicensingService', () => {
         'ACTIVATION_FAILED',
       ),
     );
-    expect(new AuditService(h.config).verifyChain().valid).toBe(false);
+    expect(
+      (
+        await new AuditService(
+          new BootstrapJournal(h.config),
+          null,
+        ).verifyChain()
+      ).valid,
+    ).toBe(false);
   });
 
   it('generates an activation request for the License Authority (service function)', async () => {
@@ -379,7 +395,7 @@ describe('LicensingService', () => {
     const { code, license } = provision(h);
     await h.service.activate(code);
 
-    const info = h.service.getSystemInformation();
+    const info = await h.service.getSystemInformation();
     expect(info.platform.instanceId).toBe(identity.instanceId);
     expect(info.installation).toMatchObject({
       installationId: 'NXI-2026-000125',

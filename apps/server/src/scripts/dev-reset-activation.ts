@@ -1,6 +1,6 @@
 import { existsSync, rmSync } from 'fs';
 import { join } from 'path';
-import { AuditService } from '../audit/audit.service';
+import { BootstrapJournal } from '../audit/bootstrap-journal';
 import { loadConfig } from '../config/nxgen.config';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
 import { SecureStorageService } from '../security/secure-storage.service';
@@ -24,7 +24,7 @@ const platform = new PlatformIdentityService(
   config,
   new SecureStorageService(config),
 );
-new AuditService(config).record({
+new BootstrapJournal(config).record({
   category: 'LICENSING',
   action: 'DEV_ACTIVATION_RESET',
   result: 'INFO',
