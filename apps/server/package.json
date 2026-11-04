@@ -19,7 +19,8 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json --passWithNoTests",
     "platform:init": "nest build && node dist/scripts/platform-init.js",
-    "dev:license": "nest build && node dist/scripts/dev-license.js"
+    "dev:license": "nest build && node dist/scripts/dev-license.js",
+    "dev:reset-activation": "nest build && node dist/scripts/dev-reset-activation.js"
   },
   "dependencies": {
     "@crescent/licensing": "0.1.0",

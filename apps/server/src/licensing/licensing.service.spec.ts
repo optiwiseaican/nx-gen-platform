@@ -124,6 +124,7 @@ describe('LicensingService', () => {
       verification: 'PASS',
       environment: 'Verified',
       status: 'Complete',
+      simulated: false,
     });
     expect(JSON.stringify(status)).not.toMatch(/tlc|entitlement/i);
   });
@@ -368,5 +369,54 @@ describe('LicensingService', () => {
     expect(req.requestCode).toMatch(/^NXR1\./);
     expect(req.fileName).toBe(`${identity.instanceId}.nxreq`);
     expect(req.fileContent).not.toContain(MACHINE.systemDiskSerial);
+  });
+
+  it('System Information shows license details and entitlements; certificate only when ACTIVE', async () => {
+    const h = makeHarness(dataDir);
+    const identity = install(h);
+    expect(h.service.getActiveCertificate()).toBeNull();
+
+    const { code, license } = provision(h);
+    await h.service.activate(code);
+
+    const info = h.service.getSystemInformation();
+    expect(info.platform.instanceId).toBe(identity.instanceId);
+    expect(info.installation).toMatchObject({
+      installationId: 'NXI-2026-000125',
+      simulated: false,
+    });
+    expect(info.license.details).toMatchObject({
+      licenseId: license.payload.licenseId,
+      activationCode: code,
+      licenseType: 'PERPETUAL',
+      versionScope: '2.x',
+      signingKeyId: vendor.keyId,
+    });
+    expect(info.license.hardwareBinding).toMatchObject({
+      score: 100,
+      changed: 0,
+    });
+    expect(info.entitlements.map((m) => m.id)).toEqual(['tlc']);
+    expect(info.audit).toMatchObject({ chain: 'INTACT' });
+
+    const cert = h.service.getActiveCertificate();
+    expect(cert).not.toBeNull();
+    expect((JSON.parse(cert!) as LicenseFile).payload.licenseId).toBe(
+      license.payload.licenseId,
+    );
+  });
+
+  it('flags installation records written by the development simulator', async () => {
+    const h = makeHarness(dataDir);
+    h.platform.initializeIdentity();
+    h.platform.recordInstallationVerification({
+      installationId: 'NXI-DEV',
+      verification: 'PASS',
+      verifiedAt: new Date().toISOString(),
+      platformVersion: PLATFORM_VERSION,
+      source: 'DEV_SIMULATION',
+    });
+    await h.service.onApplicationBootstrap();
+    expect(h.service.getStatus().installation.simulated).toBe(true);
   });
 });

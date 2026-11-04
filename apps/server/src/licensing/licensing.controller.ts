@@ -69,6 +69,24 @@ export class LicensingController {
    * Internal entitlement query for module applications (PRD §25).
    * TODO(auth): restrict to authenticated sessions once authentication exists.
    */
+  /**
+   * Signed certificate for independent verification by the Electron shell.
+   * TODO(auth): restrict to the local desktop shell / authenticated sessions.
+   */
+  @Get('certificate')
+  certificate() {
+    return { license: this.licensing.getActiveCertificate() };
+  }
+
+  /**
+   * System Information view (PRD §7).
+   * TODO(auth): restrict to administrators once authentication exists.
+   */
+  @Get('system-information')
+  systemInformation() {
+    return this.licensing.getSystemInformation();
+  }
+
   @Get('entitlements')
   entitlements() {
     return {

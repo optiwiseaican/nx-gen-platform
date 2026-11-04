@@ -17,7 +17,7 @@ export interface LicenseErrorInfo {
 
 export interface LicensingStatus {
   platform: { name: string; version: string; instanceId: string | null };
-  installation: { verification: string; environment: string; status: string };
+  installation: { verification: string; environment: string; status: string; simulated: boolean };
   license: {
     state: LicenseState;
     restricted: boolean;
@@ -54,8 +54,32 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface SystemInformation {
+  platform: LicensingStatus["platform"];
+  installation: { installationId: string | null; verification: string; verifiedAt: string | null; simulated: boolean };
+  license: LicensingStatus["license"] & {
+    details: {
+      licenseId: string;
+      activationCode: string;
+      customer: { id: string; name: string; site?: string };
+      licenseType: "PERPETUAL" | "SUBSCRIPTION";
+      versionScope: string;
+      issuedAt: string;
+      validFrom: string;
+      expiresAt: string | null;
+      limits: { users: number | null; devices: number | null };
+      signingKeyId: string | null;
+    } | null;
+    hardwareBinding: { score: number; matched: number; changed: number; missing: number } | null;
+  };
+  entitlements: { id: string; expiresAt: string | null }[];
+  audit: { events: number; chain: "INTACT" | "BROKEN" };
+  warnings: string[];
+}
+
 export const licensingApi = {
   status: () => call<LicensingStatus>("/licensing/status"),
+  systemInformation: () => call<SystemInformation>("/licensing/system-information"),
   activate: (body: { activationCode: string; licenseFile?: string; licenseFileName?: string }) =>
     call<ActivationOutcome>("/licensing/activate", { method: "POST", body: JSON.stringify(body) }),
 };

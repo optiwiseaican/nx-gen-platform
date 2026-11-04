@@ -29,6 +29,15 @@ export function initPlatformForDev(config: NxGenConfig) {
     });
   }
 
+  // Older dev records predate the `source` marker: re-seal them as simulated.
+  const existing = platform.getInstallation();
+  if (existing && platform.isInstallationVerified() && !existing.source) {
+    platform.recordInstallationVerification({
+      ...existing,
+      source: 'DEV_SIMULATION',
+    });
+  }
+
   if (!platform.isInstallationVerified()) {
     const installationId = `NXI-${new Date().getFullYear()}-DEV${randomBytes(2).toString('hex').toUpperCase()}`;
     platform.recordInstallationVerification({
@@ -36,6 +45,7 @@ export function initPlatformForDev(config: NxGenConfig) {
       verification: 'PASS',
       verifiedAt: new Date().toISOString(),
       platformVersion: config.platformVersion,
+      source: 'DEV_SIMULATION',
     });
     audit.record({
       category: 'PLATFORM',

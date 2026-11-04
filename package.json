@@ -14,7 +14,7 @@
     "dev:desktop": "npm run dev -w @crescent/desktop",
     "build": "npm run build -w @crescent/shared -w @crescent/licensing && npm run build -w @crescent/license-authority -w @crescent/server -w @crescent/web -w @crescent/desktop",
     "lint": "npm run lint --workspaces --if-present",
-    "test": "npm run test -w @crescent/licensing -w @crescent/server",
+    "test": "npm run test -w @crescent/licensing -w @crescent/server -w @crescent/desktop",
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down"
   },

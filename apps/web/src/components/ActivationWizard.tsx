@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ActivationOutcome,
@@ -339,8 +340,17 @@ function ActivateScreen(props: {
             <StatusIcon tone={installationPassed ? "pass" : "fail"} />
             Installation Verification
           </h3>
-          {installationPassed ? <Badge tone="pass">PASS</Badge> : <Badge tone="fail">NOT VERIFIED</Badge>}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {status.installation.simulated && <Badge tone="warn">SIMULATED</Badge>}
+            {installationPassed ? <Badge tone="pass">PASS</Badge> : <Badge tone="fail">NOT VERIFIED</Badge>}
+          </div>
         </div>
+        {status.installation.simulated && (
+          <p className="border-b border-line bg-warn-50 px-5 py-2 text-sm text-warn">
+            Development only: this installation record was created by <code>platform:init</code>, not by the NxGen
+            Smart Installer.
+          </p>
+        )}
         <div className="px-5 py-2">
           <FieldTable
             rows={[
@@ -535,9 +545,14 @@ function CompleteScreen({ status, onContinue }: { status: LicensingStatus; onCon
           You can continue with administrator setup, security configuration and other system settings.
         </Callout>
       </div>
-      <Button className="w-full" onClick={onContinue} autoFocus>
-        Continue Setup <ArrowRight />
-      </Button>
+      <div className="space-y-3">
+        <Button className="w-full" onClick={onContinue} autoFocus>
+          Continue Setup <ArrowRight />
+        </Button>
+        <Link href="/system/" className="inline-block text-sm font-semibold text-brand hover:underline">
+          View System Information
+        </Link>
+      </div>
     </div>
   );
 }

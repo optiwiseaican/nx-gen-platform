@@ -14,9 +14,14 @@ export default function SetupPage() {
         System status: <span className="font-semibold text-ink">QUALIFICATION REQUIRED</span> — NxGen is not released for
         production laboratory use.
       </p>
-      <Link href="/" className="mt-8 inline-block text-sm font-semibold text-brand hover:underline">
-        ← Back to activation status
-      </Link>
+      <div className="mt-8 flex gap-6 text-sm font-semibold">
+        <Link href="/system/" className="text-brand hover:underline">
+          System Information
+        </Link>
+        <Link href="/" className="text-brand hover:underline">
+          ← Back to activation status
+        </Link>
+      </div>
     </main>
   );
 }

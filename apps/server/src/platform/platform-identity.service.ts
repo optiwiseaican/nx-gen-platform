@@ -17,6 +17,8 @@ export interface InstallationRecord {
   verification: InstallationVerification;
   verifiedAt: string | null;
   platformVersion: string;
+  /** Who produced this record. DEV_SIMULATION comes from `npm run platform:init` and must never reach a customer. */
+  source?: 'SMART_INSTALLER' | 'DEV_SIMULATION';
 }
 
 export interface IdentityState {

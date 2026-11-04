@@ -5,10 +5,22 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json && electron ."
+    "dev": "tsc -p tsconfig.json && electron .",
+    "test": "jest"
   },
   "devDependencies": {
     "electron": "^36.0.0",
     "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@crescent/licensing": "0.1.0"
+  },
+  "jest": {
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "testEnvironment": "node",
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    }
   }
 }

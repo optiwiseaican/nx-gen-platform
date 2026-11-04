@@ -10,6 +10,7 @@ import {
   ActivationStepId,
   createActivationRequest,
   encodeRequestCode,
+  FingerprintMatch,
   HashedFingerprint,
   isValidPlatformIdentity,
   LICENSE_ERRORS,
@@ -55,6 +56,8 @@ export interface LicensingStatus {
     verification: string;
     environment: 'Verified' | 'Not verified';
     status: 'Complete' | 'Not installed';
+    /** Installation record was written by the development simulator, not the Smart Installer. */
+    simulated: boolean;
   };
   license: {
     state: LicenseState;
@@ -102,6 +105,8 @@ export class LicensingService implements OnApplicationBootstrap {
   private readonly logger = new Logger(LicensingService.name);
   private state: LicenseState = LicenseState.NOT_ACTIVATED;
   private license: LicensePayload | null = null;
+  private licenseText: string | null = null;
+  private fingerprintMatch: FingerprintMatch | null = null;
   private lastErrorCode: LicenseErrorCode | null = null;
   private warnings: LicenseErrorCode[] = [];
   private activating = false;
@@ -187,7 +192,10 @@ export class LicensingService implements OnApplicationBootstrap {
         );
         this.warnings = result.warnings;
         if (result.ok) {
-          this.setState(LicenseState.ACTIVE, result.license!, null);
+          this.setState(LicenseState.ACTIVE, result.license!, null, {
+            text,
+            fingerprint: result.fingerprint ?? null,
+          });
         } else {
           errorCode = result.errorCode!;
         }
@@ -237,10 +245,13 @@ export class LicensingService implements OnApplicationBootstrap {
     state: LicenseState,
     license: LicensePayload | null,
     errorCode: LicenseErrorCode | null,
+    active?: { text: string; fingerprint: FingerprintMatch | null },
   ) {
     this.state = state;
     this.license = license;
     this.lastErrorCode = errorCode;
+    this.licenseText = active?.text ?? null;
+    this.fingerprintMatch = active?.fingerprint ?? null;
   }
 
   // ---------------------------------------------------------------------------
@@ -475,7 +486,10 @@ export class LicensingService implements OnApplicationBootstrap {
     }
 
     mark('FINALIZED', 'PASS');
-    this.setState(LicenseState.ACTIVE, license, null);
+    this.setState(LicenseState.ACTIVE, license, null, {
+      text,
+      fingerprint: result.fingerprint ?? null,
+    });
     this.warnings = result.warnings;
     this.time.observe();
     return { ok: true, state: this.state, checks };
@@ -536,6 +550,69 @@ export class LicensingService implements OnApplicationBootstrap {
     return this.getEntitlements().some((m) => m.id === moduleId);
   }
 
+  /**
+   * The active signed certificate, so the Electron main process can verify it
+   * independently (Technical Architecture §2). Contains no secrets.
+   */
+  getActiveCertificate(): string | null {
+    return this.isActive() ? this.licenseText : null;
+  }
+
+  /**
+   * System Information (License PRD §7): Platform Instance ID and license
+   * details for administrators and support. Unlike Screens 1–3, this view may
+   * show module entitlements.
+   */
+  getSystemInformation() {
+    const status = this.getStatus();
+    const installation = this.platform.getInstallation();
+    const lic = this.license;
+    const signingKeyId = this.licenseText
+      ? ((JSON.parse(this.licenseText) as { signature?: { keyId?: string } })
+          .signature?.keyId ?? null)
+      : null;
+    return {
+      platform: status.platform,
+      installation: {
+        installationId: installation?.installationId ?? null,
+        verification: status.installation.verification,
+        verifiedAt: installation?.verifiedAt ?? null,
+        simulated: status.installation.simulated,
+      },
+      license: {
+        ...status.license,
+        details: lic
+          ? {
+              licenseId: lic.licenseId,
+              activationCode: lic.activationCode,
+              customer: lic.customer,
+              licenseType: lic.licenseType,
+              versionScope: `${lic.versionScope.major}.x`,
+              issuedAt: lic.issuedAt,
+              validFrom: lic.validFrom,
+              expiresAt: lic.expiresAt,
+              limits: lic.limits,
+              signingKeyId,
+            }
+          : null,
+        hardwareBinding: this.fingerprintMatch
+          ? {
+              score: Math.round(this.fingerprintMatch.score * 100),
+              matched: this.fingerprintMatch.matched.length,
+              changed: this.fingerprintMatch.changed.length,
+              missing: this.fingerprintMatch.missing.length,
+            }
+          : null,
+      },
+      entitlements: this.getEntitlements(),
+      audit: {
+        events: this.audit.readAll().length,
+        chain: this.audit.verifyChain().valid ? 'INTACT' : 'BROKEN',
+      },
+      warnings: status.warnings,
+    };
+  }
+
   getStatus(): LicensingStatus {
     const { identity, intact } = this.platform.getIdentity();
     const installation = this.platform.getInstallation();
@@ -550,6 +627,7 @@ export class LicensingService implements OnApplicationBootstrap {
         verification: installation?.verification ?? 'NOT_RUN',
         environment: verified ? 'Verified' : 'Not verified',
         status: installation ? 'Complete' : 'Not installed',
+        simulated: installation?.source === 'DEV_SIMULATION',
       },
       license: {
         state: this.state,
