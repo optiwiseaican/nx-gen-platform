@@ -2,11 +2,19 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { formatDate, ReasonDialog, RoleCheckboxes, RoleChips, TemporaryPassword, UserStatusBadges } from "@/components/admin";
+import {
+  formatDate,
+  ReasonDialog,
+  RoleCheckboxes,
+  RoleChips,
+  SignatureManifest,
+  TemporaryPassword,
+  UserStatusBadges,
+} from "@/components/admin";
 import { AppShell, useAuthRedirect, usePrincipal } from "@/components/AppShell";
 import { TextField } from "@/components/forms";
 import { Button, Callout, FieldTable, StatusIcon } from "@/components/ui";
-import { AuditEntry, RoleSummary, UserSummary, usersApi } from "@/lib/api";
+import { AuditEntry, RoleSummary, SignatureInput, SignatureRecord, signaturesApi, UserSummary, usersApi } from "@/lib/api";
 
 type Action =
   | { kind: "profile" }
@@ -39,10 +47,12 @@ function describe(e: AuditEntry): string {
 function UserDetail() {
   const principal = usePrincipal();
   const redirect = useAuthRedirect();
+  const canSeeSignatures = principal.permissions.includes("audit.view");
   const [id, setId] = useState<string | null>(null);
   const [user, setUser] = useState<UserSummary | null>(null);
   const [roles, setRoles] = useState<RoleSummary[]>([]);
   const [history, setHistory] = useState<AuditEntry[]>([]);
+  const [signatures, setSignatures] = useState<SignatureRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [action, setAction] = useState<Action | null>(null);
   const [profile, setProfile] = useState({ fullName: "", email: "" });
@@ -60,11 +70,12 @@ function UserDetail() {
         setRoles(r.roles);
         setProfile({ fullName: u.fullName, email: u.email ?? "" });
         setSelectedRoles(u.roles);
+        if (canSeeSignatures) setSignatures(await signaturesApi.list({ table: "users", record: userId }));
       } catch (err) {
         if (!redirect(err)) setError(err instanceof Error ? err.message : "Could not load the user.");
       }
     },
-    [redirect],
+    [redirect, canSeeSignatures],
   );
 
   useEffect(() => {
@@ -88,33 +99,33 @@ function UserDetail() {
   const targetIsSuper = user.roles.includes("SUPER_ADMINISTRATOR");
   const canManage = principal.permissions.includes("users.manage") && (!targetIsSuper || actorIsSuper);
 
-  async function run(reason: string) {
+  async function run(reason: string, signature?: SignatureInput) {
     if (!action || !user) return;
     const uid = user.id;
     let message = "";
     switch (action.kind) {
       case "profile":
-        await usersApi.updateProfile(uid, { ...profile, reason });
+        await usersApi.updateProfile(uid, { ...profile, reason, signature });
         message = "Profile updated.";
         break;
       case "roles":
-        await usersApi.setRoles(uid, selectedRoles, reason);
+        await usersApi.setRoles(uid, selectedRoles, reason, signature);
         message = "Roles updated. The change applies to the user's next request.";
         break;
       case "disable":
-        await usersApi.disable(uid, reason);
+        await usersApi.disable(uid, reason, signature);
         message = "Account disabled. The user has been signed out everywhere.";
         break;
       case "enable":
-        await usersApi.enable(uid, reason);
+        await usersApi.enable(uid, reason, signature);
         message = "Account enabled.";
         break;
       case "unlock":
-        await usersApi.unlock(uid, reason);
+        await usersApi.unlock(uid, reason, signature);
         message = "Account unlocked.";
         break;
       case "reset": {
-        const res = await usersApi.resetPassword(uid, reason);
+        const res = await usersApi.resetPassword(uid, reason, signature);
         setTempPassword(res.temporaryPassword);
         message = "Password reset. The user has been signed out and must choose a new password.";
         break;
@@ -126,26 +137,29 @@ function UserDetail() {
     await load(uid);
   }
 
-  const dialog: Record<Action["kind"], { title: string; description: string; confirm: string; destructive?: boolean }> = {
-    profile: { title: "Save profile changes", description: `Update the name or email of ${user.fullName}.`, confirm: "Save" },
+  const dialog: Record<Action["kind"], { title: string; description: string; confirm: string; destructive?: boolean; action: string }> = {
+    profile: { title: "Save profile changes", description: `Update the name or email of ${user.fullName}.`, confirm: "Save", action: "USER_PROFILE_UPDATE" },
     roles: {
       title: "Change roles",
       description: `New roles for ${user.fullName}: ${selectedRoles.join(", ") || "none"}. Permissions change immediately.`,
       confirm: "Change Roles",
+      action: "USER_ROLES_CHANGE",
     },
     disable: {
       title: "Disable account",
       description: `${user.fullName} will be signed out and unable to sign in. The account and its history are kept.`,
       confirm: "Disable",
       destructive: true,
+      action: "USER_DISABLE",
     },
-    enable: { title: "Enable account", description: `${user.fullName} will be able to sign in again.`, confirm: "Enable" },
-    unlock: { title: "Unlock account", description: `Clear the failed sign-in lock on ${user.fullName}.`, confirm: "Unlock" },
+    enable: { title: "Enable account", description: `${user.fullName} will be able to sign in again.`, confirm: "Enable", action: "USER_ENABLE" },
+    unlock: { title: "Unlock account", description: `Clear the failed sign-in lock on ${user.fullName}.`, confirm: "Unlock", action: "USER_UNLOCK" },
     reset: {
       title: "Reset password",
       description: `A new temporary password will be generated. ${user.fullName} is signed out and must change it at next sign-in.`,
       confirm: "Reset Password",
       destructive: true,
+      action: "USER_PASSWORD_RESET",
     },
   };
   const d = action ? dialog[action.kind] : null;
@@ -254,6 +268,18 @@ function UserDetail() {
         </section>
       )}
 
+      {canSeeSignatures && (
+        <section className="rounded-lg border border-line bg-white">
+          <h2 className="border-b border-line px-5 py-3 font-semibold">Electronic signatures</h2>
+          <div className="space-y-3 p-5">
+            {signatures.map((sig) => (
+              <SignatureManifest key={sig.id} sig={sig} />
+            ))}
+            {signatures.length === 0 && <p className="text-sm text-muted">No signed changes for this account.</p>}
+          </div>
+        </section>
+      )}
+
       <section className="rounded-lg border border-line bg-white">
         <h2 className="border-b border-line px-5 py-3 font-semibold">History</h2>
         <ul className="divide-y divide-line text-sm">
@@ -281,6 +307,7 @@ function UserDetail() {
           description={d.description}
           confirmLabel={d.confirm}
           destructive={d.destructive}
+          action={d.action}
           onConfirm={run}
           onClose={() => setAction(null)}
         />

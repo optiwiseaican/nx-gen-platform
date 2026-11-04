@@ -5,7 +5,7 @@ import { ReasonDialog } from "@/components/admin";
 import { AppShell, useAuthRedirect, usePrincipal } from "@/components/AppShell";
 import { TextField } from "@/components/forms";
 import { Badge, Button, Callout, StatusIcon } from "@/components/ui";
-import { RoleSummary, usersApi } from "@/lib/api";
+import { RoleSummary, SignatureInput, usersApi } from "@/lib/api";
 
 type Permission = { code: string; description: string };
 
@@ -39,13 +39,13 @@ function RolesMatrix() {
     void load();
   }, [load]);
 
-  async function save(reason: string) {
+  async function save(reason: string, signature?: SignatureInput) {
     if (confirm === "edit" && editing) {
-      await usersApi.setRolePermissions(editing, draft, reason);
+      await usersApi.setRolePermissions(editing, draft, reason, signature);
       setNotice("Role permissions updated. Users holding this role are affected immediately.");
       setEditing(null);
     } else if (confirm === "create") {
-      await usersApi.createRole({ ...newRole, permissions: newPerms, reason });
+      await usersApi.createRole({ ...newRole, permissions: newPerms, reason, signature });
       setNotice(`Role ${newRole.name} created.`);
       setCreating(false);
       setNewRole({ code: "", name: "", description: "" });
@@ -214,6 +214,7 @@ function RolesMatrix() {
             : `${roles.find((r) => r.code === editing)?.name}: ${draft.join(", ") || "no permissions"}.`
         }
         confirmLabel={confirm === "create" ? "Create Role" : "Save Permissions"}
+        action={confirm === "create" ? "ROLE_CREATE" : "ROLE_PERMISSIONS_CHANGE"}
         onConfirm={save}
         onClose={() => setConfirm(null)}
       />

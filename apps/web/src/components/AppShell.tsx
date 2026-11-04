@@ -51,6 +51,7 @@ const NAV = [
   { href: "/users/", label: "Users", permission: "users.view" },
   { href: "/roles/", label: "Roles", permission: "users.view" },
   { href: "/audit/", label: "Audit Trail", permission: "audit.view" },
+  { href: "/security/", label: "Security", permission: "audit.view" },
   { href: "/system/", label: "System Information", permission: "system.view" },
 ];
 

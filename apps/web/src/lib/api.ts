@@ -106,7 +106,15 @@ export interface SetupStatus {
   databaseConfigured: boolean;
   licenseActive: boolean;
   administratorExists: boolean;
-  passwordPolicy: { minLength: number; maxAgeDays: number; history: number };
+  passwordPolicy: {
+    minLength: number;
+    maxAgeDays: number;
+    history: number;
+    maxFailedLogins: number;
+    lockoutMinutes: number;
+    sessionIdleMinutes: number;
+    sessionMaxHours: number;
+  };
 }
 
 export interface AuditEntry {
@@ -178,25 +186,89 @@ export interface RoleSummary {
 
 const put = <T>(path: string, body: unknown) => call<T>(path, { method: "PUT", body: JSON.stringify(body) });
 
+export interface SignatureInput {
+  username: string;
+  password: string;
+  meaning: string;
+}
+
+export interface SignaturePolicy {
+  actionCode: string;
+  description: string;
+  required: boolean;
+  defaultMeaning: string;
+  locked: boolean;
+}
+
+export interface SignatureMeaning {
+  code: string;
+  label: string;
+  statement: string;
+}
+
+export interface SignatureRecord {
+  id: string;
+  signedAt: string;
+  signerUserId: string;
+  signerUsername: string;
+  signerFullName: string;
+  meaningCode: string;
+  meaningLabel: string;
+  meaningStatement: string;
+  reason: string;
+  actionCode: string;
+  tableName: string;
+  recordId: string;
+  recordVersion: number | null;
+  signedContent: Record<string, unknown>;
+  contentHash: string;
+  intact: boolean;
+}
+
+export const signaturesApi = {
+  policy: () => call<{ policies: SignaturePolicy[]; meanings: SignatureMeaning[] }>("/signatures/policy"),
+  updatePolicy: (
+    changes: { actionCode: string; required?: boolean; defaultMeaning?: string }[],
+    reason: string,
+    signature?: SignatureInput,
+  ) => put<SignaturePolicy[]>("/signatures/policy", { changes, reason, signature }),
+  list: (params: { table?: string; record?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (params.table) q.set("table", params.table);
+    if (params.record) q.set("record", params.record);
+    return call<SignatureRecord[]>(`/signatures?${q}`);
+  },
+};
+
 export const usersApi = {
   list: () => call<UserSummary[]>("/users"),
   get: (id: string) => call<UserSummary>(`/users/${id}`),
   history: (id: string) => call<AuditEntry[]>(`/users/${id}/history`),
-  create: (body: { username: string; fullName: string; email?: string; roles: string[]; reason: string }) =>
+  create: (body: { username: string; fullName: string; email?: string; roles: string[]; reason: string; signature?: SignatureInput }) =>
     post<{ user: UserSummary; temporaryPassword: string }>("/users", body),
-  updateProfile: (id: string, body: { fullName: string; email: string; reason: string }) =>
+  updateProfile: (id: string, body: { fullName: string; email: string; reason: string; signature?: SignatureInput }) =>
     put<UserSummary>(`/users/${id}/profile`, body),
-  setRoles: (id: string, roles: string[], reason: string) => put<UserSummary>(`/users/${id}/roles`, { roles, reason }),
-  disable: (id: string, reason: string) => post<UserSummary>(`/users/${id}/disable`, { reason }),
-  enable: (id: string, reason: string) => post<UserSummary>(`/users/${id}/enable`, { reason }),
-  unlock: (id: string, reason: string) => post<UserSummary>(`/users/${id}/unlock`, { reason }),
-  resetPassword: (id: string, reason: string) =>
-    post<{ user: UserSummary; temporaryPassword: string }>(`/users/${id}/reset-password`, { reason }),
+  setRoles: (id: string, roles: string[], reason: string, signature?: SignatureInput) =>
+    put<UserSummary>(`/users/${id}/roles`, { roles, reason, signature }),
+  disable: (id: string, reason: string, signature?: SignatureInput) =>
+    post<UserSummary>(`/users/${id}/disable`, { reason, signature }),
+  enable: (id: string, reason: string, signature?: SignatureInput) =>
+    post<UserSummary>(`/users/${id}/enable`, { reason, signature }),
+  unlock: (id: string, reason: string, signature?: SignatureInput) =>
+    post<UserSummary>(`/users/${id}/unlock`, { reason, signature }),
+  resetPassword: (id: string, reason: string, signature?: SignatureInput) =>
+    post<{ user: UserSummary; temporaryPassword: string }>(`/users/${id}/reset-password`, { reason, signature }),
   roles: () => call<{ roles: RoleSummary[]; permissions: { code: string; description: string }[] }>("/roles"),
-  createRole: (body: { code: string; name: string; description: string; permissions: string[]; reason: string }) =>
-    post<RoleSummary>("/roles", body),
-  setRolePermissions: (code: string, permissions: string[], reason: string) =>
-    put<RoleSummary>(`/roles/${code}/permissions`, { permissions, reason }),
+  createRole: (body: {
+    code: string;
+    name: string;
+    description: string;
+    permissions: string[];
+    reason: string;
+    signature?: SignatureInput;
+  }) => post<RoleSummary>("/roles", body),
+  setRolePermissions: (code: string, permissions: string[], reason: string, signature?: SignatureInput) =>
+    put<RoleSummary>(`/roles/${code}/permissions`, { permissions, reason, signature }),
 };
 
 export const ROLE_NAMES: Record<string, string> = {

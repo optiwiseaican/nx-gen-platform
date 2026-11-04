@@ -20,6 +20,8 @@ import { NXGEN_CONFIG } from '../config/nxgen.config';
 import type { NxGenConfig } from '../config/nxgen.config';
 import { ActorContext, DatabaseService } from '../database/database.service';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
+import { SignatureService } from '../signatures/signature.service';
+import type { SignatureInput } from '../signatures/signature.service';
 
 export const SUPER_ADMIN = 'SUPER_ADMINISTRATOR';
 
@@ -131,6 +133,7 @@ export class UserAdminService {
     private readonly db: DatabaseService,
     private readonly audit: AuditService,
     private readonly platform: PlatformIdentityService,
+    private readonly signatures: SignatureService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -387,6 +390,14 @@ export class UserAdminService {
     }
   }
 
+  private async userVersion(client: PoolClient, id: string): Promise<number> {
+    const { rows } = await client.query<{ version_no: number }>(
+      'SELECT version_no FROM users WHERE id = $1',
+      [id],
+    );
+    return rows[0].version_no;
+  }
+
   // ---------------------------------------------------------------------------
   // User mutations
   // ---------------------------------------------------------------------------
@@ -401,6 +412,7 @@ export class UserAdminService {
       reason: unknown;
     },
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ): Promise<{ user: UserSummary; temporaryPassword: string }> {
     const reason = this.requireReason(input.reason);
     const username =
@@ -438,6 +450,13 @@ export class UserAdminService {
     );
     const hash = await hashPassword(temporaryPassword);
 
+    const signer = await this.signatures.authorize(
+      'USER_CREATE',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
     const id = await this.db.transaction(
       this.actor(principal, reason, origin),
       async (client) => {
@@ -489,6 +508,18 @@ export class UserAdminService {
           reason,
           { username, roles: roles.join(',') },
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'users',
+              recordId: userId,
+              recordVersion: 1,
+              content: { userId, username, fullName, email, roles },
+            },
+            origin,
+          );
         return userId;
       },
     );
@@ -500,8 +531,16 @@ export class UserAdminService {
     id: string,
     input: { fullName?: unknown; email?: unknown; reason: unknown },
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ): Promise<UserSummary> {
     const reason = this.requireReason(input.reason);
+    const signer = await this.signatures.authorize(
+      'USER_PROFILE_UPDATE',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
     await this.db.transaction(
       this.actor(principal, reason, origin),
       async (client) => {
@@ -542,6 +581,23 @@ export class UserAdminService {
           { id },
           reason,
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'users',
+              recordId: id,
+              recordVersion: await this.userVersion(client, id),
+              content: {
+                userId: id,
+                username: target.username,
+                from: { fullName: target.fullName, email: target.email },
+                to: { fullName, email },
+              },
+            },
+            origin,
+          );
       },
     );
     return this.getUser(id);
@@ -552,9 +608,17 @@ export class UserAdminService {
     id: string,
     input: { roles: unknown; reason: unknown },
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ) {
     const reason = this.requireReason(input.reason);
     this.assertNotSelf(principal, id, 'change the roles of');
+    const signer = await this.signatures.authorize(
+      'USER_ROLES_CHANGE',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
     await this.db.transaction(
       this.actor(principal, reason, origin),
       async (client) => {
@@ -587,6 +651,22 @@ export class UserAdminService {
             to: roles.join(','),
           },
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'users',
+              recordId: id,
+              recordVersion: await this.userVersion(client, id),
+              content: {
+                userId: id,
+                username: target.username,
+                roles: { from: target.roles, to: roles },
+              },
+            },
+            origin,
+          );
       },
     );
     return this.getUser(id);
@@ -598,12 +678,20 @@ export class UserAdminService {
     status: 'ACTIVE' | 'DISABLED',
     reasonInput: unknown,
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ) {
     const reason = this.requireReason(reasonInput);
     this.assertNotSelf(
       principal,
       id,
       status === 'DISABLED' ? 'disable' : 'enable',
+    );
+    const signer = await this.signatures.authorize(
+      status === 'DISABLED' ? 'USER_DISABLE' : 'USER_ENABLE',
+      principal,
+      signature,
+      reason,
+      origin,
     );
     await this.db.transaction(
       this.actor(principal, reason, origin),
@@ -634,6 +722,22 @@ export class UserAdminService {
           { id },
           reason,
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'users',
+              recordId: id,
+              recordVersion: await this.userVersion(client, id),
+              content: {
+                userId: id,
+                username: target.username,
+                status: { from: target.status, to: status },
+              },
+            },
+            origin,
+          );
       },
     );
     return this.getUser(id);
@@ -644,8 +748,16 @@ export class UserAdminService {
     id: string,
     reasonInput: unknown,
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ) {
     const reason = this.requireReason(reasonInput);
+    const signer = await this.signatures.authorize(
+      'USER_UNLOCK',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
     await this.db.transaction(
       this.actor(principal, reason, origin),
       async (client) => {
@@ -666,6 +778,22 @@ export class UserAdminService {
           reason,
           { failedAttempts: target.failedLoginCount },
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'users',
+              recordId: id,
+              recordVersion: await this.userVersion(client, id),
+              content: {
+                userId: id,
+                username: target.username,
+                failedAttempts: target.failedLoginCount,
+              },
+            },
+            origin,
+          );
       },
     );
     return this.getUser(id);
@@ -676,10 +804,18 @@ export class UserAdminService {
     id: string,
     reasonInput: unknown,
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ) {
     const reason = this.requireReason(reasonInput);
     this.assertNotSelf(principal, id, 'reset the password of');
     let temporaryPassword = '';
+    const signer = await this.signatures.authorize(
+      'USER_PASSWORD_RESET',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
     await this.db.transaction(
       this.actor(principal, reason, origin),
       async (client) => {
@@ -714,6 +850,18 @@ export class UserAdminService {
           { id },
           reason,
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'users',
+              recordId: id,
+              recordVersion: await this.userVersion(client, id),
+              content: { userId: id, username: target.username },
+            },
+            origin,
+          );
       },
     );
     return { user: await this.getUser(id), temporaryPassword };
@@ -793,6 +941,7 @@ export class UserAdminService {
     code: string,
     input: { permissions: unknown; reason: unknown },
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ) {
     const reason = this.requireReason(input.reason);
     if (code === SUPER_ADMIN) {
@@ -800,6 +949,13 @@ export class UserAdminService {
         'The Super Administrator role always holds every permission and cannot be edited.',
       );
     }
+    const signer = await this.signatures.authorize(
+      'ROLE_PERMISSIONS_CHANGE',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
     await this.db.transaction(
       this.actor(principal, reason, origin),
       async (client) => {
@@ -834,6 +990,20 @@ export class UserAdminService {
             to: permissions.join(',') || null,
           },
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'roles',
+              recordId: code,
+              content: {
+                role: code,
+                permissions: { from: before, to: permissions },
+              },
+            },
+            origin,
+          );
       },
     );
     return (await this.listRoles()).find((r) => r.code === code)!;
@@ -849,6 +1019,7 @@ export class UserAdminService {
       reason: unknown;
     },
     origin: RequestOrigin,
+    signature?: SignatureInput,
   ) {
     const reason = this.requireReason(input.reason);
     const code =
@@ -877,6 +1048,13 @@ export class UserAdminService {
         message: 'Describe what this role is for.',
         field: 'description',
       });
+    const signer = await this.signatures.authorize(
+      'ROLE_CREATE',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
     await this.db.transaction(
       this.actor(principal, reason, origin),
       async (client) => {
@@ -913,6 +1091,18 @@ export class UserAdminService {
             permissions: permissions.join(',') || null,
           },
         );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'roles',
+              recordId: code,
+              recordVersion: 1,
+              content: { role: code, name, description, permissions },
+            },
+            origin,
+          );
       },
     );
     return (await this.listRoles()).find((r) => r.code === code)!;

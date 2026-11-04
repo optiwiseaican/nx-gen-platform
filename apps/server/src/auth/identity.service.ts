@@ -100,6 +100,10 @@ export class IdentityService {
         minLength: this.policy.passwordMinLength,
         maxAgeDays: this.policy.passwordMaxAgeDays,
         history: this.policy.passwordHistory,
+        maxFailedLogins: this.policy.maxFailedLogins,
+        lockoutMinutes: this.policy.lockoutMinutes,
+        sessionIdleMinutes: this.policy.sessionIdleMinutes,
+        sessionMaxHours: this.policy.sessionMaxHours,
       },
     };
   }

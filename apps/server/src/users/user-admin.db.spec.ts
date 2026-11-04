@@ -18,6 +18,7 @@ import { DatabaseService } from '../database/database.service';
 import { migrate } from '../database/migrator';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
 import { SecureStorageService } from '../security/secure-storage.service';
+import { SignatureService } from '../signatures/signature.service';
 import { UserAdminService } from './user-admin.service';
 
 loadEnvFile();
@@ -96,7 +97,24 @@ describeDb('User & Role Management on PostgreSQL', () => {
     identity = new IdentityService(config, db, audit, platform, {
       isActive: () => true,
     });
-    admin = new UserAdminService(config, db, audit, platform);
+    admin = new UserAdminService(
+      config,
+      db,
+      audit,
+      platform,
+      new SignatureService(config, db, audit, platform),
+    );
+    // These tests cover the administration rules; signatures are covered in esignature.db.spec.ts.
+    await db.transaction(
+      {
+        actorId: 'TEST',
+        reason: 'Isolate user-admin rules from signature policy',
+      },
+      (c) =>
+        c.query(
+          'UPDATE signature_policies SET required = false WHERE NOT locked',
+        ),
+    );
     await identity.createInitialAdministrator(
       { username: 'root.admin', fullName: 'Root Admin', password: ROOT_PW },
       ORIGIN,

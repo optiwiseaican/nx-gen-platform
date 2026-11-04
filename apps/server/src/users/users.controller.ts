@@ -11,9 +11,11 @@ import {
 import { CurrentPrincipal, RequirePermission } from '../auth/auth.decorators';
 import { originOf } from '../auth/auth.types';
 import type { NxGenRequest, Principal } from '../auth/auth.types';
+import type { SignatureInput } from '../signatures/signature.service';
 import { UserAdminService } from './user-admin.service';
 
 type Payload = Record<string, unknown>;
+const sig = (body: Payload) => body?.signature as SignatureInput | undefined;
 
 @Controller('users')
 export class UsersController {
@@ -54,6 +56,7 @@ export class UsersController {
         reason: body?.reason,
       },
       originOf(req),
+      sig(body),
     );
   }
 
@@ -70,6 +73,7 @@ export class UsersController {
       id,
       { fullName: body?.fullName, email: body?.email, reason: body?.reason },
       originOf(req),
+      sig(body),
     );
   }
 
@@ -86,6 +90,7 @@ export class UsersController {
       id,
       { roles: body?.roles, reason: body?.reason },
       originOf(req),
+      sig(body),
     );
   }
 
@@ -98,7 +103,14 @@ export class UsersController {
     @CurrentPrincipal() p: Principal,
     @Req() req: NxGenRequest,
   ) {
-    return this.users.setStatus(p, id, 'DISABLED', body?.reason, originOf(req));
+    return this.users.setStatus(
+      p,
+      id,
+      'DISABLED',
+      body?.reason,
+      originOf(req),
+      sig(body),
+    );
   }
 
   @RequirePermission('users.manage')
@@ -110,7 +122,14 @@ export class UsersController {
     @CurrentPrincipal() p: Principal,
     @Req() req: NxGenRequest,
   ) {
-    return this.users.setStatus(p, id, 'ACTIVE', body?.reason, originOf(req));
+    return this.users.setStatus(
+      p,
+      id,
+      'ACTIVE',
+      body?.reason,
+      originOf(req),
+      sig(body),
+    );
   }
 
   @RequirePermission('users.manage')
@@ -122,7 +141,7 @@ export class UsersController {
     @CurrentPrincipal() p: Principal,
     @Req() req: NxGenRequest,
   ) {
-    return this.users.unlock(p, id, body?.reason, originOf(req));
+    return this.users.unlock(p, id, body?.reason, originOf(req), sig(body));
   }
 
   @RequirePermission('users.manage')
@@ -134,7 +153,13 @@ export class UsersController {
     @CurrentPrincipal() p: Principal,
     @Req() req: NxGenRequest,
   ) {
-    return this.users.resetPassword(p, id, body?.reason, originOf(req));
+    return this.users.resetPassword(
+      p,
+      id,
+      body?.reason,
+      originOf(req),
+      sig(body),
+    );
   }
 }
 
@@ -168,6 +193,7 @@ export class RolesController {
         reason: body?.reason,
       },
       originOf(req),
+      sig(body),
     );
   }
 
@@ -184,6 +210,7 @@ export class RolesController {
       code,
       { permissions: body?.permissions, reason: body?.reason },
       originOf(req),
+      sig(body),
     );
   }
 }
