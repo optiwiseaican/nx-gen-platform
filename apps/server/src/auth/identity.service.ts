@@ -17,6 +17,7 @@ import { LicensingService } from '../licensing/licensing.service';
 import { Principal, RequestOrigin, SETUP_ACTOR } from './auth.types';
 import {
   checkPasswordPolicy,
+  EMAIL_PATTERN,
   hashPassword,
   USERNAME_PATTERN,
   verifyPassword,
@@ -43,7 +44,7 @@ interface SessionRow {
   now: Date;
 }
 
-const GENERIC_LOGIN_FAILURE = 'Invalid username or password.';
+const GENERIC_LOGIN_FAILURE = 'Invalid username, email or password.';
 const hashToken = (token: string) =>
   createHash('sha256').update(token).digest('hex');
 
@@ -208,7 +209,7 @@ export class IdentityService {
         field: 'fullName',
       });
     }
-    if (email && !/^[^@\s]+@[^@\s]+$/.test(email.trim())) {
+    if (email && !EMAIL_PATTERN.test(email.trim())) {
       throw new BadRequestException({
         message: 'Enter a valid email address.',
         field: 'email',
@@ -272,13 +273,21 @@ export class IdentityService {
   // Login / logout
   // ---------------------------------------------------------------------------
 
-  private async findUser(username: string): Promise<UserRow | null> {
+  /** Looks an account up by username, or by email when the identifier contains "@". */
+  private async findUser(identifier: string): Promise<UserRow | null> {
+    const byEmail = identifier.includes('@');
+    if (
+      byEmail
+        ? !EMAIL_PATTERN.test(identifier)
+        : !USERNAME_PATTERN.test(identifier)
+    )
+      return null;
     const [row] = await this.db.query<UserRow>(
       `SELECT u.id, u.username, u.full_name, u.password_hash, u.password_changed_at, u.must_change_password,
               u.status, u.is_deleted, s.failed_login_count, s.locked_until
          FROM users u LEFT JOIN user_security_state s ON s.user_id = u.id
-        WHERE u.username = $1`,
-      [username],
+        WHERE ${byEmail ? 'lower(u.email) = $1' : 'u.username = $1'}`,
+      [identifier],
     );
     return row ?? null;
   }
@@ -316,10 +325,9 @@ export class IdentityService {
   ): Promise<{ token: string; principal: Principal }> {
     if (!this.db.enabled)
       throw new ConflictException('The NxGen database is not configured.');
+    // Username or email — both identify exactly one account.
     const username = (rawUsername ?? '').trim().toLowerCase();
-    const user = USERNAME_PATTERN.test(username)
-      ? await this.findUser(username)
-      : null;
+    const user = username ? await this.findUser(username) : null;
 
     if (!user || user.is_deleted || user.status !== 'ACTIVE') {
       await verifyPassword(password ?? '', null); // equalize timing
@@ -333,7 +341,9 @@ export class IdentityService {
           recordId: user?.id,
         },
         {
-          reason: !user ? 'Unknown username' : 'Account disabled or deleted',
+          reason: !user
+            ? 'Unknown username or email'
+            : 'Account disabled or deleted',
         },
       );
       throw new UnauthorizedException(GENERIC_LOGIN_FAILURE);

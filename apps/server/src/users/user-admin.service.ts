@@ -140,6 +140,24 @@ export class UserAdminService {
   // Queries
   // ---------------------------------------------------------------------------
 
+  /** Emails sign people in, so one email may identify only one account (migration 004). */
+  private async assertEmailAvailable(
+    client: PoolClient,
+    email: string | null,
+    exceptUserId?: string,
+  ) {
+    if (!email) return;
+    const { rows } = await client.query(
+      'SELECT 1 FROM users WHERE lower(email) = lower($1) AND id IS DISTINCT FROM $2',
+      [email, exceptUserId ?? null],
+    );
+    if (rows.length)
+      throw new ConflictException({
+        message: 'This email is already used by another account.',
+        field: 'email',
+      });
+  }
+
   async listUsers(): Promise<UserSummary[]> {
     const rows = await this.db.query<UserRow>(
       `${USER_SELECT} ORDER BY u.status, lower(u.full_name)`,
@@ -480,6 +498,7 @@ export class UserAdminService {
             field: 'username',
           });
         }
+        await this.assertEmailAvailable(client, email);
         const { rows } = await client.query<{ id: string }>(
           `INSERT INTO users (username, full_name, email, password_hash, password_changed_at, must_change_password)
          VALUES ($1, $2, $3, $4, now(), true) RETURNING id`,
@@ -569,6 +588,7 @@ export class UserAdminService {
           });
         if (fullName === target.fullName && email === target.email)
           throw new BadRequestException('Nothing changed.');
+        await this.assertEmailAvailable(client, email, id);
         await client.query(
           'UPDATE users SET full_name = $2, email = $3 WHERE id = $1',
           [id, fullName, email],

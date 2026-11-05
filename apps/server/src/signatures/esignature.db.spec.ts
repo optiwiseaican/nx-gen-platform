@@ -80,7 +80,12 @@ describeDb('Electronic signatures on PostgreSQL (21 CFR 11 Subpart C)', () => {
     signatures = new SignatureService(config, db, audit, platform);
     admin = new UserAdminService(config, db, audit, platform, signatures);
     await identity.createInitialAdministrator(
-      { username: 'root.admin', fullName: 'Rita Root', password: ROOT_PW },
+      {
+        username: 'root.admin',
+        fullName: 'Rita Root',
+        email: 'rita.root@example.com',
+        password: ROOT_PW,
+      },
       ORIGIN,
     );
     const login = await identity.login('root.admin', ROOT_PW, ORIGIN);
@@ -187,6 +192,15 @@ describeDb('Electronic signatures on PostgreSQL (21 CFR 11 Subpart C)', () => {
       meaning: 'APPROVED',
       actionCode: 'USER_CREATE',
     });
+  });
+
+  it("accepts the signer's own email in place of the username", async () => {
+    const { user } = await newUser(
+      'email.signed',
+      sign(ROOT_PW, { username: 'Rita.Root@Example.com' }),
+    );
+    const [sig] = await signatures.list({ recordId: user.id });
+    expect(sig).toMatchObject({ signerUsername: 'root.admin', intact: true });
   });
 
   it('signatures cannot be modified, deleted or truncated', async () => {

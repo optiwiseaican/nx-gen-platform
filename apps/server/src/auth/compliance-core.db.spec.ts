@@ -342,16 +342,29 @@ describeDb('Compliance Core on PostgreSQL', () => {
       expect(await identity.authenticate('not-a-token', ORIGIN)).toBeNull();
     });
 
-    it('gives the same answer for unknown users and wrong passwords, and audits both', async () => {
-      await expect(identity.login('nobody', STRONG, ORIGIN)).rejects.toThrow(
-        'Invalid username or password.',
+    it('signs in with the email address too, in any letter case', async () => {
+      const { principal } = await identity.login(
+        ' Asha@Example.COM ',
+        STRONG,
+        ORIGIN,
       );
+      expect(principal.username).toBe('admin');
+      await expect(
+        identity.login('asha@example.com', 'Wrong-Password-1', ORIGIN),
+      ).rejects.toThrow('Invalid username, email or password.');
+    });
+
+    it('gives the same answer for unknown users and wrong passwords, and audits both', async () => {
+      for (const who of ['nobody', 'nobody@example.com', 'not@valid@x'])
+        await expect(identity.login(who, STRONG, ORIGIN)).rejects.toThrow(
+          'Invalid username, email or password.',
+        );
       await expect(
         identity.login('admin', 'Wrong-Password-1', ORIGIN),
-      ).rejects.toThrow('Invalid username or password.');
+      ).rejects.toThrow('Invalid username, email or password.');
       const failures = await audit.list({ action: 'LOGIN_FAILED' });
       expect(failures.map((f) => f.reason)).toEqual(
-        expect.arrayContaining(['Unknown username', 'Wrong password']),
+        expect.arrayContaining(['Unknown username or email', 'Wrong password']),
       );
     });
 

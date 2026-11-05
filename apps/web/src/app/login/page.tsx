@@ -30,7 +30,7 @@ function LoginForm() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!username.trim() || !password) return setError("Enter your username and password.");
+    if (!username.trim() || !password) return setError("Enter your username or email, and your password.");
     setBusy(true);
     setError(null);
     try {
@@ -59,7 +59,7 @@ function LoginForm() {
             Complete <Link href="/setup/" className="font-semibold text-brand hover:underline">Administrator Setup</Link> first.
           </Callout>
         )}
-        <TextField id="username" label="Username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus spellCheck={false} />
+        <TextField id="username" label="Username or email" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoCapitalize="none" autoFocus spellCheck={false} />
         <TextField id="password" label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
         {error && <Callout tone="fail">{error}</Callout>}
         <Button type="submit" className="w-full" disabled={busy}>

@@ -231,6 +231,48 @@ describeDb('User & Role Management on PostgreSQL', () => {
     ).rejects.toThrow(/never reused/);
   });
 
+  it('keeps emails unique, because an email signs a person in', async () => {
+    await expect(
+      admin.createUser(
+        superAdmin,
+        {
+          username: 'other.person',
+          fullName: 'Other Person',
+          email: 'PRIYA@lab.example',
+          roles: ['OPERATOR'],
+          reason: REASON,
+        },
+        ORIGIN,
+      ),
+    ).rejects.toMatchObject({ response: { field: 'email' } });
+    const { user } = await admin.createUser(
+      superAdmin,
+      {
+        username: 'other.person',
+        fullName: 'Other Person',
+        roles: ['OPERATOR'],
+        reason: REASON,
+      },
+      ORIGIN,
+    );
+    await expect(
+      admin.updateProfile(
+        superAdmin,
+        user.id,
+        { email: 'priya@LAB.example', reason: REASON },
+        ORIGIN,
+      ),
+    ).rejects.toThrow(/already used/);
+    // The database itself enforces it too (migration 004).
+    await expect(
+      db.transaction({ actorId: superAdmin.userId, reason: REASON }, (c) =>
+        c.query("UPDATE users SET email = 'Priya@Lab.Example' WHERE id = $1", [
+          user.id,
+        ]),
+      ),
+    ).rejects.toThrow(/users_email_unique_idx/);
+  });
+
   it('changes roles with old/new values on the trail, effective immediately for the user', async () => {
     const { user, principal } = await createAndSignIn(
       superAdmin,
@@ -410,7 +452,7 @@ describeDb('User & Role Management on PostgreSQL', () => {
     expect(await identity.authenticate(token, ORIGIN)).toBeNull();
     await expect(
       identity.login('temp.worker', USER_PW, ORIGIN),
-    ).rejects.toThrow('Invalid username or password.');
+    ).rejects.toThrow('Invalid username, email or password.');
 
     await admin.setStatus(
       superAdmin,

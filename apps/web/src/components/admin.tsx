@@ -86,7 +86,7 @@ export function ReasonDialog({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (reason.trim().length < 5) return setError("Enter a reason for this change (at least 5 characters).");
-    if (signing && (!username || !password)) return setError("Enter your username and password to sign.");
+    if (signing && (!username || !password)) return setError("Enter your username or email, and your password, to sign.");
     setBusy(true);
     setError(null);
     try {
@@ -156,13 +156,15 @@ export function ReasonDialog({
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <label htmlFor="sig-username" className="mb-1 block text-sm font-semibold text-ink">
-                  Username
+                  Username or email
                 </label>
                 <input
                   id="sig-username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoComplete="username"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm"
                 />
               </div>

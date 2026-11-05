@@ -206,8 +206,22 @@ export class SignatureService {
         field: 'meaning',
       });
 
-    // 11.100(a): a signature belongs to exactly one individual — you can only sign as yourself.
-    if (username !== principal.username) {
+    const [user] = await this.db.query<{
+      email: string | null;
+      password_hash: string | null;
+      status: string;
+      is_deleted: boolean;
+    }>(
+      'SELECT email, password_hash, status, is_deleted FROM users WHERE id = $1',
+      [principal.userId],
+    );
+
+    // 11.100(a): a signature belongs to exactly one individual — you can only sign as yourself
+    // (identified by your username or your email).
+    const ownIdentifier =
+      username === principal.username ||
+      (!!user?.email && username === user.email.toLowerCase());
+    if (!ownIdentifier) {
       await this.failure(
         principal,
         origin,
@@ -221,13 +235,6 @@ export class SignatureService {
       });
     }
 
-    const [user] = await this.db.query<{
-      password_hash: string | null;
-      status: string;
-      is_deleted: boolean;
-    }>('SELECT password_hash, status, is_deleted FROM users WHERE id = $1', [
-      principal.userId,
-    ]);
     if (
       !user ||
       user.status !== 'ACTIVE' ||
