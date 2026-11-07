@@ -51,7 +51,7 @@ function makeHarness(
   const config: NxGenConfig = {
     production: false,
     database: null,
-    security: DEFAULT_SECURITY_POLICY,
+    security: { ...DEFAULT_SECURITY_POLICY },
     dataDir,
     platformVersion: PLATFORM_VERSION,
     trustedKeys: [{ keyId: vendor.keyId, publicKeyPem: vendor.publicKeyPem }],

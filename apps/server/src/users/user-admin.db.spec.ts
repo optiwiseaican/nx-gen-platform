@@ -76,7 +76,7 @@ describeDb('User & Role Management on PostgreSQL', () => {
     const config: NxGenConfig = {
       production: false,
       database: { ...baseDb!, schema },
-      security: DEFAULT_SECURITY_POLICY,
+      security: { ...DEFAULT_SECURITY_POLICY },
       dataDir,
       platformVersion: PLATFORM_VERSION,
       trustedKeys: [],

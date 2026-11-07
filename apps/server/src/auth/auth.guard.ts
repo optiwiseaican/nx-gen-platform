@@ -11,7 +11,15 @@ import {
   ALLOW_PASSWORD_CHANGE_KEY,
   PERMISSION_KEY,
 } from './auth.decorators';
-import { NxGenRequest, originOf, readSessionCookie } from './auth.types';
+import type { Response } from 'express';
+import {
+  NxGenRequest,
+  originOf,
+  readSessionCookie,
+  SESSION_IDLE_HEADER,
+  SERVER_TIME_HEADER,
+  SESSION_MAX_HEADER,
+} from './auth.types';
 import { IdentityService } from './identity.service';
 
 /**
@@ -41,6 +49,12 @@ export class AuthGuard implements CanActivate {
     if (token)
       req.principal =
         (await this.identity.authenticate(token, originOf(req))) ?? undefined;
+    if (req.principal?.session) {
+      const res = context.switchToHttp().getResponse<Response>();
+      res.setHeader(SESSION_IDLE_HEADER, req.principal.session.idleExpiresAt);
+      res.setHeader(SESSION_MAX_HEADER, req.principal.session.expiresAt);
+      res.setHeader(SERVER_TIME_HEADER, new Date().toISOString());
+    }
 
     if (access === 'public') return true;
     if (access === 'setup' && !(await this.identity.administratorExists()))

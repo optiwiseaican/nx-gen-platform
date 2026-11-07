@@ -32,7 +32,8 @@ export interface SecurityPolicy {
   sessionMaxHours: number;
 }
 
-export const DEFAULT_SECURITY_POLICY: SecurityPolicy = {
+/** Values in force before an administrator changes them (also seeded by migration 005). */
+export const DEFAULT_SECURITY_POLICY: Readonly<SecurityPolicy> = Object.freeze({
   passwordMinLength: 12,
   passwordHistory: 5,
   passwordMaxAgeDays: 90,
@@ -40,12 +41,33 @@ export const DEFAULT_SECURITY_POLICY: SecurityPolicy = {
   lockoutMinutes: 30,
   sessionIdleMinutes: 15,
   sessionMaxHours: 12,
-};
+});
+
+/**
+ * Validated limits. The database enforces the same ranges with CHECK
+ * constraints (migration 005), so no change can weaken the rules below them.
+ */
+export const SECURITY_POLICY_LIMITS: Readonly<
+  Record<keyof SecurityPolicy, { min: number; max: number }>
+> = Object.freeze({
+  passwordMinLength: { min: 8, max: 64 },
+  passwordHistory: { min: 1, max: 24 },
+  passwordMaxAgeDays: { min: 30, max: 365 },
+  maxFailedLogins: { min: 3, max: 10 },
+  lockoutMinutes: { min: 5, max: 1440 },
+  sessionIdleMinutes: { min: 5, max: 60 },
+  sessionMaxHours: { min: 1, max: 24 },
+});
 
 export interface NxGenConfig {
   production: boolean;
   /** null → no database configured: audit goes to the bootstrap journal file only. */
   database: DatabaseConfig | null;
+  /**
+   * The policy in force. One mutable object per process: loaded from
+   * security_settings at startup and updated in place when an administrator
+   * changes it, so every service reads the current rules.
+   */
   security: SecurityPolicy;
   dataDir: string;
   platformVersion: string;
@@ -148,7 +170,7 @@ export function loadConfig(): NxGenConfig {
   return {
     production,
     database: loadDatabaseConfig(),
-    security: DEFAULT_SECURITY_POLICY,
+    security: { ...DEFAULT_SECURITY_POLICY },
     dataDir: resolve(
       process.env.NXGEN_DATA_DIR ??
         resolve(__dirname, '..', '..', '.nxgen-data'),

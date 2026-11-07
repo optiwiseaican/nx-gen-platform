@@ -503,6 +503,10 @@ export class IdentityService {
          FROM users u WHERE u.id = $1`,
       [userId],
     );
+    const [s] = await this.db.query<{ last_seen_at: Date; expires_at: Date }>(
+      'SELECT last_seen_at, expires_at FROM sessions WHERE id = $1',
+      [sessionId],
+    );
     const expiresAt = u.password_changed_at
       ? new Date(
           u.password_changed_at.getTime() +
@@ -521,7 +525,45 @@ export class IdentityService {
         !expiresAt ||
         expiresAt.getTime() <= Date.now(),
       passwordExpiresAt: expiresAt?.toISOString() ?? null,
+      session: s
+        ? {
+            idleExpiresAt: new Date(
+              Math.min(
+                s.last_seen_at.getTime() +
+                  this.policy.sessionIdleMinutes * 60_000,
+                s.expires_at.getTime(),
+              ),
+            ).toISOString(),
+            expiresAt: s.expires_at.toISOString(),
+          }
+        : undefined,
     };
+  }
+
+  /**
+   * "Stay signed in" from the inactivity warning. Restarts the inactivity
+   * timer only; the maximum session length can never be extended.
+   */
+  async extendSession(
+    principal: Principal,
+    origin: RequestOrigin,
+  ): Promise<Principal> {
+    await this.db.query(
+      'UPDATE sessions SET last_seen_at = now() WHERE id = $1 AND ended_at IS NULL',
+      [principal.sessionId],
+    );
+    await this.securityEvent(
+      'SESSION_EXTENDED',
+      'INFO',
+      origin,
+      {
+        actor: principal.userId,
+        actorName: principal.fullName,
+        recordId: principal.userId,
+      },
+      { details: { sessionId: principal.sessionId } },
+    );
+    return this.loadPrincipal(principal.userId, principal.sessionId);
   }
 
   // ---------------------------------------------------------------------------

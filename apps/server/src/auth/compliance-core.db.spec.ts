@@ -64,7 +64,7 @@ describeDb('Compliance Core on PostgreSQL', () => {
     config = {
       production: false,
       database: { ...baseDb!, schema },
-      security: DEFAULT_SECURITY_POLICY,
+      security: { ...DEFAULT_SECURITY_POLICY },
       dataDir,
       platformVersion: PLATFORM_VERSION,
       trustedKeys: [],

@@ -66,6 +66,13 @@ function LoginForm() {
           {busy ? "Signing in…" : "Sign in"} <ArrowRight />
         </Button>
         <p className="text-xs text-muted">Sign-in attempts are recorded in the audit trail.</p>
+        <p className="border-t border-line pt-4 text-sm text-muted">
+          Forgot your password? Ask an administrator to reset it. If no administrator can sign in, use{" "}
+          <Link href="/recovery/" className="font-semibold text-brand hover:underline">
+            administrator recovery
+          </Link>
+          .
+        </p>
       </form>
     </main>
   );

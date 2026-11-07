@@ -13,6 +13,10 @@
  *                         [--modules ph,tlc] [--users N] [--devices N]
  *                         --out <file.nxlic> [--ledger <file.jsonl>]
  *   nxgen-license inspect <file.nxlic> [--trusted <trusted-keys.json>]
+ *   nxgen-license recover --key <private.pem> --request <NXRQ1-code> --ticket <support ref>
+ *                         --issued-by <support engineer> [--hours N (default 4, max 24)] [--ledger <file.jsonl>]
+ *       Administrator recovery: verify the customer through the support process FIRST,
+ *       then sign a one-time response bound to that platform, request and username.
  */
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
@@ -22,6 +26,8 @@ import {
   computeKeyId,
   generateSigningKeyPair,
   issueLicense,
+  issueRecoveryResponse,
+  parseRecoveryRequest,
   LICENSE_ERRORS,
   LICENSE_SIGNATURE_DOMAIN,
   licenseEnvelopeSchema,
@@ -175,6 +181,62 @@ function inspect(args: string[]) {
   }
 }
 
+function recover(args: string[]) {
+  const { values } = parseArgs({
+    args,
+    options: {
+      key: { type: 'string' },
+      request: { type: 'string' },
+      ticket: { type: 'string' },
+      'issued-by': { type: 'string' },
+      hours: { type: 'string' },
+      ledger: { type: 'string' },
+    },
+  });
+  if (!values.key || !values.request || !values.ticket || !values['issued-by']) {
+    fail('usage: recover --key <private.pem> --request <NXRQ1-code|file> --ticket <ref> --issued-by <name> [--hours N]');
+  }
+  const raw = existsSync(values.request) ? readFileSync(values.request, 'utf8') : values.request;
+  let request;
+  try {
+    request = parseRecoveryRequest(raw);
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const hours = values.hours ? parsePositiveInt(values.hours, '--hours') ?? 4 : 4;
+  let code: string;
+  try {
+    code = issueRecoveryResponse({
+      request,
+      privateKeyPem: readFileSync(values.key, 'utf8'),
+      supportReference: values.ticket,
+      issuedBy: values['issued-by'],
+      validHours: hours,
+    });
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const ledger = resolve(values.ledger ?? join(dirname(resolve(values.key)), '..', 'issued-recoveries.jsonl'));
+  appendFileSync(
+    ledger,
+    JSON.stringify({
+      issuedAt: new Date().toISOString(),
+      requestId: request.requestId,
+      platformInstanceId: request.platform.instanceId,
+      username: request.username,
+      ticket: values.ticket,
+      issuedBy: values['issued-by'],
+    }) + '\n',
+    { mode: 0o600 },
+  );
+  console.log(`Platform:  ${request.platform.instanceId}`);
+  console.log(`Username:  ${request.username}`);
+  console.log(`Request:   ${request.requestId} (created ${request.createdAt})`);
+  console.log(`Ledger:    ${ledger}`);
+  console.log('\nRecovery response code (single use, give only to the verified customer contact):\n');
+  console.log(code);
+}
+
 const [command, ...rest] = process.argv.slice(2);
 switch (command) {
   case 'keygen':
@@ -186,7 +248,10 @@ switch (command) {
   case 'inspect':
     inspect(rest);
     break;
+  case 'recover':
+    recover(rest);
+    break;
   default:
-    console.log('usage: nxgen-license <keygen|issue|inspect> [options]   (see source header for details)');
+    console.log('usage: nxgen-license <keygen|issue|inspect|recover> [options]   (see source header for details)');
     process.exit(command ? 1 : 0);
 }

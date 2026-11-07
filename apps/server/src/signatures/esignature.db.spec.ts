@@ -56,7 +56,7 @@ describeDb('Electronic signatures on PostgreSQL (21 CFR 11 Subpart C)', () => {
     config = {
       production: false,
       database: { ...baseDb!, schema },
-      security: DEFAULT_SECURITY_POLICY,
+      security: { ...DEFAULT_SECURITY_POLICY },
       dataDir,
       platformVersion: PLATFORM_VERSION,
       trustedKeys: [],

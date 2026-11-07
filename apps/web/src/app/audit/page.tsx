@@ -3,7 +3,28 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { AppShell, useAuthRedirect } from "@/components/AppShell";
 import { Badge, Button, Callout, StatusIcon, Tone } from "@/components/ui";
-import { AuditEntry, authApi } from "@/lib/api";
+import { AuditEntry, AuditFilters, authApi } from "@/lib/api";
+
+const CATEGORIES = ["DATA", "SECURITY", "USER_MANAGEMENT", "LICENSING", "PLATFORM", "SYSTEM"];
+const EMPTY = { action: "", actor: "", category: "", result: "", from: "", to: "" };
+
+/** Local date inputs → ISO bounds (the "to" date is inclusive of that whole day). */
+function toQuery(f: typeof EMPTY): AuditFilters {
+  const day = (d: string, add = 0) => {
+    if (!d) return undefined;
+    const t = new Date(`${d}T00:00:00`);
+    t.setDate(t.getDate() + add);
+    return t.toISOString();
+  };
+  return {
+    action: f.action.trim().toUpperCase() || undefined,
+    actor: f.actor || undefined,
+    category: f.category || undefined,
+    result: f.result || undefined,
+    from: day(f.from),
+    to: day(f.to, 1),
+  };
+}
 
 const TONE: Record<AuditEntry["result"], Tone> = { SUCCESS: "pass", FAILURE: "fail", INFO: "info" };
 
@@ -21,10 +42,15 @@ function AuditTrail() {
   const [more, setMore] = useState(true);
   const [open, setOpen] = useState<number | null>(null);
 
+  const [draft, setDraft] = useState(EMPTY);
+  const [applied, setApplied] = useState(EMPTY);
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState<{ filename: string; sha256: string } | null>(null);
+
   const load = useCallback(
     async (before?: number) => {
       try {
-        const res = await authApi.audit({ before });
+        const res = await authApi.audit({ ...toQuery(applied), before });
         setEntries((prev) => (before ? [...prev, ...res.entries] : res.entries));
         setChain(res.chain);
         setMore(res.entries.length === 50);
@@ -32,12 +58,41 @@ function AuditTrail() {
         if (!redirect(err)) setError(err instanceof Error ? err.message : "Could not load the audit trail.");
       }
     },
-    [redirect],
+    [redirect, applied],
   );
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  async function exportCsv() {
+    setExporting(true);
+    setError(null);
+    try {
+      const { blob, filename, sha256 } = await authApi.auditExport(toQuery(applied));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExported({ filename, sha256 });
+      await load(); // the export itself is now the newest entry
+    } catch (err) {
+      if (!redirect(err)) setError(err instanceof Error ? err.message : "The export failed.");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  const field = (k: keyof typeof EMPTY) => ({
+    id: `audit-${k}`,
+    value: draft[k],
+    onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setDraft({ ...draft, [k]: e.target.value }),
+    className: "w-full rounded-md border border-line bg-white px-2.5 py-1.5 text-sm",
+  });
+  const label = "mb-1 block text-xs font-semibold uppercase tracking-wide text-muted";
+  const filtered = Object.values(applied).some(Boolean);
 
   return (
     <div className="space-y-4">
@@ -50,6 +105,76 @@ function AuditTrail() {
             <Badge tone="fail">CHAIN BROKEN AT #{chain.brokenAtSequence}</Badge>
           ))}
       </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          setOpen(null);
+          setApplied({ ...draft });
+        }}
+        className="grid gap-3 rounded-lg border border-line bg-white p-4 sm:grid-cols-3 lg:grid-cols-7"
+        aria-label="Filter the audit trail"
+      >
+        <div className="lg:col-span-2">
+          <label htmlFor="audit-action" className={label}>Action</label>
+          <input {...field("action")} placeholder="e.g. LOGIN_FAILED" spellCheck={false} />
+        </div>
+        <div>
+          <label htmlFor="audit-actor" className={label}>User</label>
+          <input {...field("actor")} placeholder="Full name" />
+        </div>
+        <div>
+          <label htmlFor="audit-category" className={label}>Category</label>
+          <select {...field("category")}>
+            <option value="">All</option>
+            {CATEGORIES.map((c) => (
+              <option key={c} value={c}>{c.replace("_", " ")}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label htmlFor="audit-result" className={label}>Result</label>
+          <select {...field("result")}>
+            <option value="">All</option>
+            <option value="SUCCESS">Success</option>
+            <option value="FAILURE">Failure</option>
+            <option value="INFO">Info</option>
+          </select>
+        </div>
+        <div>
+          <label htmlFor="audit-from" className={label}>From</label>
+          <input type="date" {...field("from")} />
+        </div>
+        <div>
+          <label htmlFor="audit-to" className={label}>To</label>
+          <input type="date" {...field("to")} />
+        </div>
+        <div className="flex flex-wrap items-center gap-3 sm:col-span-3 lg:col-span-7">
+          <Button type="submit">Apply filters</Button>
+          {filtered && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                setDraft(EMPTY);
+                setApplied(EMPTY);
+              }}
+            >
+              Clear
+            </Button>
+          )}
+          <span className="flex-1" />
+          <Button type="button" variant="secondary" onClick={() => void exportCsv()} disabled={exporting}>
+            {exporting ? "Exporting…" : filtered ? "Export filtered (CSV)" : "Export all (CSV)"}
+          </Button>
+        </div>
+      </form>
+      {exported && (
+        <Callout tone="pass" title="Export saved and recorded in the audit trail">
+          <span className="font-mono text-xs">{exported.filename}</span>
+          <span className="mt-1 block break-all font-mono text-xs">SHA-256 {exported.sha256}</span>
+          <span className="mt-1 block text-xs">Keep the SHA-256 with the file. It proves the copy has not been altered.</span>
+        </Callout>
+      )}
       {error && <Callout tone="fail">{error}</Callout>}
       <div className="overflow-x-auto rounded-lg border border-line bg-white">
         <table className="w-full text-left text-sm">
@@ -109,6 +234,9 @@ function AuditTrail() {
             ))}
           </tbody>
         </table>
+        {entries.length === 0 && !error && (
+          <p className="px-4 py-6 text-center text-sm text-muted">No entries match these filters.</p>
+        )}
       </div>
       {more && entries.length > 0 && (
         <Button variant="secondary" onClick={() => void load(entries[entries.length - 1].sequence)}>

@@ -11,7 +11,15 @@ export interface Principal {
   mustChangePassword: boolean;
   passwordExpiresAt: string | null;
   sessionId: string;
+  /** When this session ends: after inactivity, and at the latest. */
+  session?: { idleExpiresAt: string; expiresAt: string };
 }
+
+/** Response headers that tell the client when its session ends. */
+export const SESSION_IDLE_HEADER = 'X-NxGen-Session-Idle-Expires';
+export const SESSION_MAX_HEADER = 'X-NxGen-Session-Expires';
+/** Server clock at response time, so clients can correct for their own clock. */
+export const SERVER_TIME_HEADER = 'X-NxGen-Server-Time';
 
 /** Where a request came from — recorded on every audit event. */
 export interface RequestOrigin {

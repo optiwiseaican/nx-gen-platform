@@ -40,6 +40,58 @@ export interface AuditQuery {
   category?: string;
   /** Entries about this record, including composite keys that start with it (e.g. "<userId>:ROLE"). */
   recordId?: string;
+  result?: string;
+  /** Inclusive lower bound (ISO 8601). */
+  from?: string;
+  /** Exclusive upper bound (ISO 8601). */
+  to?: string;
+}
+
+/** Response header carrying the SHA-256 of an exported file. */
+export const AUDIT_EXPORT_HASH_HEADER = 'X-NxGen-Export-SHA256';
+export const AUDIT_EXPORT_MAX_ROWS = 100_000;
+
+export interface AuditExport {
+  csv: string;
+  rows: number;
+  sha256: string;
+  firstSequence: number | null;
+  lastSequence: number | null;
+  truncated: boolean;
+}
+
+const CSV_COLUMNS = [
+  'sequence',
+  'event_id',
+  'occurred_at_utc',
+  'category',
+  'action',
+  'result',
+  'actor_id',
+  'actor_name',
+  'table_name',
+  'record_id',
+  'old_value',
+  'new_value',
+  'reason',
+  'machine_name',
+  'ip_address',
+  'platform_instance_id',
+  'error_code',
+  'details',
+  'prev_hash',
+  'hash',
+] as const;
+
+/** RFC 4180 field; neutralises spreadsheet formula injection (=, +, -, @). */
+function csvField(value: unknown): string {
+  let text: string;
+  if (value === null || value === undefined) return '';
+  else if (value instanceof Date) text = value.toISOString();
+  else if (typeof value === 'object') text = JSON.stringify(value);
+  else text = `${value as string | number | boolean | bigint}`;
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 interface AuditRow {
@@ -61,6 +113,8 @@ interface AuditRow {
   platform_instance_id: string | null;
   error_code: string | null;
   details: Record<string, unknown> | null;
+  prev_hash?: string;
+  hash?: string;
 }
 
 const fromRow = (r: AuditRow): AuditEntry => ({
@@ -180,24 +234,94 @@ export class AuditService {
         .reverse()
         .slice(0, limit);
     }
+    const { where, params } = this.filter(q);
     const rows = await this.db!.query<AuditRow>(
-      `SELECT * FROM audit_trail
-        WHERE ($1::bigint IS NULL OR sequence < $1)
-          AND ($2::text IS NULL OR action = $2)
-          AND ($3::text IS NULL OR actor_id = $3 OR actor_name = $3)
-          AND ($4::text IS NULL OR category = $4)
-          AND ($6::text IS NULL OR record_id = $6 OR record_id LIKE $6 || ':%')
-        ORDER BY sequence DESC LIMIT $5`,
-      [
-        q.beforeSequence ?? null,
-        q.action ?? null,
-        q.actor ?? null,
-        q.category ?? null,
-        limit,
-        q.recordId ?? null,
-      ],
+      `SELECT * FROM audit_trail WHERE ${where}
+        ORDER BY sequence DESC LIMIT $${params.length + 1}`,
+      [...params, limit],
     );
     return rows.map(fromRow);
+  }
+
+  private filter(q: AuditQuery): { where: string; params: unknown[] } {
+    const params = [
+      q.beforeSequence ?? null,
+      q.action ?? null,
+      q.actor ?? null,
+      q.category ?? null,
+      q.recordId ?? null,
+      q.result ?? null,
+      q.from ?? null,
+      q.to ?? null,
+    ];
+    const where = `($1::bigint IS NULL OR sequence < $1)
+          AND ($2::text IS NULL OR action = $2)
+          AND ($3::text IS NULL OR actor_id = $3
+               OR actor_name ILIKE '%' || replace(replace(replace($3, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%')
+          AND ($4::text IS NULL OR category = $4)
+          AND ($5::text IS NULL OR record_id = $5 OR record_id LIKE $5 || ':%')
+          AND ($6::text IS NULL OR result = $6)
+          AND ($7::timestamptz IS NULL OR occurred_at >= $7)
+          AND ($8::timestamptz IS NULL OR occurred_at < $8)`;
+    return { where, params };
+  }
+
+  /**
+   * CSV export (master spec §6 "Exportable"; Annex 11 §8.1 accurate printed
+   * copies). Oldest first, UTC timestamps, and every row's prev_hash/hash, so
+   * the extract can be checked against the chain outside NxGen. The caller
+   * records the export itself in the trail.
+   */
+  async exportCsv(q: AuditQuery): Promise<AuditExport> {
+    if (!this.useDb)
+      throw new Error('Audit export requires the NxGen database.');
+    const { where, params } = this.filter({ ...q, beforeSequence: undefined });
+    const rows = await this.db!.query<AuditRow>(
+      `SELECT * FROM audit_trail WHERE ${where}
+        ORDER BY sequence LIMIT $${params.length + 1}`,
+      [...params, AUDIT_EXPORT_MAX_ROWS + 1],
+    );
+    const truncated = rows.length > AUDIT_EXPORT_MAX_ROWS;
+    if (truncated) rows.length = AUDIT_EXPORT_MAX_ROWS;
+    const lines = [CSV_COLUMNS.join(',')];
+    for (const r of rows) {
+      lines.push(
+        [
+          r.sequence,
+          r.event_id,
+          r.occurred_at,
+          r.category,
+          r.action,
+          r.result,
+          r.actor_id,
+          r.actor_name,
+          r.table_name,
+          r.record_id,
+          r.old_value,
+          r.new_value,
+          r.reason,
+          r.machine_name,
+          r.ip_address,
+          r.platform_instance_id,
+          r.error_code,
+          r.details,
+          r.prev_hash,
+          r.hash,
+        ]
+          .map(csvField)
+          .join(','),
+      );
+    }
+    // BOM so spreadsheet tools read UTF-8 names correctly.
+    const csv = '\uFEFF' + lines.join('\r\n') + '\r\n';
+    return {
+      csv,
+      rows: rows.length,
+      sha256: createHash('sha256').update(csv, 'utf8').digest('hex'),
+      firstSequence: rows.length ? Number(rows[0].sequence) : null,
+      lastSequence: rows.length ? Number(rows[rows.length - 1].sequence) : null,
+      truncated,
+    };
   }
 
   /** Oldest-first; intended for tests and exports of small trails. */

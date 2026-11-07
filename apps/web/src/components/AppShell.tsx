@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { ApiError, authApi, Principal, ROLE_NAMES } from "@/lib/api";
+import { ApiError, authApi, Principal, ROLE_NAMES, sessionClock } from "@/lib/api";
+import { SessionWarning } from "./SessionWarning";
 import { StatusIcon } from "./ui";
 
 const SessionContext = createContext<Principal | null>(null);
@@ -76,6 +77,7 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
 
   async function signOut() {
     await authApi.logout().catch(() => undefined);
+    sessionClock.clear();
     router.replace("/login/?reason=signed-out");
   }
 
@@ -135,6 +137,7 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
             </span>
           </div>
         </footer>
+        <SessionWarning />
       </div>
     </SessionContext.Provider>
   );

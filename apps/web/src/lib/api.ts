@@ -54,18 +54,55 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
+/** When the current session ends, as last reported by the server. */
+export interface SessionTiming {
+  idleExpiresAt: number;
+  expiresAt: number;
+}
+
+let sessionTiming: SessionTiming | null = null;
+const sessionListeners = new Set<(t: SessionTiming | null) => void>();
+
+export const sessionClock = {
+  get: () => sessionTiming,
+  subscribe(fn: (t: SessionTiming | null) => void) {
+    sessionListeners.add(fn);
+    return () => void sessionListeners.delete(fn);
+  },
+  clear() {
+    sessionTiming = null;
+    sessionListeners.forEach((fn) => fn(null));
+  },
+};
+
+function noteSession(res: Response) {
+  const idle = res.headers.get("X-NxGen-Session-Idle-Expires");
+  const max = res.headers.get("X-NxGen-Session-Expires");
+  if (!idle || !max) return;
+  // Convert to this computer's clock, in case it differs from the server's.
+  const serverNow = Date.parse(res.headers.get("X-NxGen-Server-Time") ?? "");
+  const skew = Number.isNaN(serverNow) ? 0 : Date.now() - serverNow;
+  sessionTiming = { idleExpiresAt: Date.parse(idle) + skew, expiresAt: Date.parse(max) + skew };
+  sessionListeners.forEach((fn) => fn(sessionTiming));
+}
+
+async function raw(path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(`${API_BASE}/api${path}`, {
     ...init,
     credentials: "include",
     headers: { "Content-Type": "application/json", ...init?.headers },
     cache: "no-store",
   });
+  noteSession(res);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new ApiError(res.status, body);
   }
-  return (await res.json()) as T;
+  return res;
+}
+
+async function call<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await (await raw(path, init)).json()) as T;
 }
 
 export interface SystemInformation {
@@ -100,6 +137,7 @@ export interface Principal {
   mustChangePassword: boolean;
   passwordExpiresAt: string | null;
   sessionIdleMinutes?: number;
+  session?: { idleExpiresAt: string; expiresAt: string };
 }
 
 export interface SetupStatus {
@@ -147,12 +185,70 @@ export const authApi = {
   me: () => call<Principal>("/auth/me"),
   changePassword: (currentPassword: string, newPassword: string) =>
     post<Principal>("/auth/change-password", { currentPassword, newPassword }),
-  audit: (params: { before?: number; action?: string } = {}) => {
-    const q = new URLSearchParams({ limit: "50" });
+  extendSession: () => post<Principal>("/auth/session/extend", {}),
+  audit: (params: AuditFilters & { before?: number } = {}) => {
+    const q = auditQuery(params);
+    q.set("limit", "50");
     if (params.before) q.set("before", String(params.before));
-    if (params.action) q.set("action", params.action);
     return call<{ entries: AuditEntry[]; chain: { valid: boolean; brokenAtSequence?: number } }>(`/audit?${q}`);
   },
+  /** CSV extract; the export is recorded in the audit trail. */
+  auditExport: async (params: AuditFilters) => {
+    const res = await raw(`/audit/export?${auditQuery(params)}`);
+    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? "nxgen-audit-trail.csv";
+    return { blob: await res.blob(), filename: name, sha256: res.headers.get("X-NxGen-Export-SHA256") ?? "" };
+  },
+};
+
+export interface AuditFilters {
+  action?: string;
+  actor?: string;
+  category?: string;
+  result?: string;
+  /** ISO 8601 */
+  from?: string;
+  /** ISO 8601, exclusive */
+  to?: string;
+}
+
+function auditQuery(f: AuditFilters): URLSearchParams {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) if (typeof v === "string" && v.trim()) q.set(k, v.trim());
+  return q;
+}
+
+export interface SecurityPolicy {
+  passwordMinLength: number;
+  passwordHistory: number;
+  passwordMaxAgeDays: number;
+  maxFailedLogins: number;
+  lockoutMinutes: number;
+  sessionIdleMinutes: number;
+  sessionMaxHours: number;
+}
+
+export interface SecurityPolicyState {
+  policy: SecurityPolicy;
+  limits: Record<keyof SecurityPolicy, { min: number; max: number }>;
+  labels: Record<keyof SecurityPolicy, string>;
+  version: number | null;
+  modifiedBy: string | null;
+  modifiedAt: string | null;
+}
+
+export const securityApi = {
+  policy: () => call<SecurityPolicyState>("/security/policy"),
+  updatePolicy: (changes: Partial<SecurityPolicy>, reason: string, signature?: SignatureInput) =>
+    put<SecurityPolicyState>("/security/policy", { changes, reason, signature }),
+};
+
+export const recoveryApi = {
+  request: (username: string, reason: string) =>
+    post<{ requestId: string; requestCode: string; expiresAt: string; platformInstanceId: string }>("/recovery/request", {
+      username,
+      reason,
+    }),
+  complete: (response: string) => post<{ username: string; temporaryPassword: string }>("/recovery/complete", { response }),
 };
 
 export interface UserSummary {

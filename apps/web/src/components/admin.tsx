@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useId } from "react";
 import {
   ROLE_NAMES,
   SignatureInput,
@@ -48,6 +48,8 @@ export function ReasonDialog({
   onClose: () => void;
 }) {
   const principal = usePrincipal();
+  // Unique per dialog: a page can hold several, and labels must point at their own fields.
+  const uid = useId();
   const ref = useRef<HTMLDialogElement>(null);
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -109,11 +111,11 @@ export function ReasonDialog({
         <h2 className="text-lg font-semibold text-ink">{title}</h2>
         <div className="text-sm text-muted">{description}</div>
         <div>
-          <label htmlFor="change-reason" className="mb-1.5 block text-sm font-semibold text-ink">
+          <label htmlFor={`${uid}-change-reason`} className="mb-1.5 block text-sm font-semibold text-ink">
             Reason for change
           </label>
           <textarea
-            id="change-reason"
+            id={`${uid}-change-reason`}
             value={reason}
             onChange={(e) => setReason(e.target.value)}
             rows={3}
@@ -136,11 +138,11 @@ export function ReasonDialog({
           <fieldset className="space-y-3 rounded-md border border-brand/30 bg-brand-50 p-4">
             <legend className="px-1 text-sm font-semibold text-brand-700">Electronic signature</legend>
             <div>
-              <label htmlFor="sig-meaning" className="mb-1 block text-sm font-semibold text-ink">
+              <label htmlFor={`${uid}-sig-meaning`} className="mb-1 block text-sm font-semibold text-ink">
                 Meaning of signature
               </label>
               <select
-                id="sig-meaning"
+                id={`${uid}-sig-meaning`}
                 value={meaning}
                 onChange={(e) => setMeaning(e.target.value)}
                 className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm"
@@ -155,11 +157,11 @@ export function ReasonDialog({
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <label htmlFor="sig-username" className="mb-1 block text-sm font-semibold text-ink">
+                <label htmlFor={`${uid}-sig-username`} className="mb-1 block text-sm font-semibold text-ink">
                   Username or email
                 </label>
                 <input
-                  id="sig-username"
+                  id={`${uid}-sig-username`}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoComplete="username"
@@ -169,11 +171,11 @@ export function ReasonDialog({
                 />
               </div>
               <div>
-                <label htmlFor="sig-password" className="mb-1 block text-sm font-semibold text-ink">
+                <label htmlFor={`${uid}-sig-password`} className="mb-1 block text-sm font-semibold text-ink">
                   Password
                 </label>
                 <input
-                  id="sig-password"
+                  id={`${uid}-sig-password`}
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}

@@ -11,6 +11,7 @@ import { BootstrapJournal } from '../audit/bootstrap-journal';
 import { loadConfig, NXGEN_CONFIG } from '../config/nxgen.config';
 import type { NxGenConfig } from '../config/nxgen.config';
 import { DatabaseService } from '../database/database.service';
+import { readSecurityPolicy } from '../security/security-policy.store';
 import { migrate } from '../database/migrator';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
 import { SecureStorageService } from '../security/secure-storage.service';
@@ -50,6 +51,9 @@ export class DatabaseInitializer implements OnModuleInit {
     } finally {
       client.release();
     }
+    // Password, lockout and session rules in force (editable since migration 005).
+    const stored = await readSecurityPolicy(this.db);
+    if (stored) Object.assign(this.config.security, stored.policy);
     await this.audit.importBootstrapJournal();
     const chain = await this.audit.verifyChain();
     if (!chain.valid) {

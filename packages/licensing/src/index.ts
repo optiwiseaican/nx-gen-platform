@@ -8,6 +8,7 @@ export * from './schema';
 export * from './request';
 export * from './issue';
 export * from './verify';
+export * from './recovery';
 
 /** Internal license states (License PRD §31) plus EXPIRED for runtime. */
 export const LicenseState = {
