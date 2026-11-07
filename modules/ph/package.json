@@ -10,11 +10,14 @@
   "jest": {
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
-    "transform": { "^.+\\.ts$": "ts-jest" },
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
     "testEnvironment": "node"
   },
   "devDependencies": {
     "@crescent/module-sdk": "1.0.0",
+    "@fontsource-variable/plus-jakarta-sans": "^5.2.8",
     "@tailwindcss/vite": "4.3.4",
     "@vitejs/plugin-react": "4.7.0",
     "esbuild": "0.25.12",

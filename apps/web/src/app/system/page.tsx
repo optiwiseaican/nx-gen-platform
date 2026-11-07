@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { useAuthRedirect } from "@/components/AppShell";
+import { BrandHeader, useAuthRedirect } from "@/components/AppShell";
 import { Badge, Callout, FieldTable, StatusIcon } from "@/components/ui";
 import { licensingApi, SERVICE_UNAVAILABLE, SystemInformation } from "@/lib/api";
 
@@ -50,17 +50,7 @@ export default function SystemInformationPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="bg-navy text-white">
-        <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-4 sm:px-6">
-          <div>
-            <p className="text-xl font-bold tracking-tight">
-              Nx<span className="text-[#7fb0ff]">Gen</span>
-            </p>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/70">Compliance Platform</p>
-          </div>
-          <h1 className="text-lg font-semibold">System Information</h1>
-        </div>
-      </header>
+      <BrandHeader title="System Information" />
 
       <main className="mx-auto max-w-4xl space-y-5 px-4 py-8 sm:px-6">
         {failed && (

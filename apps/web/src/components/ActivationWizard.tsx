@@ -1,5 +1,6 @@
 "use client";
 
+import { LogoTile } from "./icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -257,31 +258,30 @@ export function ActivationWizard() {
 function AppHeader({ screen }: { screen: Screen }) {
   const index = STEPS.findIndex((s) => s.id === screen);
   return (
-    <header className="bg-navy text-white">
-      <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-4 sm:px-6 md:flex-row md:items-center md:justify-between">
-        <div>
-          <p className="text-xl font-bold tracking-tight">
-            Nx<span className="text-[#7fb0ff]">Gen</span>
-          </p>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/70">Compliance Platform</p>
-        </div>
-        <div className="md:text-center">
-          <h1 className="text-lg font-semibold">NxGen Platform Activation</h1>
-          <p className="text-sm text-white/70">Secure. Offline. Ready for what&apos;s next.</p>
+    <header>
+      <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 pt-8 pb-2 sm:px-6 md:flex-row md:items-center md:justify-between">
+        <div className="flex items-center gap-3">
+          <LogoTile size="h-12 w-12" />
+          <div>
+            <p className="text-2xl font-extrabold tracking-tight text-ink">
+              Nx<span className="text-brand">Gen</span>
+            </p>
+            <p className="text-sm text-muted">Platform activation · secure, offline</p>
+          </div>
         </div>
         <ol className="flex items-center gap-2 text-sm" aria-label="Activation progress">
           {STEPS.map((s, i) => (
             <li key={s.id} className="flex items-center gap-2">
               <span
                 className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${
-                  i <= index ? "bg-white text-navy" : "border border-white/40 text-white/70"
+                  i <= index ? "bg-brand text-white shadow-[var(--shadow-brand)]" : "border border-line bg-white text-muted"
                 }`}
                 aria-current={i === index ? "step" : undefined}
               >
                 {i < index ? "✓" : i + 1}
               </span>
-              <span className={i === index ? "font-semibold" : "text-white/70"}>{s.label}</span>
-              {i < STEPS.length - 1 && <span className="mx-1 hidden h-px w-6 bg-white/40 sm:block" />}
+              <span className={i === index ? "font-semibold text-ink" : "text-muted"}>{s.label}</span>
+              {i < STEPS.length - 1 && <span className="mx-1 hidden h-px w-6 bg-line sm:block" />}
             </li>
           ))}
         </ol>

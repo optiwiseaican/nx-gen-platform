@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
   output: "export",
   trailingSlash: true,
   images: { unoptimized: true },
+  // The dev-only badge covers the phone navigation button.
+  devIndicators: false,
 };
 
 export default nextConfig;

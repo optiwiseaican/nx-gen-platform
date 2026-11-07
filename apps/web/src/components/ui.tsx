@@ -66,8 +66,8 @@ export function Badge({ tone, children }: { tone: "pass" | "warn" | "fail"; chil
     fail: "border-fail/30 bg-fail-50 text-fail",
   }[tone];
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-sm font-semibold tracking-wide ${styles}`}>
-      <StatusIcon tone={tone} className="h-4 w-4" />
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-bold tracking-wide ${styles}`}>
+      <StatusIcon tone={tone} className="h-3.5 w-3.5" />
       {children}
     </span>
   );
@@ -81,7 +81,7 @@ export function Callout({ tone, title, children }: { tone: "info" | "warn" | "fa
     pass: "border-pass/30 bg-pass-50",
   }[tone];
   return (
-    <div className={`flex gap-3 rounded-md border p-4 text-sm ${styles}`} role={tone === "fail" ? "alert" : undefined}>
+    <div className={`flex gap-3 rounded-xl border p-4 text-sm ${styles}`} role={tone === "fail" ? "alert" : undefined}>
       <StatusIcon tone={tone} />
       <div className="space-y-1">
         {title && <p className="font-semibold text-ink">{title}</p>}
@@ -98,12 +98,12 @@ export function Button({
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" }) {
   const styles =
     variant === "primary"
-      ? "bg-brand text-white hover:bg-brand-700 disabled:bg-brand/40"
-      : "border border-line bg-white text-ink hover:bg-canvas disabled:text-muted";
+      ? "bg-brand text-white shadow-[var(--shadow-brand)] hover:bg-brand-700 disabled:bg-brand/40 disabled:shadow-none"
+      : "border border-line bg-white text-ink shadow-[0_1px_2px_rgb(15_27_51/0.05)] hover:border-brand/30 hover:bg-brand-50/40 disabled:text-muted";
   return (
     <button
       {...props}
-      className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-md px-5 text-[15px] font-semibold transition-colors disabled:cursor-not-allowed ${styles} ${className}`}
+      className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-5 text-[15px] font-semibold transition-all active:translate-y-px disabled:cursor-not-allowed ${styles} ${className}`}
     />
   );
 }

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { ApiError, authApi, ModuleMenuItem, moduleUrl, modulesApi, Principal, ROLE_NAMES, sessionClock } from "@/lib/api";
 import { SessionWarning } from "./SessionWarning";
+import { Icon, IconName, LogoTile } from "./icons";
 import { StatusIcon } from "./ui";
 
 const SessionContext = createContext<Principal | null>(null);
@@ -30,43 +31,81 @@ export function useAuthRedirect() {
   );
 }
 
+/** Header for pages outside the signed-in shell (sign-in, setup, recovery, activation). */
 export function BrandHeader({ title, children }: { title?: string; children?: React.ReactNode }) {
   return (
-    <header className="bg-navy text-white">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6">
-        <Link href="/home/" className="block">
-          <p className="text-xl font-bold tracking-tight">
-            Nx<span className="text-[#7fb0ff]">Gen</span>
-          </p>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/70">Compliance Platform</p>
+    <header>
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 pt-8 pb-2 sm:px-6">
+        <Link href="/home/" className="flex items-center gap-3">
+          <LogoTile size="h-12 w-12" />
+          <span>
+            <span className="block text-2xl font-extrabold tracking-tight text-ink">
+              Nx<span className="text-brand">Gen</span>
+            </span>
+            <span className="block text-sm text-muted">Compliance platform for regulated laboratories</span>
+          </span>
         </Link>
-        {title && <h1 className="text-lg font-semibold">{title}</h1>}
+        {title && <p className="hidden text-right text-sm text-muted sm:block">{title}</p>}
         {children}
       </div>
     </header>
   );
 }
 
-const NAV: { href: string; label: string; permission: string | string[] | null }[] = [
-  { href: "/home/", label: "Home", permission: null },
-  { href: "/tasks/", label: "My Tasks", permission: ["methods.review", "methods.approve", "calibration.approve"] },
-  { href: "/devices/", label: "Instruments", permission: "devices.view" },
-  { href: "/methods/", label: "Methods", permission: "methods.view" },
-  { href: "/users/", label: "Users", permission: "users.view" },
-  { href: "/roles/", label: "Roles", permission: "users.view" },
-  { href: "/audit/", label: "Audit Trail", permission: "audit.view" },
-  { href: "/security/", label: "Security", permission: "audit.view" },
-  { href: "/settings/modules/", label: "Modules", permission: "modules.manage" },
-  { href: "/system/", label: "System Information", permission: "system.view" },
+type NavItem = { href: string; label: string; icon: IconName; permission: string | string[] | null; group: "work" | "admin" };
+
+const NAV: NavItem[] = [
+  { href: "/home/", label: "Home", icon: "home", permission: null, group: "work" },
+  { href: "/tasks/", label: "My Tasks", icon: "tasks", permission: ["methods.review", "methods.approve", "calibration.approve"], group: "work" },
+  { href: "/devices/", label: "Instruments", icon: "instrument", permission: "devices.view", group: "work" },
+  { href: "/methods/", label: "Methods", icon: "method", permission: "methods.view", group: "work" },
+  { href: "/users/", label: "Users", icon: "users", permission: "users.view", group: "admin" },
+  { href: "/roles/", label: "Roles", icon: "roles", permission: "users.view", group: "admin" },
+  { href: "/audit/", label: "Audit Trail", icon: "audit", permission: "audit.view", group: "admin" },
+  { href: "/security/", label: "Security", icon: "security", permission: "audit.view", group: "admin" },
+  { href: "/settings/modules/", label: "Modules", icon: "modules", permission: "modules.manage", group: "admin" },
+  { href: "/system/", label: "System Information", icon: "system", permission: "system.view", group: "admin" },
 ];
 
-/** Layout for signed-in pages: loads the session, shows identity, nav and sign-out. */
+const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]!.toUpperCase())
+    .join("");
+
+function NavLink({ href, label, icon, active, external, onClick }: { href: string; label: string; icon: IconName; active?: boolean; external?: boolean; onClick?: () => void }) {
+  const cls = `group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-[15px] font-semibold transition-colors ${
+    active ? "bg-brand-50 text-brand shadow-[inset_0_0_0_1px_rgb(37_99_235/0.08)]" : "text-ink/75 hover:bg-canvas hover:text-ink"
+  }`;
+  const inner = (
+    <>
+      <span className={active ? "text-brand" : "text-muted group-hover:text-ink"}>
+        <Icon name={icon} />
+      </span>
+      {label}
+    </>
+  );
+  return external ? (
+    <a href={href} className={cls} onClick={onClick}>
+      {inner}
+    </a>
+  ) : (
+    <Link href={href} aria-current={active ? "page" : undefined} className={cls} onClick={onClick}>
+      {inner}
+    </Link>
+  );
+}
+
+/** Layout for signed-in pages: sidebar navigation, page header with the signed-in user, and content. */
 export function AppShell({ children, title }: { children: React.ReactNode; title: string }) {
   const router = useRouter();
   const pathname = usePathname();
   const redirect = useAuthRedirect();
   const [principal, setPrincipal] = useState<Principal | null>(null);
   const [moduleMenu, setModuleMenu] = useState<ModuleMenuItem[]>([]);
+  const [drawer, setDrawer] = useState(false);
 
   useEffect(() => {
     authApi
@@ -89,75 +128,106 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
 
   if (!principal) {
     return (
-      <div className="flex min-h-screen items-center justify-center text-muted">
-        <StatusIcon tone="progress" /> <span className="ml-2">Checking your session…</span>
+      <div className="flex min-h-screen items-center justify-center gap-3 text-muted">
+        <LogoTile size="h-9 w-9" />
+        <StatusIcon tone="progress" /> <span>Checking your session…</span>
       </div>
     );
   }
 
+  const allowed = NAV.filter((n) => !n.permission || [n.permission].flat().some((perm) => principal.permissions.includes(perm)));
+  const current = allowed.find((n) => pathname.startsWith(n.href));
+  const roleNames = principal.roles.map((r) => ROLE_NAMES[r] ?? r).join(", ");
+
+  const sidebar = (
+    <div className="flex h-full flex-col">
+      <Link href="/home/" className="flex items-center gap-3 px-5 pt-6 pb-5">
+        <LogoTile />
+        <span className="leading-tight">
+          <span className="block text-lg font-extrabold tracking-tight text-ink">
+            Nx<span className="text-brand">Gen</span>
+          </span>
+          <span className="block text-[13px] font-semibold text-muted">Compliance Platform</span>
+        </span>
+      </Link>
+      <nav aria-label="Main" className="flex-1 space-y-5 overflow-y-auto px-3 pb-4">
+        {(["work", "admin"] as const).map((group) => {
+          const items = allowed.filter((n) => n.group === group);
+          if (!items.length && !(group === "work" && moduleMenu.length)) return null;
+          return (
+            <div key={group} className="space-y-1">
+              <p className="px-3.5 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-muted/70">
+                {group === "work" ? "Laboratory" : "Administration"}
+              </p>
+              {items.map((n) => (
+                <NavLink key={n.href} {...n} active={current?.href === n.href} onClick={() => setDrawer(false)} />
+              ))}
+              {group === "work" &&
+                moduleMenu.map((m) => <NavLink key={m.href} href={moduleUrl(m.href)} label={m.label} icon="module" external />)}
+            </div>
+          );
+        })}
+      </nav>
+      <div className="space-y-1 border-t border-line px-3 py-4 text-sm">
+        <p className="flex items-center gap-2.5 px-3.5 py-1.5 text-muted">
+          <span className="h-2 w-2 rounded-full bg-pass shadow-[0_0_0_3px_rgb(19_150_90/0.15)]" aria-hidden />
+          Connected
+        </p>
+        <button
+          onClick={() => void signOut()}
+          className="flex w-full items-center gap-2.5 rounded-xl px-3.5 py-2 font-semibold text-muted hover:bg-canvas hover:text-ink"
+        >
+          <Icon name="signout" className="h-[18px] w-[18px]" /> Sign out
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <SessionContext.Provider value={principal}>
-      <div className="flex min-h-screen flex-col">
-        <BrandHeader>
-          <div className="flex items-center gap-4 text-sm">
-            <div className="text-right">
-              <p className="font-semibold">{principal.fullName}</p>
-              <p className="text-white/70">
-                {principal.username} · {principal.roles.map((r) => ROLE_NAMES[r] ?? r).join(", ")}
-              </p>
+      <div className="min-h-screen lg:flex">
+        <aside className="sticky top-0 hidden h-screen w-[17rem] shrink-0 border-r border-line/80 bg-white/85 backdrop-blur lg:block">{sidebar}</aside>
+
+        {drawer && (
+          <div className="fixed inset-0 z-40 lg:hidden" role="dialog" aria-modal="true" aria-label="Navigation">
+            <button className="absolute inset-0 bg-navy/30 backdrop-blur-[2px]" aria-label="Close navigation" onClick={() => setDrawer(false)} />
+            <aside className="relative h-full w-[17rem] bg-white shadow-xl">{sidebar}</aside>
+          </div>
+        )}
+
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="flex flex-wrap items-center justify-between gap-4 px-4 pt-6 pb-2 sm:px-8 lg:pt-8">
+            <div className="flex items-center gap-3">
+              <button
+                className="grid h-11 w-11 place-items-center rounded-xl border border-line bg-white text-ink lg:hidden"
+                onClick={() => setDrawer(true)}
+                aria-label="Open navigation"
+              >
+                <Icon name="menu" />
+              </button>
+              <div>
+                <p className="text-[12px] font-bold uppercase tracking-[0.16em] text-muted">{current?.label ?? "NxGen"}</p>
+                <h1 className="text-[28px] font-extrabold leading-tight tracking-tight text-ink">{title}</h1>
+              </div>
             </div>
-            <button
-              onClick={() => void signOut()}
-              className="rounded-md border border-white/40 px-3 py-1.5 font-semibold hover:bg-white/10"
-            >
-              Sign out
-            </button>
-          </div>
-        </BrandHeader>
-        <nav className="border-b border-line bg-white" aria-label="Main">
-          <ul className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-4 sm:px-6">
-            {NAV.filter(
-              (n) =>
-                !n.permission ||
-                [n.permission].flat().some((perm) => principal.permissions.includes(perm)),
-            ).map((n) => (
-              <li key={n.href}>
-                <Link
-                  href={n.href}
-                  aria-current={pathname.startsWith(n.href) ? "page" : undefined}
-                  className={`block border-b-2 px-3 py-3 text-sm font-semibold ${
-                    pathname.startsWith(n.href) ? "border-brand text-brand" : "border-transparent text-muted hover:text-ink"
-                  }`}
-                >
-                  {n.label}
-                </Link>
-              </li>
-            ))}
-            {moduleMenu.map((m) => (
-              <li key={m.href}>
-                <a
-                  href={moduleUrl(m.href)}
-                  className="block border-b-2 border-transparent px-3 py-3 text-sm font-semibold text-muted hover:text-ink"
-                  title={`${m.label} module`}
-                >
-                  {m.label}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
-          <h1 className="mb-6 text-2xl font-semibold text-ink">{title}</h1>
-          {children}
-        </main>
-        <footer className="border-t border-line bg-white px-6 py-3 text-xs text-muted">
-          <div className="mx-auto flex max-w-6xl justify-between">
-            <span>NxGen Compliance Platform</span>
-            <span>
-              Sessions end after {principal.sessionIdleMinutes ?? 15} minutes of inactivity.
-            </span>
-          </div>
-        </footer>
+            <div className="flex items-center gap-3 rounded-2xl border border-line/70 bg-white/80 py-1.5 pr-4 pl-1.5 shadow-[var(--shadow-card)]">
+              <span className="grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-navy-700 to-navy text-sm font-bold text-white" aria-hidden>
+                {initials(principal.fullName)}
+              </span>
+              <span className="leading-tight">
+                <span className="block text-sm font-bold text-ink">{principal.fullName}</span>
+                <span className="flex items-center gap-1.5 text-xs text-muted">
+                  <span className="h-1.5 w-1.5 rounded-full bg-pass" aria-hidden />
+                  {roleNames || principal.username}
+                </span>
+              </span>
+            </div>
+          </header>
+          <main className="w-full max-w-[84rem] flex-1 px-4 py-6 sm:px-8">{children}</main>
+          <footer className="px-4 pb-6 text-xs text-muted sm:px-8">
+            NxGen Compliance Platform · sessions end after {principal.sessionIdleMinutes ?? 15} minutes of inactivity
+          </footer>
+        </div>
         <SessionWarning />
       </div>
     </SessionContext.Provider>

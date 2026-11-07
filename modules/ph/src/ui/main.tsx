@@ -89,11 +89,11 @@ const toneClass = {
   info: "border-brand/30 bg-brand-50 text-brand-700",
 };
 function Badge({ tone, children }: { tone: keyof typeof toneClass; children: React.ReactNode }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${toneClass[tone]}`}>{children}</span>;
+  return <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-bold tracking-wide ${toneClass[tone]}`}>{children}</span>;
 }
 function Callout({ tone, title, children }: { tone: keyof typeof toneClass; title?: string; children: React.ReactNode }) {
   return (
-    <div className={`rounded-lg border px-4 py-3 text-sm ${toneClass[tone]}`} role={tone === "fail" ? "alert" : "status"}>
+    <div className={`rounded-xl border px-4 py-3 text-sm ${toneClass[tone]}`} role={tone === "fail" ? "alert" : "status"}>
       {title && <p className="font-semibold">{title}</p>}
       <div className="text-ink">{children}</div>
     </div>
@@ -101,7 +101,7 @@ function Callout({ tone, title, children }: { tone: keyof typeof toneClass; titl
 }
 const outcomeTone = (o: string) => (o === "PASS" ? "pass" : o === "WARNING" ? "warn" : "fail");
 const readinessTone = (r: Readiness) => (r.state === "READY" ? "pass" : r.state === "DUE_SOON" ? "warn" : "fail");
-const btn = "inline-flex min-h-11 items-center justify-center rounded-md px-5 font-semibold disabled:cursor-not-allowed";
+const btn = "inline-flex min-h-11 items-center justify-center rounded-xl px-5 font-semibold shadow-[var(--shadow-brand)] disabled:cursor-not-allowed disabled:shadow-none";
 const fmt = (v: number | null | undefined, d = 2) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(d) : "—");
 
 function SessionBanner() {
@@ -130,44 +130,97 @@ function SessionBanner() {
   );
 }
 
-function Shell({ web, principal, children }: { web: string; principal: Principal; children: React.ReactNode }) {
+const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]!.toUpperCase())
+    .join("");
+
+function Logo() {
   return (
-    <div className="min-h-screen">
-      <header className="bg-navy text-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6">
-          <a href={`${web}/home/`} className="block">
-            <p className="text-xl font-bold tracking-tight">
-              Nx<span className="text-[#7fb0ff]">Gen</span> <span className="font-semibold text-white/80">· pH</span>
-            </p>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/70">Compliance Platform · Module</p>
-          </a>
-          <div className="text-right text-sm">
-            <p className="font-semibold">{principal.fullName}</p>
-            <p className="text-white/70">{principal.username}</p>
+    <span className="inline-grid h-11 w-11 shrink-0 place-items-center rounded-[30%] bg-gradient-to-br from-[#3b82f6] via-brand to-[#1e40af] text-white shadow-[var(--shadow-brand)]" aria-hidden>
+      <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9.5 3.5h5M10.5 3.5v5.5L6 17a2.2 2.2 0 0 0 1.9 3.3h8.2A2.2 2.2 0 0 0 18 17l-4.5-8V3.5" />
+        <path d="m9.5 15 1.8 1.8 3.3-3.3" />
+      </svg>
+    </span>
+  );
+}
+
+const ICON = {
+  flask: "M9 3.5h6M10 3.5v6L5.5 17a2.3 2.3 0 0 0 2 3.5h9a2.3 2.3 0 0 0 2-3.5L14 9.5v-6M8.5 14h7",
+  home: "M3.5 10.5 12 4l8.5 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-4.5v-6h-5v6H5A1.5 1.5 0 0 1 3.5 19z",
+  list: "M9 6.5h11M9 12h11M9 17.5h11M4 6.5h.01M4 12h.01M4 17.5h.01",
+};
+const Svg = ({ d }: { d: string }) => (
+  <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d={d} />
+  </svg>
+);
+
+function Shell({ web, principal, title, children }: { web: string; principal: Principal; title: string; children: React.ReactNode }) {
+  const item = (href: string, label: string, d: string, active = false) => (
+    <a
+      href={href}
+      aria-current={active ? "page" : undefined}
+      className={`flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-[15px] font-semibold ${
+        active ? "bg-brand-50 text-brand" : "text-ink/75 hover:bg-canvas hover:text-ink"
+      }`}
+    >
+      <span className={active ? "text-brand" : "text-muted"}>
+        <Svg d={d} />
+      </span>
+      {label}
+    </a>
+  );
+  return (
+    <div className="min-h-screen lg:flex">
+      <aside className="border-b border-line/80 bg-white/85 backdrop-blur lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-[17rem] lg:shrink-0 lg:flex-col lg:border-r lg:border-b-0">
+        <a href={`${web}/home/`} className="flex items-center gap-3 px-5 pt-6 pb-5">
+          <Logo />
+          <span className="leading-tight">
+            <span className="block text-lg font-extrabold tracking-tight">
+              Nx<span className="text-brand">Gen</span>
+            </span>
+            <span className="block text-[13px] font-semibold text-muted">pH module</span>
+          </span>
+        </a>
+        <nav aria-label="Main" className="flex gap-1 px-3 pb-3 lg:flex-1 lg:flex-col lg:space-y-1">
+          <p className="hidden px-3.5 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-muted/70 lg:block">pH</p>
+          {item("/modules/ph/", "pH instruments", ICON.flask, true)}
+          <p className="hidden px-3.5 pt-4 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-muted/70 lg:block">NxGen</p>
+          {item(`${web}/home/`, "Home", ICON.home)}
+          {item(`${web}/devices/`, "All instruments", ICON.list)}
+        </nav>
+        <p className="hidden items-center gap-2.5 border-t border-line px-8 py-5 text-sm text-muted lg:flex">
+          <span className="h-2 w-2 rounded-full bg-pass shadow-[0_0_0_3px_rgb(19_150_90/0.15)]" aria-hidden />
+          Connected
+        </p>
+      </aside>
+      <div className="min-w-0 flex-1">
+        <SessionBanner />
+        <header className="flex flex-wrap items-center justify-between gap-4 px-4 pt-6 pb-2 sm:px-8 lg:pt-8">
+          <div>
+            <p className="text-[12px] font-bold uppercase tracking-[0.16em] text-muted">pH module</p>
+            <h1 className="text-[28px] font-extrabold leading-tight tracking-tight">{title}</h1>
           </div>
-        </div>
-      </header>
-      <SessionBanner />
-      <nav className="border-b border-line bg-white" aria-label="Main">
-        <ul className="mx-auto flex max-w-6xl gap-1 px-4 text-sm font-semibold sm:px-6">
-          <li>
-            <a href={`${web}/home/`} className="block px-3 py-3 text-muted hover:text-ink">
-              NxGen home
-            </a>
-          </li>
-          <li>
-            <a href="/modules/ph/" className="block border-b-2 border-brand px-3 py-3 text-brand">
-              pH instruments
-            </a>
-          </li>
-          <li>
-            <a href={`${web}/devices/`} className="block px-3 py-3 text-muted hover:text-ink">
-              All instruments
-            </a>
-          </li>
-        </ul>
-      </nav>
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">{children}</main>
+          <div className="flex items-center gap-3 rounded-2xl border border-line/70 bg-white/80 py-1.5 pr-4 pl-1.5 shadow-[var(--shadow-card)]">
+            <span className="grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-navy-700 to-navy text-sm font-bold text-white" aria-hidden>
+              {initials(principal.fullName)}
+            </span>
+            <span className="leading-tight">
+              <span className="block text-sm font-bold">{principal.fullName}</span>
+              <span className="flex items-center gap-1.5 text-xs text-muted">
+                <span className="h-1.5 w-1.5 rounded-full bg-pass" aria-hidden />
+                {principal.username}
+              </span>
+            </span>
+          </div>
+        </header>
+        <main className="max-w-[84rem] px-4 py-6 sm:px-8">{children}</main>
+      </div>
     </div>
   );
 }
@@ -190,7 +243,6 @@ function InstrumentList() {
   if (!devices) return <p className="text-muted">Loading…</p>;
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">pH instruments</h1>
       <p className="text-sm text-muted">
         Instruments send their data through the USB dongle. Register a pH meter, with the DEVICE_ID it sends, under All instruments.
       </p>
@@ -298,9 +350,9 @@ function Instrument({ id, web, principal }: { id: string; web: string; principal
   }
 
   const tile = (label: string, value: string, sub?: string) => (
-    <div className="rounded-lg border border-line bg-white px-4 py-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</p>
-      <p className="font-mono text-3xl font-semibold tabular-nums">{value}</p>
+    <div className="rounded-lg border border-line bg-white px-5 py-4">
+      <p className="text-xs font-bold uppercase tracking-wide text-muted">{label}</p>
+      <p className="mt-1 text-3xl font-extrabold tabular-nums tracking-tight">{value}</p>
       {sub && <p className="text-xs text-muted">{sub}</p>}
     </div>
   );
@@ -312,7 +364,7 @@ function Instrument({ id, web, principal }: { id: string; web: string; principal
           <p className="font-mono text-sm text-muted">
             {d.code} · ID {d.deviceIdentifier ?? "not set"}
           </p>
-          <h1 className="text-2xl font-semibold">{d.name}</h1>
+          <h2 className="text-xl font-bold">{d.name}</h2>
         </div>
         <a href={`${web}/devices/view/?id=${d.id}`} className="text-sm font-semibold text-brand hover:underline">
           Instrument record and approvals
@@ -501,7 +553,7 @@ function App() {
   if (!boot) return <p className="p-8 text-muted">Loading…</p>;
   const device = new URLSearchParams(location.search).get("device");
   return (
-    <Shell web={boot.web} principal={boot.principal}>
+    <Shell web={boot.web} principal={boot.principal} title={device ? "Instrument" : "pH instruments"}>
       {device ? <Instrument id={device} web={boot.web} principal={boot.principal} /> : <InstrumentList />}
     </Shell>
   );
