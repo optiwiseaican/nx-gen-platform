@@ -65,6 +65,11 @@ export interface WorkflowRecordType {
   ): Promise<{ title: string; content: Record<string, unknown> }>;
   /** Client route that shows the record. */
   link(seriesId: string): string;
+  /**
+   * The person who authored the record, if only they may submit it (e.g. the
+   * analyst who performed a calibration). Omit to let any editor submit.
+   */
+  authorOf?(client: PoolClient, recordId: string): Promise<string | null>;
 }
 
 export interface WorkflowDefinition {
@@ -415,9 +420,28 @@ export class WorkflowService {
 
   async allowedSteps(i: WorkflowInstance, principal: Principal) {
     const d = await this.definition(i.definitionCode);
-    return WORKFLOW_STEPS.filter(
+    const steps = WORKFLOW_STEPS.filter(
       (s) => this.blocker(s, i, d, principal) === null,
     );
+    if (steps.includes('SUBMIT') && !(await this.isAuthor(i, principal)))
+      return steps.filter((s) => s !== 'SUBMIT');
+    return steps;
+  }
+
+  private async isAuthor(
+    i: WorkflowInstance,
+    principal: Principal,
+    client?: PoolClient,
+  ) {
+    const type = this.type(i.tableName);
+    if (!type.authorOf) return true;
+    const c = client ?? (await this.db.connect());
+    try {
+      const author = await type.authorOf(c, i.recordId);
+      return !author || author === principal.userId;
+    } finally {
+      if (!client) c.release();
+    }
   }
 
   async act(
@@ -491,6 +515,11 @@ export class WorkflowService {
             message: now,
           });
 
+        if (step === 'SUBMIT' && !(await this.isAuthor(i, principal, client)))
+          throw new ForbiddenException({
+            code: 'NX-WF-NOT-ALLOWED',
+            message: 'Only the person who recorded it can submit it.',
+          });
         const { title, content } = await type.load(client, i.recordId);
         const hash = contentHash(content);
         if (step !== 'SUBMIT' && i.contentHash && hash !== i.contentHash) {

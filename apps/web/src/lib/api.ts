@@ -509,3 +509,110 @@ export const methodsApi = {
     put<MethodDetail>(`/methods/${id}/versions/${versionId}`, body),
   newVersion: (id: string, reason: string) => post<MethodDetail>(`/methods/${id}/versions`, { reason }),
 };
+
+// ---------------------------------------------------------------------------
+// Devices and calibration
+// ---------------------------------------------------------------------------
+export type DeviceStatus = "ACTIVE" | "OUT_OF_SERVICE" | "RETIRED";
+export type Readiness = "READY" | "DUE_SOON" | "OVERDUE" | "NOT_CALIBRATED" | "CALIBRATION_FAILED" | "OUT_OF_SERVICE" | "RETIRED";
+export type CalibrationOutcome = "PASS" | "WARNING" | "FAIL";
+
+export interface DeviceReadiness {
+  state: Readiness;
+  usable: boolean;
+  message: string;
+  lastCalibration: { id: string; code: string; performedAt: string; outcome: CalibrationOutcome } | null;
+  dueAt: string | null;
+}
+
+export interface DeviceSummary {
+  id: string;
+  code: string;
+  instrumentType: InstrumentType;
+  name: string;
+  manufacturer: string;
+  model: string;
+  serialNumber: string;
+  assetTag: string | null;
+  location: string;
+  firmwareVersion: string;
+  installedOn: string | null;
+  status: DeviceStatus;
+  calibrationIntervalDays: number;
+  calibrationWarningDays: number;
+  createdAt: string;
+  versionNo: number;
+  readiness: DeviceReadiness;
+}
+
+export interface PhReading {
+  bufferPh: number;
+  mv: number;
+}
+export interface CheckReading {
+  check: string;
+  expected: string;
+  observed: string;
+  pass: boolean;
+}
+
+export interface CalibrationRecord {
+  id: string;
+  code: string;
+  deviceId: string;
+  performedAt: string;
+  performedBy: PersonRef;
+  dataSource: "MANUAL" | "INSTRUMENT";
+  temperatureC: number | null;
+  readings: (PhReading | CheckReading)[];
+  limits: Record<string, number>;
+  results: Record<string, number | string>;
+  outcome: CalibrationOutcome;
+  remarks: string;
+  createdAt: string;
+  workflow: WorkflowInstance;
+  allowedSteps: WorkflowStep[];
+  history: WorkflowEvent[];
+}
+
+export interface DeviceDetail extends DeviceSummary {
+  calibrations: CalibrationRecord[];
+  history: AuditEntry[];
+  canManage: boolean;
+  canCalibrate: boolean;
+}
+
+export interface DeviceInput {
+  instrumentType?: InstrumentType;
+  name?: string;
+  manufacturer?: string;
+  model?: string;
+  serialNumber?: string;
+  assetTag?: string;
+  location?: string;
+  firmwareVersion?: string;
+  installedOn?: string | null;
+  calibrationIntervalDays?: number;
+  calibrationWarningDays?: number;
+}
+
+export interface CalibrationInput {
+  performedAt?: string;
+  temperatureC?: number;
+  readings: (PhReading | CheckReading)[];
+  remarks?: string;
+}
+
+export const devicesApi = {
+  list: () => call<DeviceSummary[]>("/devices"),
+  get: (id: string) => call<DeviceDetail>(`/devices/${id}`),
+  ofCalibration: (calibrationId: string) => call<{ deviceId: string }>(`/devices/calibrations/${calibrationId}`),
+  register: (body: DeviceInput & { reason: string; signature?: SignatureInput }) => post<DeviceDetail>("/devices", body),
+  update: (id: string, body: DeviceInput & { reason: string; signature?: SignatureInput }) => put<DeviceDetail>(`/devices/${id}`, body),
+  setStatus: (id: string, status: DeviceStatus, reason: string, signature?: SignatureInput) =>
+    post<DeviceDetail>(`/devices/${id}/status`, { status, reason, signature }),
+  recordCalibration: (id: string, body: CalibrationInput) =>
+    post<{ calibrationId: string; device: DeviceDetail }>(`/devices/${id}/calibrations`, body),
+  correctCalibration: (id: string, calibrationId: string, body: CalibrationInput) =>
+    put<DeviceDetail>(`/devices/${id}/calibrations/${calibrationId}`, body),
+};

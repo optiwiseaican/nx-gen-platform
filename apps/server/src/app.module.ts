@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from './auth/auth.module';
 import { CoreModule } from './core/core.module';
+import { DevicesModule } from './devices/devices.module';
 import { LicensingModule } from './licensing/licensing.module';
 import { MethodsModule } from './methods/methods.module';
 import { SecurityConfigModule } from './security/security-config.module';
@@ -18,6 +19,7 @@ import { WorkflowModule } from './workflow/workflow.module';
     UsersModule,
     WorkflowModule,
     MethodsModule,
+    DevicesModule,
   ],
 })
 export class AppModule {}

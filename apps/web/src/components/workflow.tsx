@@ -39,12 +39,16 @@ const STAGES: { state: WorkflowState; label: string; who: (i: WorkflowInstance) 
 ];
 const ORDER: WorkflowState[] = ["DRAFT", "IN_REVIEW", "REVIEWED", "APPROVED"];
 
-/** Prepared → Reviewed → Approved, showing who signed each stage. */
-export function WorkflowStepper({ instance }: { instance: WorkflowInstance }) {
-  const reached = ORDER.indexOf(instance.state === "INVALIDATED" || instance.state === "SUPERSEDED" ? "APPROVED" : instance.state);
+/** Prepared → (Reviewed →) Approved, showing who signed each stage. */
+export function WorkflowStepper({ instance, withReview = true }: { instance: WorkflowInstance; withReview?: boolean }) {
+  const state = instance.state === "INVALIDATED" || instance.state === "SUPERSEDED" ? "APPROVED" : instance.state;
+  // Without a review stage, IN_REVIEW means "waiting for approval".
+  const stages = withReview ? STAGES : [STAGES[0], STAGES[2]];
+  const order: WorkflowState[] = withReview ? ORDER : ["DRAFT", "IN_REVIEW", "APPROVED"];
+  const reached = order.indexOf(state);
   return (
-    <ol className="grid gap-2 sm:grid-cols-3" aria-label="Approval progress">
-      {STAGES.map((s, idx) => {
+    <ol className={`grid gap-2 ${withReview ? "sm:grid-cols-3" : "sm:grid-cols-2"}`} aria-label="Approval progress">
+      {stages.map((s, idx) => {
         const done = reached > idx;
         const current = reached === idx;
         return (
@@ -155,21 +159,28 @@ export function WorkflowActions({
   instance,
   allowed,
   onDone,
+  labels,
+  messages,
 }: {
   instance: WorkflowInstance;
   allowed: WorkflowStep[];
   onDone: (message: string) => Promise<void> | void;
+  /** Per record type wording, e.g. calibrations are submitted "for approval". */
+  labels?: Partial<Record<WorkflowStep, Partial<Pick<StepUi, "label" | "title" | "description">>>>;
+  messages?: Partial<Record<WorkflowStep, string>>;
 }) {
   const [step, setStep] = useState<WorkflowStep | null>(null);
   const [returnTo, setReturnTo] = useState<WorkflowState>("DRAFT");
+  const stepUi = (s: WorkflowStep): StepUi => ({ ...STEP_UI[s], ...labels?.[s] });
   if (!allowed.length) return null;
-  const ui = step ? STEP_UI[step] : null;
+  const ui = step ? stepUi(step) : null;
 
   async function confirm(reason: string, signature?: SignatureInput) {
     await workflowApi.act(instance.id, step!, { reason, signature, returnTo: step === "REJECT" ? returnTo : undefined });
     const done = step!;
     setStep(null);
     await onDone(
+      messages?.[done] ??
       {
         SUBMIT: "Submitted for review and locked.",
         WITHDRAW: "Withdrawn. The version is a draft again.",
@@ -187,13 +198,13 @@ export function WorkflowActions({
         {allowed.map((s) => (
           <Button
             key={s}
-            variant={STEP_UI[s].variant}
+            variant={stepUi(s).variant}
             onClick={() => {
               setReturnTo("DRAFT");
               setStep(s);
             }}
           >
-            {STEP_UI[s].label}
+            {stepUi(s).label}
           </Button>
         ))}
       </div>

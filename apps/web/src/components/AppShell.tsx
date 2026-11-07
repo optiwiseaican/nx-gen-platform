@@ -49,7 +49,8 @@ export function BrandHeader({ title, children }: { title?: string; children?: Re
 
 const NAV: { href: string; label: string; permission: string | string[] | null }[] = [
   { href: "/home/", label: "Home", permission: null },
-  { href: "/tasks/", label: "My Tasks", permission: ["methods.review", "methods.approve"] },
+  { href: "/tasks/", label: "My Tasks", permission: ["methods.review", "methods.approve", "calibration.approve"] },
+  { href: "/devices/", label: "Instruments", permission: "devices.view" },
   { href: "/methods/", label: "Methods", permission: "methods.view" },
   { href: "/users/", label: "Users", permission: "users.view" },
   { href: "/roles/", label: "Roles", permission: "users.view" },
