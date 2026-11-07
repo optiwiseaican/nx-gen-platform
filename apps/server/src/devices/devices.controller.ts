@@ -94,6 +94,32 @@ export class DevicesController {
   }
 
   @RequirePermission('calibration.perform')
+  @Post(':id/calibrations/:calibrationId/discard')
+  @HttpCode(200)
+  discard(
+    @Param('id', uuid) id: string,
+    @Param('calibrationId', uuid) calibrationId: string,
+    @Body() body: Payload,
+    @CurrentPrincipal() p: Principal,
+    @Req() req: NxGenRequest,
+  ) {
+    return this.devices.discardCalibration(
+      p,
+      id,
+      calibrationId,
+      body?.reason,
+      originOf(req),
+    );
+  }
+
+  /** Instrument types and whether their module is installed. */
+  @RequirePermission('devices.view')
+  @Get('types/all')
+  types() {
+    return this.devices.instrumentTypes();
+  }
+
+  @RequirePermission('calibration.perform')
   @Put(':id/calibrations/:calibrationId')
   correct(
     @Param('id', uuid) id: string,

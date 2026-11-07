@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+/* Same palette as the NxGen core so the module looks part of the platform. */
+@theme {
+  --color-navy: #0b2545;
+  --color-brand: #0b5cd5;
+  --color-brand-700: #0848a8;
+  --color-brand-50: #eef4fe;
+  --color-pass: #15803d;
+  --color-pass-50: #ecfdf3;
+  --color-warn: #b45309;
+  --color-warn-50: #fffbeb;
+  --color-fail: #b91c1c;
+  --color-fail-50: #fef2f2;
+  --color-ink: #111827;
+  --color-muted: #4b5563;
+  --color-line: #d9dee7;
+  --color-canvas: #f3f5f9;
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", Consolas, ui-monospace, monospace;
+}
+
+html,
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 2px;
+}

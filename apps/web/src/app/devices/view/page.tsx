@@ -6,7 +6,7 @@ import { formatDate, ReasonDialog } from "@/components/admin";
 import { AppShell, useAuthRedirect, usePrincipal } from "@/components/AppShell";
 import { CalibrationCard, CalibrationForm, DeviceForm, DeviceFormValues, ReadinessBadge } from "@/components/devices";
 import { Button, Callout, FieldTable, StatusIcon } from "@/components/ui";
-import { DeviceDetail, devicesApi, DeviceStatus, INSTRUMENT_LABELS, SignatureInput } from "@/lib/api";
+import { DeviceDetail, devicesApi, DeviceStatus, InstrumentTypeInfo, moduleUrl, SignatureInput } from "@/lib/api";
 
 type StatusChange = { to: DeviceStatus; title: string; confirm: string; description: string; destructive?: boolean };
 
@@ -55,6 +55,8 @@ function DeviceView() {
   const [statusChange, setStatusChange] = useState<StatusChange | null>(null);
   const [calibrating, setCalibrating] = useState(false);
   const [correcting, setCorrecting] = useState<string | null>(null);
+  const [discarding, setDiscarding] = useState<string | null>(null);
+  const [types, setTypes] = useState<InstrumentTypeInfo[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +74,10 @@ function DeviceView() {
         });
     } else setId(q.get("id"));
   }, [redirect]);
+
+  useEffect(() => {
+    devicesApi.types().then(setTypes).catch(() => undefined);
+  }, []);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -117,7 +123,7 @@ function DeviceView() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="font-mono text-sm text-muted">
-            {d.code} · {INSTRUMENT_LABELS[d.instrumentType]}
+            {d.code} · {d.instrumentTypeLabel}{d.deviceIdentifier && ` · ID ${d.deviceIdentifier}`}
           </p>
           <h2 className="text-xl font-semibold text-ink">{d.name}</h2>
         </div>
@@ -146,10 +152,12 @@ function DeviceView() {
             assetTag: d.assetTag ?? "",
             location: d.location,
             firmwareVersion: d.firmwareVersion,
+            deviceIdentifier: d.deviceIdentifier ?? "",
             installedOn: d.installedOn ?? "",
             calibrationIntervalDays: d.calibrationIntervalDays,
             calibrationWarningDays: d.calibrationWarningDays,
           }}
+          types={types.length ? types : [{ code: d.instrumentType, label: d.instrumentTypeLabel, moduleId: null, available: true, moduleName: null, moduleUi: null }]}
           typeLocked
           submitLabel="Save…"
           onSubmit={setEditValues}
@@ -180,6 +188,7 @@ function DeviceView() {
                 ["Asset tag", d.assetTag ?? "—"],
                 ["Location", d.location || "—"],
                 ["Firmware", d.firmwareVersion || "—"],
+                ["Instrument ID (DEVICE_ID)", d.deviceIdentifier ? <span key="i" className="font-mono">{d.deviceIdentifier}</span> : "— (no data link)"],
                 ["Installed", d.installedOn ?? "—"],
                 ["Calibration interval", `Every ${d.calibrationIntervalDays} days, warning ${d.calibrationWarningDays} days before`],
                 ["Registered", formatDate(d.createdAt)],
@@ -192,13 +201,20 @@ function DeviceView() {
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="font-semibold">Calibrations</h3>
+          {d.module?.ui && (
+            <a
+              href={moduleUrl(d.module.ui)}
+              className="inline-flex min-h-11 items-center rounded-md bg-brand px-5 font-semibold text-white hover:bg-brand-700"
+            >
+              Live readings and calibration in the {d.module.name} module
+            </a>
+          )}
           {d.canCalibrate && !calibrating && (
             <Button onClick={() => setCalibrating(true)}>Record calibration</Button>
           )}
         </div>
         {calibrating && (
           <CalibrationForm
-            type={d.instrumentType}
             submitLabel="Save as draft"
             onSubmit={async (body) => {
               const res = await devicesApi.recordCalibration(d.id, body);
@@ -214,7 +230,6 @@ function DeviceView() {
           correcting === c.id ? (
             <CalibrationForm
               key={c.id}
-              type={d.instrumentType}
               initial={c}
               submitLabel="Save corrections"
               onSubmit={async (body) => {
@@ -228,11 +243,12 @@ function DeviceView() {
             <CalibrationCard
               key={c.id}
               c={c}
-              type={d.instrumentType}
               open={openCal === c.id}
-              canCorrect={c.workflow.state === "DRAFT" && c.performedBy.id === principal.userId}
+              canCorrect={c.workflow.state === "DRAFT" && c.performedBy.id === principal.userId && c.dataSource === "MANUAL" && !d.module}
+              canDiscard={c.workflow.state === "DRAFT" && c.performedBy.id === principal.userId}
               onToggle={() => setOpenCal(openCal === c.id ? null : c.id)}
               onCorrect={() => setCorrecting(c.id)}
+              onDiscard={() => setDiscarding(c.id)}
               onDone={async (msg) => {
                 await load();
                 setNotice(msg);
@@ -261,6 +277,21 @@ function DeviceView() {
         </div>
       </section>
 
+      <ReasonDialog
+        open={!!discarding}
+        title="Discard draft calibration"
+        description="The draft is withdrawn and kept in the audit trail. Record a new calibration afterwards."
+        confirmLabel="Discard"
+        destructive
+        minReason={10}
+        reasonPlaceholder="e.g. Wrong buffer used; recalibrating"
+        onConfirm={async (reason) => {
+          setD(await devicesApi.discardCalibration(d.id, discarding!, reason));
+          setDiscarding(null);
+          setNotice("Draft calibration discarded.");
+        }}
+        onClose={() => setDiscarding(null)}
+      />
       <ReasonDialog
         open={!!editValues}
         title="Save instrument details"

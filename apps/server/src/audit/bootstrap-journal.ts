@@ -26,7 +26,8 @@ export interface AuditEventInput {
     | 'SYSTEM'
     | 'WORKFLOW'
     | 'METHODS'
-    | 'DEVICES';
+    | 'DEVICES'
+    | 'MODULES';
   action: string;
   result: 'SUCCESS' | 'FAILURE' | 'INFO';
   /** User ID, or a system identity such as SYSTEM_LICENSE_SERVICE. */

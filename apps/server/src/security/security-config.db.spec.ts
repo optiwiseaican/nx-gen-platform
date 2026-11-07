@@ -235,6 +235,38 @@ describeDb('Security configuration, session, audit export, recovery', () => {
     });
   });
 
+  describe('passive requests', () => {
+    it('background polling does not keep an idle session alive; user actions do', async () => {
+      const { token, principal } = await identity.login(
+        'root.admin',
+        ROOT_PW,
+        ORIGIN,
+      );
+      const back = () =>
+        db.query(
+          "UPDATE sessions SET last_seen_at = now() - interval '5 minutes' WHERE id = $1",
+          [principal.sessionId],
+        );
+      const seen = async () =>
+        (
+          await db.query<{ age: number }>(
+            'SELECT extract(epoch FROM now() - last_seen_at)::int AS age FROM sessions WHERE id = $1',
+            [principal.sessionId],
+          )
+        )[0].age;
+      await back();
+      expect(
+        await identity.authenticate(token, ORIGIN, { activity: false }),
+      ).not.toBeNull();
+      expect(await seen()).toBeGreaterThanOrEqual(299);
+      await identity.authenticate(token, ORIGIN);
+      expect(await seen()).toBeLessThan(5);
+      await back();
+      await identity.touchSession(principal.sessionId);
+      expect(await seen()).toBeLessThan(5);
+    });
+  });
+
   describe('audit trail export', () => {
     it('exports filtered rows oldest-first with hash-chain columns and a matching SHA-256', async () => {
       const out = await audit.exportCsv({ category: 'SECURITY' });

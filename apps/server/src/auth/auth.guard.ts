@@ -9,6 +9,7 @@ import { Reflector } from '@nestjs/core';
 import {
   ACCESS_KEY,
   ALLOW_PASSWORD_CHANGE_KEY,
+  PASSIVE_KEY,
   PERMISSION_KEY,
 } from './auth.decorators';
 import type { Response } from 'express';
@@ -46,9 +47,15 @@ export class AuthGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<NxGenRequest>();
 
     const token = readSessionCookie(req);
+    const passive = this.reflector.getAllAndOverride<boolean>(
+      PASSIVE_KEY,
+      targets,
+    );
     if (token)
       req.principal =
-        (await this.identity.authenticate(token, originOf(req))) ?? undefined;
+        (await this.identity.authenticate(token, originOf(req), {
+          activity: !passive,
+        })) ?? undefined;
     if (req.principal?.session) {
       const res = context.switchToHttp().getResponse<Response>();
       res.setHeader(SESSION_IDLE_HEADER, req.principal.session.idleExpiresAt);

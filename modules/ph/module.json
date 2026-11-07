@@ -1,0 +1,21 @@
+{
+  "id": "ph",
+  "name": "pH",
+  "version": "1.0.0",
+  "description": "pH meters connected through the AICAN USB dongle: live readings, calibration from the instrument and pH calibration rules.",
+  "coreApi": 1,
+  "minCoreVersion": "2.0.0",
+  "entitlement": "ph",
+  "tablePrefix": "ph_",
+  "apiEntry": "api/index.js",
+  "uiEntry": "ui/index.html",
+  "instrumentTypes": [{ "code": "PH", "label": "pH meter" }],
+  "permissions": [
+    {
+      "code": "ph.view",
+      "description": "View pH instruments, live readings and pH calibration data",
+      "defaultRoles": ["SUPER_ADMINISTRATOR", "IT_ADMINISTRATOR", "QA_MANAGER", "QA_REVIEWER", "ANALYST", "OPERATOR", "AUDITOR"]
+    }
+  ],
+  "menu": [{ "label": "pH", "path": "/", "permission": "ph.view" }]
+}

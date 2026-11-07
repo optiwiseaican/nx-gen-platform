@@ -441,6 +441,7 @@ export class IdentityService {
   async authenticate(
     token: string,
     origin: RequestOrigin,
+    { activity = true }: { activity?: boolean } = {},
   ): Promise<Principal | null> {
     if (!this.db.enabled || !token) return null;
     const [s] = await this.db.query<
@@ -476,13 +477,21 @@ export class IdentityService {
       );
       return null;
     }
-    if (s.now.getTime() - s.last_seen_at.getTime() > 30_000) {
+    if (activity && s.now.getTime() - s.last_seen_at.getTime() > 30_000) {
       await this.db.query(
         'UPDATE sessions SET last_seen_at = now() WHERE id = $1',
         [s.session_id],
       );
     }
     return this.loadPrincipal(s.user_id, s.session_id);
+  }
+
+  /** Record user activity on a session (for routes that are not passive). */
+  async touchSession(sessionId: string): Promise<void> {
+    await this.db.query(
+      "UPDATE sessions SET last_seen_at = now() WHERE id = $1 AND ended_at IS NULL AND last_seen_at < now() - interval '30 seconds'",
+      [sessionId],
+    );
   }
 
   async loadPrincipal(userId: string, sessionId: string): Promise<Principal> {

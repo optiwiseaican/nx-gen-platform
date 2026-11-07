@@ -27,6 +27,7 @@ function Home() {
     { href: "/users/", title: "Users", text: "Create accounts, assign roles, disable, unlock and reset passwords.", show: can("users.view") },
     { href: "/roles/", title: "Roles & Permissions", text: "See what each role may do; Super Administrators can adjust it.", show: can("users.view") },
     { href: "/audit/", title: "Audit Trail", text: "Review every recorded action, with chain-integrity verification.", show: can("audit.view") },
+    { href: "/settings/modules/", title: "Modules", text: "Install, enable and disable signed NxGen modules such as pH.", show: can("modules.manage") },
     { href: "/system/", title: "System Information", text: "Platform identity, installation, license and licensed modules.", show: can("system.view") },
     { href: "/security/", title: "Security", text: "Electronic signature requirements, account controls and signed records.", show: can("audit.view") },
     { href: "/change-password/", title: "Change Password", text: "Update your password. Expired passwords must be changed.", show: true },

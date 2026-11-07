@@ -7,9 +7,11 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
+import type { CalibrationInput, DeviceInfo } from '@crescent/module-sdk';
 import { AuditService } from '../audit/audit.service';
 import type { Principal, RequestOrigin } from '../auth/auth.types';
 import { DatabaseService } from '../database/database.service';
+import { ModuleRegistry } from '../modules/module-registry';
 import { SignatureService } from '../signatures/signature.service';
 import type { SignatureInput } from '../signatures/signature.service';
 import {
@@ -22,17 +24,15 @@ import {
   CalibrationOutcome,
   CheckReading,
   computeChecks,
-  computePh,
-  DEFAULT_PH_LIMITS,
-  PhReading,
 } from './calibration-math';
 
 export const CALIBRATION_WORKFLOW = 'CALIBRATION_APPROVAL';
 const CAL_TABLE = 'calibration_records';
-const INSTRUMENT_TYPES = ['PH', 'EC', 'TLC', 'OTHER'] as const;
-type InstrumentType = (typeof INSTRUMENT_TYPES)[number];
+/** Instrument type whose calibration (a checklist) is built into the core. */
+export const CORE_INSTRUMENT_TYPE = 'OTHER';
 const STATUSES = ['ACTIVE', 'OUT_OF_SERVICE', 'RETIRED'] as const;
 type DeviceStatus = (typeof STATUSES)[number];
+const IDENTIFIER = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 export type Readiness =
   | 'READY'
@@ -40,6 +40,7 @@ export type Readiness =
   | 'OVERDUE'
   | 'NOT_CALIBRATED'
   | 'CALIBRATION_FAILED'
+  | 'MODULE_UNAVAILABLE'
   | 'OUT_OF_SERVICE'
   | 'RETIRED';
 
@@ -60,7 +61,7 @@ export interface DeviceReadiness {
 interface DeviceRow {
   id: string;
   code: string;
-  instrument_type: InstrumentType;
+  instrument_type: string;
   name: string;
   manufacturer: string;
   model: string;
@@ -70,6 +71,7 @@ interface DeviceRow {
   firmware_version: string;
   installed_on: string | null;
   device_status: DeviceStatus;
+  device_identifier: string | null;
   calibration_interval_days: number;
   calibration_warning_days: number;
   created_at: Date;
@@ -86,8 +88,10 @@ interface CalibrationRow {
   data_source: string;
   temperature_c: string | null;
   readings: unknown[];
-  limits: Record<string, number>;
+  limits: Record<string, unknown>;
   results: Record<string, unknown>;
+  display: { label: string; value: string }[];
+  source_messages: number[];
   outcome: CalibrationOutcome;
   remarks: string;
   created_at: Date;
@@ -108,6 +112,7 @@ const toDevice = (r: DeviceRow) => ({
   firmwareVersion: r.firmware_version,
   installedOn: r.installed_on,
   status: r.device_status,
+  deviceIdentifier: r.device_identifier,
   calibrationIntervalDays: r.calibration_interval_days,
   calibrationWarningDays: r.calibration_warning_days,
   createdAt: r.created_at.toISOString(),
@@ -128,6 +133,8 @@ const toCalibration = (r: CalibrationRow) => ({
   readings: r.readings,
   limits: r.limits,
   results: r.results,
+  display: r.display,
+  sourceMessages: r.source_messages,
   outcome: r.outcome,
   remarks: r.remarks,
   createdAt: r.created_at.toISOString(),
@@ -172,10 +179,12 @@ const int = (
 };
 
 /**
- * Device Layer (master spec §4, §9): instrument register and calibration
- * management. A device is usable only when it is ACTIVE and its latest
- * approved calibration passed and is not overdue (LabApp
- * CalibrationComplianceHelper: measurement is blocked when overdue).
+ * Device Layer (master spec §4, §9): instrument register, calibration records
+ * and readiness. Instrument-specific calibration (e.g. pH slope and offset)
+ * belongs to the module that provides the instrument type; the core keeps the
+ * record, the approval workflow and the usability rule:
+ * an instrument is usable only when it is ACTIVE, its module is available, and
+ * its latest approved calibration passed and is not overdue.
  */
 @Injectable()
 export class DevicesService implements OnModuleInit {
@@ -184,6 +193,7 @@ export class DevicesService implements OnModuleInit {
     private readonly audit: AuditService,
     private readonly signatures: SignatureService,
     private readonly workflow: WorkflowService,
+    private readonly registry: ModuleRegistry,
   ) {}
 
   onModuleInit() {
@@ -215,6 +225,7 @@ export class DevicesService implements OnModuleInit {
             performedAt: c.performed_at.toISOString(),
             performedBy: c.performed_by,
             dataSource: c.data_source,
+            sourceMessages: c.source_messages,
             temperatureC:
               c.temperature_c === null ? null : Number(c.temperature_c),
             readings: c.readings,
@@ -234,9 +245,57 @@ export class DevicesService implements OnModuleInit {
         return rows[0]?.performed_by ?? null;
       },
     });
+    this.registry.setDeviceDirectory({
+      get: (id) => this.info({ id }),
+      byIdentifier: (identifier) => this.info({ identifier }),
+      list: async (type) => {
+        const rows = await this.db.query<DeviceRow>(
+          'SELECT * FROM devices WHERE instrument_type = $1 AND NOT is_deleted ORDER BY code',
+          [type],
+        );
+        return Promise.all(rows.map((r) => this.toInfo(r)));
+      },
+    });
   }
 
-  private requireAny(principal: Principal, ...perms: string[]) {
+  private async info(by: {
+    id?: string;
+    identifier?: string;
+  }): Promise<DeviceInfo | null> {
+    if (by.id && !/^[0-9a-f-]{36}$/i.test(by.id)) return null;
+    const [r] = await this.db.query<DeviceRow>(
+      `SELECT * FROM devices WHERE ${by.id ? 'id = $1' : 'device_identifier = $1'} AND NOT is_deleted`,
+      [by.id ?? by.identifier],
+    );
+    return r ? this.toInfo(r) : null;
+  }
+
+  private async toInfo(r: DeviceRow): Promise<DeviceInfo> {
+    const rd = await this.readiness(r);
+    return {
+      id: r.id,
+      code: r.code,
+      instrumentType: r.instrument_type,
+      name: r.name,
+      manufacturer: r.manufacturer,
+      model: r.model,
+      serialNumber: r.serial_number,
+      location: r.location,
+      status: r.device_status,
+      deviceIdentifier: r.device_identifier,
+      readiness: {
+        state: rd.state,
+        usable: rd.usable,
+        message: rd.message,
+        dueAt: rd.dueAt,
+      },
+    };
+  }
+
+  private requireAny(
+    principal: Pick<Principal, 'permissions'>,
+    ...perms: string[]
+  ) {
     if (!perms.some((p) => principal.permissions.includes(p)))
       throw new ForbiddenException(
         'You do not have permission for this action.',
@@ -253,9 +312,23 @@ export class DevicesService implements OnModuleInit {
     return r;
   }
 
+  private actor(
+    principal: Pick<Principal, 'userId' | 'fullName'>,
+    reason: string | null,
+    origin: RequestOrigin,
+  ) {
+    return {
+      actorId: principal.userId,
+      actorName: principal.fullName,
+      reason: reason ?? undefined,
+      ipAddress: origin.ipAddress,
+      machineName: origin.machineName,
+    };
+  }
+
   private async event(
     client: PoolClient,
-    principal: Principal,
+    principal: Pick<Principal, 'userId' | 'fullName'>,
     origin: RequestOrigin,
     action: string,
     tableName: string,
@@ -279,6 +352,42 @@ export class DevicesService implements OnModuleInit {
       },
       client,
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Instrument types
+  // ---------------------------------------------------------------------------
+
+  async instrumentTypes() {
+    const rows = await this.db.query<{
+      code: string;
+      label: string;
+      module_id: string | null;
+    }>(
+      'SELECT code, label, module_id FROM instrument_types WHERE NOT is_deleted ORDER BY code = $1, label',
+      [CORE_INSTRUMENT_TYPE],
+    );
+    return rows.map((r) => {
+      const provider = this.registry.providerOf(r.code);
+      return {
+        code: r.code,
+        label: r.label,
+        moduleId: r.module_id,
+        available: this.registry.typeAvailable(r.code),
+        moduleName: provider?.manifest.name ?? null,
+        moduleUi: provider?.manifest.uiEntry
+          ? `/modules/${provider.id}/`
+          : null,
+      };
+    });
+  }
+
+  private async typeLabel(code: string) {
+    const [r] = await this.db.query<{
+      label: string;
+      module_id: string | null;
+    }>('SELECT label, module_id FROM instrument_types WHERE code = $1', [code]);
+    return r;
   }
 
   // ---------------------------------------------------------------------------
@@ -328,6 +437,13 @@ export class DevicesService implements OnModuleInit {
         state: 'OUT_OF_SERVICE',
         usable: false,
         message: 'Out of service. Return it to service before use.',
+      };
+    if (!this.registry.typeAvailable(d.instrument_type))
+      return {
+        ...base,
+        state: 'MODULE_UNAVAILABLE',
+        usable: false,
+        message: `The NxGen module for this instrument type (${d.instrument_type}) is not installed, enabled or licensed.`,
       };
     if (!last)
       return {
@@ -423,18 +539,33 @@ export class DevicesService implements OnModuleInit {
         history: await this.workflow.history(wf.id),
       });
     }
+    const provider = this.registry.providerOf(d.instrument_type);
+    const open = calibrations.some((c) =>
+      ['DRAFT', 'IN_REVIEW'].includes(c.workflow.state),
+    );
     return {
       ...toDevice(d),
+      instrumentTypeLabel:
+        (await this.typeLabel(d.instrument_type))?.label ?? d.instrument_type,
       readiness: await this.readiness(d),
       calibrations,
       history: await this.audit.list({ recordId: id, limit: 100 }),
+      module: provider
+        ? {
+            id: provider.id,
+            name: provider.manifest.name,
+            ui: provider.manifest.uiEntry
+              ? `/modules/${provider.id}/?device=${d.id}`
+              : null,
+          }
+        : null,
       canManage: principal.permissions.includes('devices.manage'),
+      /** Checklist calibration in the core (OTHER). Module types calibrate in their module. */
       canCalibrate:
+        d.instrument_type === CORE_INSTRUMENT_TYPE &&
         principal.permissions.includes('calibration.perform') &&
         d.device_status === 'ACTIVE' &&
-        !calibrations.some((c) =>
-          ['DRAFT', 'IN_REVIEW'].includes(c.workflow.state),
-        ),
+        !open,
     };
   }
 
@@ -463,12 +594,27 @@ export class DevicesService implements OnModuleInit {
         });
       return v;
     };
-    const tag =
-      input.assetTag === undefined
-        ? (current?.asset_tag ?? null)
-        : typeof input.assetTag === 'string' && input.assetTag.trim()
-          ? input.assetTag.trim().slice(0, 60)
+    const optional = (
+      v: unknown,
+      fallback: string | null | undefined,
+      max: number,
+    ) =>
+      v === undefined
+        ? (fallback ?? null)
+        : typeof v === 'string' && v.trim()
+          ? v.trim().slice(0, max)
           : null;
+    const identifier = optional(
+      input.deviceIdentifier,
+      current?.device_identifier,
+      64,
+    );
+    if (identifier && !IDENTIFIER.test(identifier))
+      throw new BadRequestException({
+        message:
+          'The instrument ID (DEVICE_ID in its data) may contain letters, digits and . _ : - only (max 64).',
+        field: 'deviceIdentifier',
+      });
     return {
       name: str(input.name, 'name', 'instrument name', 2, 120, current?.name),
       manufacturer: str(
@@ -488,7 +634,8 @@ export class DevicesService implements OnModuleInit {
         80,
         current?.serial_number,
       ),
-      assetTag: tag,
+      assetTag: optional(input.assetTag, current?.asset_tag, 60),
+      deviceIdentifier: identifier,
       location: str(
         input.location,
         'location',
@@ -532,23 +679,38 @@ export class DevicesService implements OnModuleInit {
       model: string;
       serialNumber: string;
       assetTag: string | null;
+      deviceIdentifier: string | null;
     },
     exceptId?: string,
   ) {
     const { rows } = await client.query<{ field: string }>(
-      `SELECT CASE WHEN manufacturer = $1 AND model = $2 AND serial_number = $3 THEN 'serialNumber' ELSE 'assetTag' END AS field
+      `SELECT CASE WHEN manufacturer = $1 AND model = $2 AND serial_number = $3 THEN 'serialNumber'
+                   WHEN $6::text IS NOT NULL AND device_identifier = $6 THEN 'deviceIdentifier'
+                   ELSE 'assetTag' END AS field
          FROM devices
         WHERE id IS DISTINCT FROM $5
-          AND ((manufacturer = $1 AND model = $2 AND serial_number = $3) OR ($4::text IS NOT NULL AND lower(asset_tag) = lower($4)))
+          AND ((manufacturer = $1 AND model = $2 AND serial_number = $3)
+               OR ($4::text IS NOT NULL AND lower(asset_tag) = lower($4))
+               OR ($6::text IS NOT NULL AND device_identifier = $6))
         LIMIT 1`,
-      [f.manufacturer, f.model, f.serialNumber, f.assetTag, exceptId ?? null],
+      [
+        f.manufacturer,
+        f.model,
+        f.serialNumber,
+        f.assetTag,
+        exceptId ?? null,
+        f.deviceIdentifier,
+      ],
     );
     if (rows[0])
       throw new ConflictException({
-        message:
-          rows[0].field === 'serialNumber'
-            ? 'An instrument with this manufacturer, model and serial number is already registered.'
-            : 'This asset tag is already used by another instrument.',
+        message: {
+          serialNumber:
+            'An instrument with this manufacturer, model and serial number is already registered.',
+          assetTag: 'This asset tag is already used by another instrument.',
+          deviceIdentifier:
+            'This instrument ID is already linked to another instrument.',
+        }[rows[0].field],
         field: rows[0].field,
       });
   }
@@ -561,10 +723,17 @@ export class DevicesService implements OnModuleInit {
   ) {
     this.requireAny(principal, 'devices.manage');
     const reason = this.reason(input.reason);
-    const type = input.instrumentType as InstrumentType;
-    if (!INSTRUMENT_TYPES.includes(type))
+    const type =
+      typeof input.instrumentType === 'string' ? input.instrumentType : '';
+    const typeRow = type ? await this.typeLabel(type) : undefined;
+    if (!typeRow)
       throw new BadRequestException({
         message: 'Choose the instrument type.',
+        field: 'instrumentType',
+      });
+    if (!this.registry.typeAvailable(type))
+      throw new ConflictException({
+        message: `Install and enable the NxGen module for ${typeRow.label} instruments first.`,
         field: 'instrumentType',
       });
     const f = this.parseDevice(input);
@@ -584,9 +753,9 @@ export class DevicesService implements OnModuleInit {
         );
         const code = `DEV-${String(seq[0].n).padStart(4, '0')}`;
         const { rows } = await client.query<{ id: string; version_no: number }>(
-          `INSERT INTO devices (code, instrument_type, name, manufacturer, model, serial_number, asset_tag, location,
+          `INSERT INTO devices (code, instrument_type, name, manufacturer, model, serial_number, asset_tag, device_identifier, location,
                               firmware_version, installed_on, calibration_interval_days, calibration_warning_days)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id, version_no`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id, version_no`,
           [
             code,
             type,
@@ -595,6 +764,7 @@ export class DevicesService implements OnModuleInit {
             f.model,
             f.serialNumber,
             f.assetTag,
+            f.deviceIdentifier,
             f.location,
             f.firmwareVersion,
             f.installedOn,
@@ -610,7 +780,11 @@ export class DevicesService implements OnModuleInit {
           'devices',
           rows[0].id,
           reason,
-          { code, serialNumber: f.serialNumber },
+          {
+            code,
+            serialNumber: f.serialNumber,
+            instrumentType: type,
+          },
         );
         if (signer)
           await this.signatures.apply(
@@ -662,8 +836,8 @@ export class DevicesService implements OnModuleInit {
         );
         if (!changed.length) throw new BadRequestException('Nothing changed.');
         const { rows } = await client.query<{ version_no: number }>(
-          `UPDATE devices SET name = $2, manufacturer = $3, model = $4, serial_number = $5, asset_tag = $6, location = $7,
-                firmware_version = $8, installed_on = $9, calibration_interval_days = $10, calibration_warning_days = $11
+          `UPDATE devices SET name = $2, manufacturer = $3, model = $4, serial_number = $5, asset_tag = $6, device_identifier = $7,
+                location = $8, firmware_version = $9, installed_on = $10, calibration_interval_days = $11, calibration_warning_days = $12
           WHERE id = $1 RETURNING version_no`,
           [
             id,
@@ -672,6 +846,7 @@ export class DevicesService implements OnModuleInit {
             f.model,
             f.serialNumber,
             f.assetTag,
+            f.deviceIdentifier,
             f.location,
             f.firmwareVersion,
             f.installedOn,
@@ -781,89 +956,9 @@ export class DevicesService implements OnModuleInit {
   // Calibrations
   // ---------------------------------------------------------------------------
 
-  private parseCalibration(
-    type: InstrumentType,
-    input: Record<string, unknown>,
-  ) {
+  /** Core checklist calibration for OTHER instruments. */
+  private checklist(input: Record<string, unknown>): CalibrationInput {
     const remarks = str(input.remarks, 'remarks', 'Remarks', 0, 2000, '');
-    const performedAt =
-      input.performedAt === undefined
-        ? new Date()
-        : typeof input.performedAt === 'string'
-          ? new Date(input.performedAt)
-          : new Date(NaN);
-    if (
-      Number.isNaN(performedAt.getTime()) ||
-      performedAt.getTime() > Date.now() + 5 * 60_000 ||
-      performedAt.getTime() < Date.now() - 7 * DAY
-    )
-      throw new BadRequestException({
-        message:
-          'The calibration time must be within the last 7 days and not in the future.',
-        field: 'performedAt',
-      });
-
-    if (type === 'PH') {
-      const t = input.temperatureC;
-      if (typeof t !== 'number' || !Number.isFinite(t) || t < 0 || t > 100)
-        throw new BadRequestException({
-          message: 'Enter the buffer temperature (0–100 °C).',
-          field: 'temperatureC',
-        });
-      if (
-        !Array.isArray(input.readings) ||
-        input.readings.length < 2 ||
-        input.readings.length > 5
-      )
-        throw new BadRequestException({
-          message: 'Enter 2 to 5 buffer readings.',
-          field: 'readings',
-        });
-      const readings: PhReading[] = input.readings.map(
-        (r: Record<string, unknown>, i: number) => {
-          const bufferPh = r?.bufferPh;
-          const mv = r?.mv;
-          if (
-            typeof bufferPh !== 'number' ||
-            bufferPh < 0 ||
-            bufferPh > 14 ||
-            typeof mv !== 'number' ||
-            Math.abs(mv) > 1000
-          )
-            throw new BadRequestException({
-              message: `Buffer ${i + 1}: pH 0–14 and potential within ±1000 mV.`,
-              field: 'readings',
-            });
-          return { bufferPh, mv };
-        },
-      );
-      if (new Set(readings.map((r) => r.bufferPh)).size !== readings.length)
-        throw new BadRequestException({
-          message: 'Each buffer must have a different pH.',
-          field: 'readings',
-        });
-      if (
-        Math.max(...readings.map((r) => r.bufferPh)) -
-          Math.min(...readings.map((r) => r.bufferPh)) <
-        2
-      )
-        throw new BadRequestException({
-          message: 'Buffers must span at least 2 pH units.',
-          field: 'readings',
-        });
-      const limits = DEFAULT_PH_LIMITS;
-      const { outcome, ...results } = computePh(readings, t, limits);
-      return {
-        performedAt,
-        temperatureC: t,
-        readings,
-        limits: { ...limits },
-        results,
-        outcome,
-        remarks,
-      };
-    }
-
     if (
       !Array.isArray(input.readings) ||
       input.readings.length < 1 ||
@@ -896,20 +991,42 @@ export class DevicesService implements OnModuleInit {
       },
     );
     const { outcome, ...results } = computeChecks(readings);
-    const temperatureC =
-      typeof input.temperatureC === 'number' ? input.temperatureC : null;
     return {
-      performedAt,
-      temperatureC,
+      performedAt:
+        typeof input.performedAt === 'string' ? input.performedAt : undefined,
+      temperatureC: null,
       readings,
       limits: {},
       results,
+      display: [
+        {
+          label: 'Checks passed',
+          value: `${results.passed} of ${readings.length}`,
+        },
+      ],
       outcome,
       remarks,
+      dataSource: 'MANUAL',
+      sourceMessages: [],
     };
   }
 
-  /** Record a calibration as a draft; the performer then submits it for approval. */
+  private performedAt(v: string | undefined) {
+    const at = v === undefined ? new Date() : new Date(v);
+    if (
+      Number.isNaN(at.getTime()) ||
+      at.getTime() > Date.now() + 5 * 60_000 ||
+      at.getTime() < Date.now() - 7 * DAY
+    )
+      throw new BadRequestException({
+        message:
+          'The calibration time must be within the last 7 days and not in the future.',
+        field: 'performedAt',
+      });
+    return at;
+  }
+
+  /** HTTP: checklist calibration of an OTHER instrument. */
   async recordCalibration(
     principal: Principal,
     deviceId: string,
@@ -917,10 +1034,59 @@ export class DevicesService implements OnModuleInit {
     origin: RequestOrigin,
   ) {
     this.requireAny(principal, 'calibration.perform');
-    const calibrationId = await this.db.transaction(
-      this.workflow.actor(principal, 'Calibration recorded', origin),
+    const d = await this.info({ id: deviceId });
+    if (!d) throw new NotFoundException('Instrument not found.');
+    if (d.instrumentType !== CORE_INSTRUMENT_TYPE) {
+      const provider = this.registry.providerOf(d.instrumentType);
+      throw new ConflictException(
+        provider
+          ? `Calibrate ${d.code} in the ${provider.manifest.name} module.`
+          : `The module for ${d.instrumentType} instruments is not installed or enabled.`,
+      );
+    }
+    const { calibrationId } = await this.createCalibration(
+      principal,
+      deviceId,
+      this.checklist(input),
+      origin,
+      null,
+    );
+    return { calibrationId, device: await this.get(deviceId, principal) };
+  }
+
+  /**
+   * Creates a DRAFT calibration record and starts its approval workflow.
+   * Used by the core (checklist) and by modules through ModuleContext; a
+   * module may only record calibrations for the instrument types it provides.
+   */
+  async createCalibration(
+    principal: Pick<Principal, 'userId' | 'fullName' | 'permissions'>,
+    deviceId: string,
+    c: CalibrationInput,
+    origin: RequestOrigin,
+    moduleId: string | null,
+  ): Promise<{ calibrationId: string; code: string }> {
+    this.requireAny(principal, 'calibration.perform');
+    if (!['PASS', 'WARNING', 'FAIL'].includes(c.outcome))
+      throw new BadRequestException('Invalid calibration outcome.');
+    if (!['MANUAL', 'INSTRUMENT', 'SIMULATED'].includes(c.dataSource))
+      throw new BadRequestException('Invalid data source.');
+    const performedAt = this.performedAt(c.performedAt);
+    const remarks = (c.remarks ?? '').slice(0, 2000);
+    return this.db.transaction(
+      this.actor(principal, 'Calibration recorded', origin),
       async (client) => {
         const d = await this.loadDevice(client, deviceId, true);
+        const provider = this.registry.providerOf(d.instrument_type);
+        if (
+          moduleId !==
+          (d.instrument_type === CORE_INSTRUMENT_TYPE
+            ? null
+            : (provider?.id ?? '-'))
+        )
+          throw new ForbiddenException(
+            'This calibration must be recorded by the module that provides the instrument type.',
+          );
         if (d.device_status !== 'ACTIVE')
           throw new ConflictException(
             'Only an active instrument can be calibrated. Return it to service first.',
@@ -934,34 +1100,44 @@ export class DevicesService implements OnModuleInit {
           throw new ConflictException(
             'This instrument already has a calibration in progress. Finish or withdraw it first.',
           );
-        const c = this.parseCalibration(d.instrument_type, input);
         const { rows: seq } = await client.query<{ n: string }>(
           "SELECT nextval('calibration_code_seq') AS n",
         );
         const code = `CAL-${String(seq[0].n).padStart(5, '0')}`;
         const { rows } = await client.query<{ id: string }>(
-          `INSERT INTO calibration_records (code, device_id, performed_at, performed_by, temperature_c, readings, limits, results, outcome, remarks)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+          `INSERT INTO calibration_records (code, device_id, performed_at, performed_by, data_source, temperature_c, readings, limits,
+                                          results, display, source_messages, outcome, remarks)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
           [
             code,
             deviceId,
-            c.performedAt,
+            performedAt,
             principal.userId,
+            c.dataSource,
             c.temperatureC,
             JSON.stringify(c.readings),
             JSON.stringify(c.limits),
             JSON.stringify(c.results),
+            JSON.stringify(c.display ?? []),
+            JSON.stringify(c.sourceMessages ?? []),
             c.outcome,
-            c.remarks,
+            remarks,
           ],
         );
-        await this.workflow.start(client, principal, {
-          definitionCode: CALIBRATION_WORKFLOW,
-          tableName: CAL_TABLE,
-          recordId: rows[0].id,
-          seriesId: rows[0].id,
-          seriesVersion: 1,
-        });
+        await this.workflow.start(
+          client,
+          {
+            userId: principal.userId,
+            fullName: principal.fullName,
+          } as Principal,
+          {
+            definitionCode: CALIBRATION_WORKFLOW,
+            tableName: CAL_TABLE,
+            recordId: rows[0].id,
+            seriesId: rows[0].id,
+            seriesVersion: 1,
+          },
+        );
         await this.event(
           client,
           principal,
@@ -970,15 +1146,70 @@ export class DevicesService implements OnModuleInit {
           CAL_TABLE,
           rows[0].id,
           null,
-          { code, device: d.code, outcome: c.outcome },
+          {
+            code,
+            device: d.code,
+            outcome: c.outcome,
+            dataSource: c.dataSource,
+            module: moduleId,
+          },
         );
-        return rows[0].id;
+        return { calibrationId: rows[0].id, code };
       },
     );
-    return { calibrationId, device: await this.get(deviceId, principal) };
   }
 
-  /** Correct a draft calibration before submission; only the person who performed it. */
+  /**
+   * Withdraw a calibration that was never submitted, or was rejected back to
+   * draft (instrument readings cannot be edited). Soft delete, audited.
+   */
+  async discardCalibration(
+    principal: Principal,
+    deviceId: string,
+    calibrationId: string,
+    reasonInput: unknown,
+    origin: RequestOrigin,
+  ) {
+    this.requireAny(principal, 'calibration.perform');
+    const reason = this.reason(reasonInput, 10);
+    await this.db.transaction(
+      this.actor(principal, reason, origin),
+      async (client) => {
+        await this.workflow.assertEditable(client, CAL_TABLE, calibrationId);
+        const { rows } = await client.query<{
+          device_id: string;
+          performed_by: string;
+          code: string;
+        }>(
+          'SELECT device_id, performed_by, code FROM calibration_records WHERE id = $1 AND NOT is_deleted',
+          [calibrationId],
+        );
+        if (!rows[0] || rows[0].device_id !== deviceId)
+          throw new NotFoundException('Calibration not found.');
+        if (rows[0].performed_by !== principal.userId)
+          throw new ForbiddenException(
+            'Only the person who performed the calibration can discard it.',
+          );
+        await client.query(
+          'UPDATE calibration_records SET is_deleted = true WHERE id = $1',
+          [calibrationId],
+        );
+        await this.event(
+          client,
+          principal,
+          origin,
+          'CALIBRATION_DISCARDED',
+          CAL_TABLE,
+          calibrationId,
+          reason,
+          { code: rows[0].code },
+        );
+      },
+    );
+    return this.get(deviceId, principal);
+  }
+
+  /** Correct a draft checklist calibration before submission; only the person who performed it. */
   async updateCalibration(
     principal: Principal,
     deviceId: string,
@@ -988,14 +1219,15 @@ export class DevicesService implements OnModuleInit {
   ) {
     this.requireAny(principal, 'calibration.perform');
     await this.db.transaction(
-      this.workflow.actor(principal, 'Draft calibration corrected', origin),
+      this.actor(principal, 'Draft calibration corrected', origin),
       async (client) => {
         await this.workflow.assertEditable(client, CAL_TABLE, calibrationId);
         const { rows } = await client.query<{
           device_id: string;
           performed_by: string;
+          data_source: string;
         }>(
-          'SELECT device_id, performed_by FROM calibration_records WHERE id = $1',
+          'SELECT device_id, performed_by, data_source FROM calibration_records WHERE id = $1',
           [calibrationId],
         );
         if (!rows[0] || rows[0].device_id !== deviceId)
@@ -1005,17 +1237,22 @@ export class DevicesService implements OnModuleInit {
             'Only the person who performed the calibration can correct it.',
           );
         const d = await this.loadDevice(client, deviceId);
-        const c = this.parseCalibration(d.instrument_type, input);
+        if (
+          d.instrument_type !== CORE_INSTRUMENT_TYPE ||
+          rows[0].data_source !== 'MANUAL'
+        )
+          throw new ConflictException(
+            'This calibration was recorded by a module. Withdraw or reject it and record a new one.',
+          );
+        const c = this.checklist(input);
         await client.query(
-          `UPDATE calibration_records SET performed_at = $2, temperature_c = $3, readings = $4, limits = $5, results = $6, outcome = $7, remarks = $8
-          WHERE id = $1`,
+          `UPDATE calibration_records SET performed_at = $2, readings = $3, results = $4, display = $5, outcome = $6, remarks = $7 WHERE id = $1`,
           [
             calibrationId,
-            c.performedAt,
-            c.temperatureC,
+            this.performedAt(c.performedAt),
             JSON.stringify(c.readings),
-            JSON.stringify(c.limits),
             JSON.stringify(c.results),
+            JSON.stringify(c.display),
             c.outcome,
             c.remarks,
           ],

@@ -1,0 +1,14 @@
+{
+  "name": "@crescent/module-sdk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NxGen module contract (core API v1): the only interface a module may use to talk to the core",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

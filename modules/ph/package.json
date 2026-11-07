@@ -1,0 +1,26 @@
+{
+  "name": "@crescent/module-ph",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NxGen pH module: pH meters over the AICAN USB dongle, live readings and pH calibration",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "jest"
+  },
+  "jest": {
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": { "^.+\\.ts$": "ts-jest" },
+    "testEnvironment": "node"
+  },
+  "devDependencies": {
+    "@crescent/module-sdk": "1.0.0",
+    "@tailwindcss/vite": "4.3.4",
+    "@vitejs/plugin-react": "4.7.0",
+    "esbuild": "0.25.12",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "tailwindcss": "4.3.4",
+    "vite": "6.4.5"
+  }
+}

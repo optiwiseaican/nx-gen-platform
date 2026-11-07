@@ -45,6 +45,28 @@ node tools/license-authority/dist/cli.js issue --key <keyId>.private.pem --reque
   --customer-id CUST-001 --customer-name "Crescent Pharma" --modules ph,tlc --out site.nxlic
 ```
 
+## Modules (signed `.nxmod` packages)
+
+Instrument functions are separate modules installed into the core (Technical Architecture §3–§6, Option B).
+The first is **pH** (`modules/ph`): pH meters that reach NxGen through the AICAN USB dongle (ESP-NOW → USB serial,
+same JSON packets as the LabApp WebSocket app).
+
+```bash
+npm run build:module:ph                      # builds modules/ph/dist (module.json, api/, ui/, migrations/)
+node tools/license-authority/dist/cli.js module-pack \
+  --key tools/license-authority/keys/<vendor>.private.pem \
+  --dir modules/ph/dist --out dist-modules/nxgen-ph-1.0.0.nxmod
+```
+
+Install it in NxGen under **Modules → Choose .nxmod package** (IT Administrator or Super Administrator; reason and
+electronic signature). The core checks the Ed25519 signature, every file's SHA-256, the licence entitlement and the
+core version; runs the module's prefix-checked migrations (`ph_*` tables only); and re-verifies the files at every
+start. Disabling a module hides it and blocks its instruments; its data is kept.
+
+- Contract a module may use: `packages/module-sdk` (core API v1).
+- Device gateway: **Instruments → Connections** configures the dongle's serial port. During development,
+  `POST /api/gateway/simulator/packets` feeds packets (refused when `NODE_ENV=production`; data is marked simulated).
+
 ## Getting started
 
 ```bash

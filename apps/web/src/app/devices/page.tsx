@@ -6,15 +6,17 @@ import { formatDate } from "@/components/admin";
 import { AppShell, useAuthRedirect, usePrincipal } from "@/components/AppShell";
 import { ReadinessBadge } from "@/components/devices";
 import { Callout, StatusIcon } from "@/components/ui";
-import { DeviceSummary, devicesApi, INSTRUMENT_LABELS } from "@/lib/api";
+import { DeviceSummary, devicesApi, InstrumentTypeInfo } from "@/lib/api";
 
 function Devices() {
   const principal = usePrincipal();
   const redirect = useAuthRedirect();
   const [devices, setDevices] = useState<DeviceSummary[] | null>(null);
+  const [types, setTypes] = useState<InstrumentTypeInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    devicesApi.types().then(setTypes).catch(() => undefined);
     devicesApi
       .list()
       .then(setDevices)
@@ -38,6 +40,11 @@ function Devices() {
         <p className="text-sm text-muted">
           An instrument can be used only when it is in service and its latest approved calibration passed and is not overdue.
         </p>
+        {principal.permissions.includes("devices.manage") && (
+          <Link href="/devices/connections/" className="inline-flex min-h-11 items-center rounded-md border border-line bg-white px-5 font-semibold hover:border-brand">
+            Connections
+          </Link>
+        )}
         {principal.permissions.includes("devices.manage") && (
           <Link href="/devices/new/" className="inline-flex min-h-11 items-center rounded-md bg-brand px-5 font-semibold text-white hover:bg-brand-700">
             Register instrument
@@ -72,7 +79,7 @@ function Devices() {
                 <td className="px-4 py-3">
                   <p className="font-medium">{d.name}</p>
                   <p className="text-xs text-muted">
-                    {INSTRUMENT_LABELS[d.instrumentType]} · {d.manufacturer} {d.model}
+                    {types.find((t) => t.code === d.instrumentType)?.label ?? d.instrumentType} · {d.manufacturer} {d.model}
                   </p>
                 </td>
                 <td className="px-4 py-3 font-mono text-xs">{d.serialNumber}</td>

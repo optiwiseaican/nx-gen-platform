@@ -17,9 +17,11 @@
  *                         --issued-by <support engineer> [--hours N (default 4, max 24)] [--ledger <file.jsonl>]
  *       Administrator recovery: verify the customer through the support process FIRST,
  *       then sign a one-time response bound to that platform, request and username.
+ *   nxgen-license module-pack --key <private.pem> --dir <built module dir> --out <file.nxmod>
+ *       Sign a module build (module.json + api/ + ui/ + migrations/) as a .nxmod package.
  */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { dirname, join, relative, resolve, sep } from 'path';
 import { parseArgs } from 'util';
 import {
   canonicalize,
@@ -27,6 +29,9 @@ import {
   generateSigningKeyPair,
   issueLicense,
   issueRecoveryResponse,
+  packModule,
+  publicKeyFromPrivate,
+  verifyModulePackage,
   parseRecoveryRequest,
   LICENSE_ERRORS,
   LICENSE_SIGNATURE_DOMAIN,
@@ -237,6 +242,36 @@ function recover(args: string[]) {
   console.log(code);
 }
 
+function modulePack(args: string[]) {
+  const { values } = parseArgs({ args, options: { key: { type: 'string' }, dir: { type: 'string' }, out: { type: 'string' } } });
+  if (!values.key || !values.dir || !values.out) fail('usage: module-pack --key <private.pem> --dir <built module dir> --out <file.nxmod>');
+  const dir = resolve(values.dir);
+  const manifest = JSON.parse(readFileSync(join(dir, 'module.json'), 'utf8')) as unknown;
+  const files: { path: string; data: Buffer }[] = [];
+  const walk = (d: string) => {
+    for (const name of readdirSync(d)) {
+      const full = join(d, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else files.push({ path: relative(dir, full).split(sep).join('/'), data: readFileSync(full) });
+    }
+  };
+  for (const sub of ['api', 'ui', 'migrations']) if (existsSync(join(dir, sub))) walk(join(dir, sub));
+  const privateKeyPem = readFileSync(values.key, 'utf8');
+  let pkg: Buffer;
+  try {
+    pkg = packModule({ manifest, files, privateKeyPem });
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const check = verifyModulePackage(pkg, [{ keyId: computeKeyId(publicKeyFromPrivate(privateKeyPem)), publicKeyPem: publicKeyFromPrivate(privateKeyPem) }]);
+  if (!check.ok) fail(`self-check failed: ${check.message}`);
+  writeFileSync(values.out, pkg);
+  console.log(`Module:   ${check.pkg.manifest.id} ${check.pkg.manifest.version} (${files.length} files)`);
+  console.log(`Signed:   ${check.pkg.keyId}`);
+  console.log(`SHA-256:  ${check.pkg.packageSha256}`);
+  console.log(`Package:  ${resolve(values.out)}`);
+}
+
 const [command, ...rest] = process.argv.slice(2);
 switch (command) {
   case 'keygen':
@@ -251,7 +286,10 @@ switch (command) {
   case 'recover':
     recover(rest);
     break;
+  case 'module-pack':
+    modulePack(rest);
+    break;
   default:
-    console.log('usage: nxgen-license <keygen|issue|inspect|recover> [options]   (see source header for details)');
+    console.log('usage: nxgen-license <keygen|issue|inspect|recover|module-pack> [options]   (see source header for details)');
     process.exit(command ? 1 : 0);
 }

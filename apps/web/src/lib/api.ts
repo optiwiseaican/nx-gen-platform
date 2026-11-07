@@ -514,7 +514,15 @@ export const methodsApi = {
 // Devices and calibration
 // ---------------------------------------------------------------------------
 export type DeviceStatus = "ACTIVE" | "OUT_OF_SERVICE" | "RETIRED";
-export type Readiness = "READY" | "DUE_SOON" | "OVERDUE" | "NOT_CALIBRATED" | "CALIBRATION_FAILED" | "OUT_OF_SERVICE" | "RETIRED";
+export type Readiness =
+  | "READY"
+  | "DUE_SOON"
+  | "OVERDUE"
+  | "NOT_CALIBRATED"
+  | "CALIBRATION_FAILED"
+  | "MODULE_UNAVAILABLE"
+  | "OUT_OF_SERVICE"
+  | "RETIRED";
 export type CalibrationOutcome = "PASS" | "WARNING" | "FAIL";
 
 export interface DeviceReadiness {
@@ -528,7 +536,8 @@ export interface DeviceReadiness {
 export interface DeviceSummary {
   id: string;
   code: string;
-  instrumentType: InstrumentType;
+  instrumentType: string;
+  deviceIdentifier: string | null;
   name: string;
   manufacturer: string;
   model: string;
@@ -562,11 +571,13 @@ export interface CalibrationRecord {
   deviceId: string;
   performedAt: string;
   performedBy: PersonRef;
-  dataSource: "MANUAL" | "INSTRUMENT";
+  dataSource: "MANUAL" | "INSTRUMENT" | "SIMULATED";
   temperatureC: number | null;
   readings: (PhReading | CheckReading)[];
-  limits: Record<string, number>;
-  results: Record<string, number | string>;
+  limits: Record<string, unknown>;
+  results: Record<string, unknown>;
+  display: { label: string; value: string }[];
+  sourceMessages: number[];
   outcome: CalibrationOutcome;
   remarks: string;
   createdAt: string;
@@ -576,6 +587,8 @@ export interface CalibrationRecord {
 }
 
 export interface DeviceDetail extends DeviceSummary {
+  instrumentTypeLabel: string;
+  module: { id: string; name: string; ui: string | null } | null;
   calibrations: CalibrationRecord[];
   history: AuditEntry[];
   canManage: boolean;
@@ -583,7 +596,8 @@ export interface DeviceDetail extends DeviceSummary {
 }
 
 export interface DeviceInput {
-  instrumentType?: InstrumentType;
+  instrumentType?: string;
+  deviceIdentifier?: string;
   name?: string;
   manufacturer?: string;
   model?: string;
@@ -598,9 +612,17 @@ export interface DeviceInput {
 
 export interface CalibrationInput {
   performedAt?: string;
-  temperatureC?: number;
-  readings: (PhReading | CheckReading)[];
+  readings: CheckReading[];
   remarks?: string;
+}
+
+export interface InstrumentTypeInfo {
+  code: string;
+  label: string;
+  moduleId: string | null;
+  available: boolean;
+  moduleName: string | null;
+  moduleUi: string | null;
 }
 
 export const devicesApi = {
@@ -615,4 +637,97 @@ export const devicesApi = {
     post<{ calibrationId: string; device: DeviceDetail }>(`/devices/${id}/calibrations`, body),
   correctCalibration: (id: string, calibrationId: string, body: CalibrationInput) =>
     put<DeviceDetail>(`/devices/${id}/calibrations/${calibrationId}`, body),
+  discardCalibration: (id: string, calibrationId: string, reason: string) =>
+    post<DeviceDetail>(`/devices/${id}/calibrations/${calibrationId}/discard`, { reason }),
+  types: () => call<InstrumentTypeInfo[]>("/devices/types/all"),
+};
+
+// ---------------------------------------------------------------------------
+// Modules and device gateway
+// ---------------------------------------------------------------------------
+/** Module pages are served by the NxGen service (same origin in production). */
+export const moduleUrl = (path: string) => `${API_BASE}${path}`;
+
+export interface ModuleMenuItem {
+  module: string;
+  label: string;
+  href: string;
+}
+
+export interface InstalledModule {
+  id: string;
+  name: string;
+  version: string;
+  previousVersion: string | null;
+  description: string;
+  status: "ENABLED" | "DISABLED";
+  runtime: { state: "RUNNING" | "DISABLED" | "LICENSE_MISSING" | "INTEGRITY_FAILED" | "INCOMPATIBLE" | "LOAD_FAILED"; message: string | null };
+  entitled: boolean;
+  instrumentTypes: { code: string; label: string }[];
+  permissions: string[];
+  packageSha256: string;
+  signingKeyId: string;
+  installedAt: string;
+  updatedAt: string | null;
+  ui: string | null;
+}
+
+export interface StagedModule {
+  stagingId: string | null;
+  problems: string[];
+  module: {
+    id: string;
+    name: string;
+    version: string;
+    description: string;
+    installedVersion: string | null;
+    instrumentTypes: { code: string; label: string }[];
+    permissions: { code: string; description: string; defaultRoles: string[] }[];
+    menu: { label: string; path: string; permission: string }[];
+    migrations: { name: string; applied: boolean }[];
+    files: number;
+    packageSha256: string;
+    signingKeyId: string;
+  };
+}
+
+export const modulesApi = {
+  menu: () => call<ModuleMenuItem[]>("/modules"),
+  installed: () => call<InstalledModule[]>("/modules/installed"),
+  upload: (file: File) =>
+    call<StagedModule>("/modules/install/upload", {
+      method: "POST",
+      body: file,
+      headers: { "Content-Type": "application/octet-stream", "X-File-Name": encodeURIComponent(file.name) },
+    }),
+  install: (stagingId: string, reason: string, signature?: SignatureInput) =>
+    post<{ module: InstalledModule; loaded: boolean }>("/modules/install", { stagingId, reason, signature }),
+  setEnabled: (id: string, enabled: boolean, reason: string, signature?: SignatureInput) =>
+    post<InstalledModule>(`/modules/${id}/${enabled ? "enable" : "disable"}`, { reason, signature }),
+};
+
+export interface GatewayOverview {
+  available: { path: string; manufacturer: string | null; serialNumber: string | null; vendorId: string | null; productId: string | null }[];
+  configured: {
+    id: string;
+    portPath: string;
+    label: string;
+    baudRate: number;
+    enabled: boolean;
+    status: "OPEN" | "CLOSED" | "ERROR" | "DISABLED";
+    error: string | null;
+    packets: number;
+    rejected: number;
+    lastPacketAt: string | null;
+  }[];
+  simulator: { packets: number; rejected: number; lastPacketAt: string | null } | null;
+  connected: { deviceIdentifier: string; deviceId: string; code: string; portPath: string; transport: string; lastSeenAt: string; online: boolean }[];
+  unknownDevices: { deviceIdentifier: string; firstSeenAt: string; lastSeenAt: string; portPath: string; count: number }[];
+}
+
+export const gatewayApi = {
+  overview: () => call<GatewayOverview>("/gateway"),
+  addPort: (body: { portPath: string; baudRate: number; label: string; reason: string }) => post<GatewayOverview["configured"]>("/gateway/ports", body),
+  updatePort: (id: string, body: { enabled?: boolean; baudRate?: number; label?: string; reason: string }) =>
+    put<GatewayOverview["configured"]>(`/gateway/ports/${id}`, body),
 };

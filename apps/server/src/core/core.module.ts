@@ -11,6 +11,7 @@ import { BootstrapJournal } from '../audit/bootstrap-journal';
 import { loadConfig, NXGEN_CONFIG } from '../config/nxgen.config';
 import type { NxGenConfig } from '../config/nxgen.config';
 import { DatabaseService } from '../database/database.service';
+import { ModuleRegistry } from '../modules/module-registry';
 import { readSecurityPolicy } from '../security/security-policy.store';
 import { migrate } from '../database/migrator';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
@@ -80,6 +81,7 @@ export class DatabaseInitializer implements OnModuleInit {
     },
     PlatformIdentityService,
     DatabaseInitializer,
+    ModuleRegistry,
   ],
   exports: [
     NXGEN_CONFIG,
@@ -88,6 +90,7 @@ export class DatabaseInitializer implements OnModuleInit {
     DatabaseService,
     AuditService,
     PlatformIdentityService,
+    ModuleRegistry,
   ],
 })
 export class CoreModule {}

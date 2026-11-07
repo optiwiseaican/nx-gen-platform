@@ -20,7 +20,7 @@ import { SecureStorageService } from '../security/secure-storage.service';
 import { SignatureService } from '../signatures/signature.service';
 import { UserAdminService } from '../users/user-admin.service';
 import { WorkflowService } from '../workflow/workflow.service';
-import { computePh, nernstSlope } from './calibration-math';
+import { ModuleRegistry } from '../modules/module-registry';
 import { DevicesService } from './devices.service';
 
 loadEnvFile();
@@ -36,52 +36,21 @@ const ORIGIN: RequestOrigin = {
 const ROOT_PW = 'Lab-Secure-Key-71!';
 const REASON = 'New pH meter for QC lab 2, PO-2026-311';
 
-/** Ideal electrode at 25 °C with optional slope factor and offset. */
-const ideal = (slopeFactor = 1, offset = 0) =>
-  [4.01, 7.0, 10.01].map((bufferPh) => ({
-    bufferPh,
-    mv:
-      Math.round(
-        (offset - nernstSlope(25) * slopeFactor * (bufferPh - 7)) * 10,
-      ) / 10,
-  }));
-
-describe('pH calibration maths', () => {
-  it('computes 59.16 mV/pH at 25 °C and grades slope and offset against the LabApp limits', () => {
-    expect(nernstSlope(25)).toBeCloseTo(59.16, 2);
-    expect(computePh(ideal(), 25)).toMatchObject({
-      outcome: 'PASS',
-      rSquared: 1,
-    });
-    expect(computePh(ideal(), 25).slopePercent).toBeCloseTo(100, 0);
-    expect(computePh(ideal(0.97, 12), 25)).toMatchObject({
-      outcome: 'PASS',
-      slopeOutcome: 'PASS',
-      offsetOutcome: 'PASS',
-    });
-    expect(computePh(ideal(1, 38), 25)).toMatchObject({
-      outcome: 'WARNING',
-      offsetOutcome: 'WARNING',
-    });
-    expect(computePh(ideal(0.93), 25)).toMatchObject({
-      outcome: 'WARNING',
-      slopeOutcome: 'WARNING',
-    });
-    expect(computePh(ideal(0.88), 25)).toMatchObject({
-      outcome: 'FAIL',
-      slopeOutcome: 'FAIL',
-    });
-    expect(computePh(ideal(1, 60), 25)).toMatchObject({
-      outcome: 'FAIL',
-      offsetOutcome: 'FAIL',
-    });
-    // Inverted electrode response always fails, whatever its magnitude.
-    expect(computePh(ideal(-1), 25)).toMatchObject({
-      outcome: 'FAIL',
-      slopeOutcome: 'FAIL',
-    });
-  });
-});
+/** Checklist calibration (core type OTHER); `fail` marks one check failed. */
+const checks = (fail = false) => [
+  {
+    check: 'Zero with no load',
+    expected: '0.0000 g',
+    observed: '0.0000 g',
+    pass: true,
+  },
+  {
+    check: 'Span 100 g reference weight',
+    expected: '100.0000 ± 0.0005 g',
+    observed: fail ? '100.0021 g' : '100.0002 g',
+    pass: !fail,
+  },
+];
 
 describeDb('Device register and calibration (spec §4 Device Layer, §9)', () => {
   const schema = `nxgen_test_${randomBytes(4).toString('hex')}`;
@@ -113,10 +82,10 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
     devices.register(
       people[who].p,
       {
-        instrumentType: 'PH',
-        name: 'pH meter QC-2',
+        instrumentType: 'OTHER',
+        name: 'Balance QC-2',
         manufacturer: 'AICAN',
-        model: 'PH-700',
+        model: 'XPR-205',
         serialNumber: 'PH7-2026-0042',
         assetTag: 'QC-INS-0101',
         location: 'QC Lab 2, bench 3',
@@ -129,13 +98,13 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
 
   const calibrate = async (
     who: string,
-    readings = ideal(),
+    readings: unknown[] = checks(),
     extra: Record<string, unknown> = {},
   ) => {
     const { calibrationId, device } = await devices.recordCalibration(
       people[who].p,
       deviceId,
-      { temperatureC: 25, readings, ...extra },
+      { readings, ...extra },
       ORIGIN,
     );
     return device.calibrations.find((c) => c.id === calibrationId)!;
@@ -172,7 +141,13 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
     });
     signatures = new SignatureService(config, db, audit, platform);
     workflow = new WorkflowService(db, audit, platform, signatures);
-    devices = new DevicesService(db, audit, signatures, workflow);
+    devices = new DevicesService(
+      db,
+      audit,
+      signatures,
+      workflow,
+      new ModuleRegistry(),
+    );
     devices.onModuleInit();
     const admin = new UserAdminService(config, db, audit, platform, signatures);
     await identity.createInitialAdministrator(
@@ -220,8 +195,8 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
       devices.register(
         people.itadmin.p,
         {
-          instrumentType: 'PH',
-          name: 'Spare meter',
+          instrumentType: 'OTHER',
+          name: 'Spare balance',
           manufacturer: 'A',
           model: 'B',
           serialNumber: 'C',
@@ -256,19 +231,15 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
     expect(sig).toMatchObject({ actionCode: 'DEVICE_REGISTER', intact: true });
   });
 
-  it('records a calibration with computed slope and offset; only the performer may correct or submit it', async () => {
-    const c = await calibrate('analyst', ideal(0.98, 8));
+  it('records a checklist calibration; only the performer may correct or submit it', async () => {
+    const c = await calibrate('analyst');
     expect(c).toMatchObject({
       code: 'CAL-00001',
       outcome: 'PASS',
+      dataSource: 'MANUAL',
       workflow: { state: 'DRAFT' },
     });
-    expect((c.results as { offsetMv: number }).offsetMv).toBeCloseTo(8, 0);
-    expect((c.results as { slopePercent: number }).slopePercent).toBeCloseTo(
-      98,
-      0,
-    );
-    expect(c.limits).toMatchObject({ slopePassMin: 95, offsetPassMaxAbs: 30 });
+    expect(c.display).toEqual([{ label: 'Checks passed', value: '2 of 2' }]);
 
     await expect(calibrate('analyst2')).rejects.toThrow(
       /already has a calibration in progress/,
@@ -278,7 +249,7 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
         people.analyst2.p,
         deviceId,
         c.id,
-        { temperatureC: 25, readings: ideal() },
+        { readings: checks() },
         ORIGIN,
       ),
     ).rejects.toThrow(/Only the person who performed/);
@@ -289,28 +260,24 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
     expect(view.calibrations[0].allowedSteps).not.toContain('SUBMIT');
 
     await expect(
-      devices.recordCalibration(
-        people.analyst.p,
-        deviceId,
-        { temperatureC: 25, readings: [{ bufferPh: 7, mv: 0 }] },
-        ORIGIN,
-      ),
-    ).rejects.toThrow();
-    await expect(
       devices.updateCalibration(
         people.analyst.p,
         deviceId,
         c.id,
-        {
-          temperatureC: 25,
-          readings: [
-            { bufferPh: 7, mv: 0 },
-            { bufferPh: 7.5, mv: -30 },
-          ],
-        },
+        { readings: [{ check: 'Zero', observed: '' }] },
         ORIGIN,
       ),
-    ).rejects.toThrow(/span at least 2 pH/);
+    ).rejects.toThrow(/Check 1/);
+    const corrected = await devices.updateCalibration(
+      people.analyst.p,
+      deviceId,
+      c.id,
+      { readings: checks(), remarks: 'Weights W-100 cert 2026-07' },
+      ORIGIN,
+    );
+    expect(corrected.calibrations[0].remarks).toBe(
+      'Weights W-100 cert 2026-07',
+    );
   });
 
   it('is approved by an independent QA manager (no review stage) and makes the instrument ready', async () => {
@@ -326,7 +293,7 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
     ).rejects.toThrow(/NXGEN-WF-001/);
     const tasks = await workflow.tasks(people.manager.p);
     expect(tasks.map((t) => [t.step, t.title])).toEqual([
-      ['APPROVE', 'CAL-00001 · DEV-0001 pH meter QC-2'],
+      ['APPROVE', 'CAL-00001 · DEV-0001 Balance QC-2'],
     ]);
     expect(tasks[0].link).toBe(`/devices/view/?calibration=${c.id}`);
     await expect(act('analyst', c.workflow.id, 'APPROVE')).rejects.toThrow(
@@ -355,7 +322,7 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
   });
 
   it('an approved failed calibration blocks the instrument', async () => {
-    const c = await calibrate('analyst', ideal(0.85));
+    const c = await calibrate('analyst', checks(true));
     expect(c.outcome).toBe('FAIL');
     await approve(c);
     expect(
@@ -377,7 +344,7 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
     });
     deviceId = d2.id;
     try {
-      const old = await calibrate('analyst', ideal(), {
+      const old = await calibrate('analyst', checks(), {
         performedAt: new Date(Date.now() - 4 * 86_400_000).toISOString(),
       });
       await approve(old);
@@ -385,7 +352,7 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
         (await devices.get(deviceId, people.analyst.p)).readiness,
       ).toMatchObject({ state: 'OVERDUE', usable: false });
 
-      const recent = await calibrate('analyst', ideal(), {
+      const recent = await calibrate('analyst', checks(), {
         performedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
       });
       await approve(recent);

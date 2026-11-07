@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { ApiError, authApi, Principal, ROLE_NAMES, sessionClock } from "@/lib/api";
+import { ApiError, authApi, ModuleMenuItem, moduleUrl, modulesApi, Principal, ROLE_NAMES, sessionClock } from "@/lib/api";
 import { SessionWarning } from "./SessionWarning";
 import { StatusIcon } from "./ui";
 
@@ -56,6 +56,7 @@ const NAV: { href: string; label: string; permission: string | string[] | null }
   { href: "/roles/", label: "Roles", permission: "users.view" },
   { href: "/audit/", label: "Audit Trail", permission: "audit.view" },
   { href: "/security/", label: "Security", permission: "audit.view" },
+  { href: "/settings/modules/", label: "Modules", permission: "modules.manage" },
   { href: "/system/", label: "System Information", permission: "system.view" },
 ];
 
@@ -65,6 +66,7 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
   const pathname = usePathname();
   const redirect = useAuthRedirect();
   const [principal, setPrincipal] = useState<Principal | null>(null);
+  const [moduleMenu, setModuleMenu] = useState<ModuleMenuItem[]>([]);
 
   useEffect(() => {
     authApi
@@ -72,6 +74,7 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
       .then((p) => {
         if (p.mustChangePassword && pathname !== "/change-password/") router.replace("/change-password/?required=1");
         setPrincipal(p);
+        if (!p.mustChangePassword) modulesApi.menu().then(setModuleMenu).catch(() => undefined);
       })
       .catch((err) => {
         if (!redirect(err)) router.replace("/login/");
@@ -128,6 +131,17 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
                 >
                   {n.label}
                 </Link>
+              </li>
+            ))}
+            {moduleMenu.map((m) => (
+              <li key={m.href}>
+                <a
+                  href={moduleUrl(m.href)}
+                  className="block border-b-2 border-transparent px-3 py-3 text-sm font-semibold text-muted hover:text-ink"
+                  title={`${m.label} module`}
+                >
+                  {m.label}
+                </a>
               </li>
             ))}
           </ul>
