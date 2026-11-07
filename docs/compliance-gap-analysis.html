@@ -23,6 +23,7 @@
   --fail: #b42318; --fail-bg: #fdecea;
   --ahead: #1f4fd1; --ahead-bg: #e6edfd;
   --na: #6b7280; --na-bg: #eef0f3;
+  --done: #0e7a5a; --done-bg: #d7f3e8;
   --display: "Fraunces", Georgia, serif;
   --body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
@@ -32,13 +33,13 @@
   --band: #08172c; --band-ink: #e8eef8; --accent: #7aa2ff;
   --pass: #5fd39b; --pass-bg: #0f2e22; --warn: #f1c066; --warn-bg: #33270c;
   --fail: #ff8a80; --fail-bg: #3a1614; --ahead: #8fb0ff; --ahead-bg: #16254a;
-  --na: #9aa3b2; --na-bg: #1c2638; color-scheme: dark; } }
+  --na: #9aa3b2; --na-bg: #1c2638; --done: #6fe0b8; --done-bg: #0f3327; color-scheme: dark; } }
 :root[data-theme="dark"] {
   --bg: #0b1220; --surface: #121b2c; --ink: #e6ebf3; --muted: #9aa6bb; --line: #26324a;
   --band: #08172c; --band-ink: #e8eef8; --accent: #7aa2ff;
   --pass: #5fd39b; --pass-bg: #0f2e22; --warn: #f1c066; --warn-bg: #33270c;
   --fail: #ff8a80; --fail-bg: #3a1614; --ahead: #8fb0ff; --ahead-bg: #16254a;
-  --na: #9aa3b2; --na-bg: #1c2638; color-scheme: dark; }
+  --na: #9aa3b2; --na-bg: #1c2638; --done: #6fe0b8; --done-bg: #0f3327; color-scheme: dark; }
 
 * { box-sizing: border-box; }
 body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.55; }
@@ -57,12 +58,13 @@ p { margin: 0; max-width: 72ch; }
 .muted { color: var(--muted); }
 code { font-family: var(--mono); font-size: .9em; }
 
-.summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
 .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: grid; gap: 2px; }
 .stat b { font-size: 28px; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .stat span { font-size: 13px; color: var(--muted); }
-.stat.ahead b { color: var(--ahead); } .stat.gap b { color: var(--fail); } .stat.part b { color: var(--warn); } .stat.none b { color: var(--ink); }
-@media (max-width: 720px) { .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.stat.ahead b { color: var(--ahead); } .stat.done b { color: var(--done); } .stat.gap b { color: var(--fail); } .stat.part b { color: var(--warn); } .stat.none b { color: var(--ink); }
+@media (max-width: 860px) { .summary { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; color: var(--muted); align-items: center; }
 .pill { display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .05em; padding: 2px 7px; border-radius: 3px; white-space: nowrap; }
@@ -71,6 +73,7 @@ code { font-family: var(--mono); font-size: .9em; }
 .no { color: var(--fail); background: var(--fail-bg); }
 .ahead { color: var(--ahead); background: var(--ahead-bg); }
 .na { color: var(--na); background: var(--na-bg); }
+.done { color: var(--done); background: var(--done-bg); font-weight: 600; }
 
 .filters { display: flex; flex-wrap: wrap; gap: 6px; }
 .filters button { font: inherit; font-size: 13px; padding: 6px 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 999px; cursor: pointer; }
@@ -95,6 +98,8 @@ tr:last-child td { border-bottom: 0; }
 .gap-card li { padding-left: 2px; }
 .ref { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 
+.findings.revb { border-left-color: var(--done); }
+.findings, .gap-card { overflow-wrap: anywhere; }
 .findings { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--fail); border-radius: 6px; padding: 16px 18px; }
 .findings ul { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 
@@ -110,7 +115,7 @@ footer { color: var(--muted); font-size: 12.5px; }
 
 <header class="band">
   <div class="wrap">
-    <div class="doc-meta"><span>NXGEN COMPLIANCE PLATFORM</span><span>GAP ANALYSIS · REV A</span><span>7 NOV 2026</span><span>21 CFR PART 11 · EU ANNEX 11 · GAMP 5</span></div>
+    <div class="doc-meta"><span>NXGEN COMPLIANCE PLATFORM</span><span>GAP ANALYSIS · REV B</span><span>7 NOV 2026</span><span>21 CFR PART 11 · EU ANNEX 11 · GAMP 5</span></div>
     <h1>What the lab apps already enforce, and what NxGen still has to own</h1>
     <p class="lede">LabApp-WebSocket-M (pH / EC meters) and TLC-Tablet-App (NxGen TLC Scan 10) each built their own compliance layer on the tablet. The master specification moves that layer into the NxGen platform. This page lists every compliance capability in the two apps and shows where NxGen stands on each.</p>
   </div>
@@ -123,12 +128,26 @@ footer { color: var(--muted); font-size: 12.5px; }
     <span class="eyebrow">Summary</span>
     <h2 id="s-summary">Where NxGen stands across 32 compliance areas</h2>
     <div class="summary">
+      <div class="stat done"><b>8</b><span>Closed since Rev A</span></div>
       <div class="stat ahead"><b>6</b><span>NxGen ahead of both apps</span></div>
       <div class="stat part"><b>5</b><span>Partly done in NxGen</span></div>
-      <div class="stat gap"><b>15</b><span>In an app, missing in NxGen</span></div>
+      <div class="stat gap"><b>7</b><span>In an app, still missing in NxGen</span></div>
       <div class="stat none"><b>6</b><span>Missing everywhere</span></div>
     </div>
-    <p class="muted">Sources: source code and docs of both app repositories (working trees as of 7 Nov 2026, including uncommitted changes), the NxGen repository at commit <code>0d5946d</code>, and the master specification v1.0.</p>
+    <p class="muted">Sources: source code and docs of both app repositories (working trees as of 7 Nov 2026, including uncommitted changes), the NxGen repository at commit <code>28e1cfb</code>, and the master specification v1.0.</p>
+  </section>
+
+  <section aria-labelledby="s-revb">
+    <span class="eyebrow">Rev B · 7 Nov 2026</span>
+    <h2 id="s-revb">What changed since Rev A</h2>
+    <div class="findings revb">
+      <ul>
+        <li><strong>Compliance core gaps closed</strong> (commit <code>253cdc1</code>): editable security policy, audit trail filters and signed CSV export, session-expiry warning with audited “Stay signed in”, vendor-signed administrator recovery.</li>
+        <li><strong>Workflow engine and method approval</strong> (commit <code>0dcd3b8</code>): prepare, review, approve, reject, withdraw, invalidate and new versions, every step signed with a fixed meaning; records locked in the database once submitted.</li>
+        <li><strong>Instrument register and calibration</strong> (commit <code>28e1cfb</code>): instruments blocked from use when uncalibrated, failed, overdue, out of service or retired; pH calibrations graded against the LabApp limits and approved by an independent QA approver.</li>
+        <li><strong>Backup and restore deferred</strong> at your request.</li>
+      </ul>
+    </div>
   </section>
 
   <section aria-labelledby="s-matrix">
@@ -138,11 +157,13 @@ footer { color: var(--muted); font-size: 12.5px; }
       <span><span class="pill yes">YES</span> implemented</span>
       <span><span class="pill part">PARTIAL</span> incomplete or weak</span>
       <span><span class="pill no">NO</span> not implemented</span>
+      <span><span class="pill done">DONE</span> closed since Rev A</span>
       <span><span class="pill ahead">AHEAD</span> NxGen exceeds both apps</span>
       <span><span class="pill na">N/A</span> not applicable</span>
     </div>
     <div class="filters" role="group" aria-label="Filter rows by NxGen status">
       <button type="button" id="f-all" data-f="all" aria-pressed="true">All 32</button>
+      <button type="button" id="f-done" data-f="done" aria-pressed="false">Closed in Rev B</button>
       <button type="button" id="f-gap" data-f="gap" aria-pressed="false">Gaps in NxGen</button>
       <button type="button" id="f-none" data-f="none" aria-pressed="false">Missing everywhere</button>
       <button type="button" id="f-ahead" data-f="ahead" aria-pressed="false">NxGen ahead</button>
@@ -155,31 +176,31 @@ footer { color: var(--muted); font-size: 12.5px; }
           <tr data-k="part"><td class="area">Users, roles, permissions</td><td><span class="pill yes">YES</span><span class="note">7 roles + custom, ~110 permissions, global / department / owner scopes</span></td><td><span class="pill yes">YES</span><span class="note">7 fixed roles, 15 permissions, employee ID, department</span></td><td><span class="pill part">PARTIAL</span><span class="note">7 roles + custom roles, 7 permissions, no scopes</span></td><td>Permission scopes; department, employee ID, designation on users</td></tr>
           <tr data-k="ahead"><td class="area">Password storage</td><td><span class="pill no">WEAK</span><span class="note">Unsalted SHA-256, plaintext fallback for legacy values</span></td><td><span class="pill no">WEAK</span><span class="note">Unsalted SHA-256</span></td><td><span class="pill ahead">AHEAD</span><span class="note">Salted scrypt</span></td><td>Nothing; apps should adopt NxGen auth</td></tr>
           <tr data-k="ahead"><td class="area">Inactivity sign-out</td><td><span class="pill no">NO</span><span class="note">Fixed 8 h session only</span></td><td><span class="pill no">NO</span><span class="note">Fixed 8 h session only</span></td><td><span class="pill ahead">AHEAD</span><span class="note">15 min idle, 12 h maximum</span></td><td>Nothing</td></tr>
-          <tr data-k="gap"><td class="area">Session-expiry warning and extend</td><td><span class="pill yes">YES</span><span class="note">Countdown overlay, audited</span></td><td><span class="pill yes">YES</span><span class="note">Warning at 5 min, autosave on timeout</span></td><td><span class="pill no">NO</span></td><td>Warning dialog before sign-out, audited extend</td></tr>
-          <tr data-k="gap"><td class="area">Editable security policy</td><td><span class="pill yes">YES</span></td><td><span class="pill yes">YES</span><span class="note">Old / new diff in audit</span></td><td><span class="pill no">NO</span><span class="note">Fixed at installation</span></td><td>Admin edits with reason and signature</td></tr>
-          <tr data-k="gap"><td class="area">Administrator recovery</td><td><span class="pill part">WEAK</span><span class="note">Challenge / response, HMAC secret in APK</span></td><td><span class="pill part">WEAK</span><span class="note">Same design, secret in APK</span></td><td><span class="pill no">NO</span></td><td>Vendor-signed recovery (Ed25519, as in licensing)</td></tr>
+          <tr data-k="done"><td class="area">Session-expiry warning and extend</td><td><span class="pill yes">YES</span><span class="note">Countdown overlay, audited</span></td><td><span class="pill yes">YES</span><span class="note">Warning at 5 min, autosave on timeout</span></td><td><span class="pill done">DONE</span><span class="note">Countdown 2 min before inactivity sign-out; audited “Stay signed in”; notice before the maximum session ends</span></td><td class="action">Done · commit 253cdc1</td></tr>
+          <tr data-k="done"><td class="area">Editable security policy</td><td><span class="pill yes">YES</span></td><td><span class="pill yes">YES</span><span class="note">Old / new diff in audit</span></td><td><span class="pill done">DONE</span><span class="note">Signed changes with reason; limits enforced by the database</span></td><td class="action">Done · commit 253cdc1</td></tr>
+          <tr data-k="done"><td class="area">Administrator recovery</td><td><span class="pill part">WEAK</span><span class="note">Challenge / response, HMAC secret in APK</span></td><td><span class="pill part">WEAK</span><span class="note">Same design, secret in APK</span></td><td><span class="pill done">DONE</span><span class="note">Response signed with the vendor Ed25519 key; single use, expiring, 3 attempts; no secret in the software</span></td><td class="action">Done · commit 253cdc1</td></tr>
           <tr data-k="ahead"><td class="area">Audit trail storage and tamper evidence</td><td><span class="pill part">PARTIAL</span><span class="note">SQLite hash chain; chain check never called</span></td><td><span class="pill part">PARTIAL</span><span class="note">SQLite hash chain, unencrypted DB</span></td><td><span class="pill ahead">AHEAD</span><span class="note">PostgreSQL triggers block edits; chain verified on screen</span></td><td>Nothing</td></tr>
-          <tr data-k="gap"><td class="area">Audit trail export</td><td><span class="pill yes">YES</span><span class="note">PDF / XLSX with fingerprint manifest</span></td><td><span class="pill yes">YES</span><span class="note">CSV with hash columns, export audited</span></td><td><span class="pill no">NO</span><span class="note">List and filter only</span></td><td>CSV / PDF export with hashes, audited (spec §6)</td></tr>
-          <tr data-k="part"><td class="area">Electronic signatures</td><td><span class="pill yes">YES</span><span class="note">Reports, calibration, file approval</span></td><td><span class="pill yes">YES</span><span class="note">Analyses, methods, files; own hash chain</span></td><td><span class="pill part">PARTIAL</span><span class="note">Configurable policy; covers user and role actions only</span></td><td>Extend to results, methods, calibration, reports (spec §7)</td></tr>
-          <tr data-k="gap"><td class="area">Review and approval workflow</td><td><span class="pill yes">YES</span><span class="note">Prepared, Reviewed, Approved, Rejected with return stage</span></td><td><span class="pill yes">YES</span><span class="note">Lock on submit, invalidate, new version</span></td><td><span class="pill no">NO</span></td><td>Workflow Engine (spec §4)</td></tr>
-          <tr data-k="part"><td class="area">Segregation of duties</td><td><span class="pill yes">YES</span><span class="note">Blocked permission pairs; second approval on role changes</span></td><td><span class="pill part">PARTIAL</span><span class="note">Separate reviewer, off by default</span></td><td><span class="pill part">PARTIAL</span><span class="note">No self role or status changes</span></td><td>Blocked pairs, maker-checker, separate reviewer enforced</td></tr>
+          <tr data-k="done"><td class="area">Audit trail export</td><td><span class="pill yes">YES</span><span class="note">PDF / XLSX with fingerprint manifest</span></td><td><span class="pill yes">YES</span><span class="note">CSV with hash columns, export audited</span></td><td><span class="pill done">DONE</span><span class="note">Filters; CSV with hash columns; SHA-256 shown; export itself audited</span></td><td class="action">Done · commit 253cdc1</td></tr>
+          <tr data-k="part"><td class="area">Electronic signatures</td><td><span class="pill yes">YES</span><span class="note">Reports, calibration, file approval</span></td><td><span class="pill yes">YES</span><span class="note">Analyses, methods, files; own hash chain</span></td><td><span class="pill part">PARTIAL</span><span class="note">User, role and security changes; method and calibration approvals</span></td><td class="action">Result approval and report release, with those modules (spec §7)</td></tr>
+          <tr data-k="done"><td class="area">Review and approval workflow</td><td><span class="pill yes">YES</span><span class="note">Prepared, Reviewed, Approved, Rejected with return stage</span></td><td><span class="pill yes">YES</span><span class="note">Lock on submit, invalidate, new version</span></td><td><span class="pill done">DONE</span><span class="note">Generic engine: prepare, review, approve, reject to a chosen stage, withdraw, invalidate, versions; database lock</span></td><td class="action">Done · commit 0dcd3b8</td></tr>
+          <tr data-k="part"><td class="area">Segregation of duties</td><td><span class="pill yes">YES</span><span class="note">Blocked permission pairs; second approval on role changes</span></td><td><span class="pill part">PARTIAL</span><span class="note">Separate reviewer, off by default</span></td><td><span class="pill part">PARTIAL</span><span class="note">Independent reviewer and approver enforced; separate roles by default; no self role or status changes</span></td><td class="action">Blocked permission pairs, maker-checker role changes</td></tr>
           <tr data-k="ahead"><td class="area">Reason for change</td><td><span class="pill yes">YES</span><span class="note">Enforced in the service layer</span></td><td><span class="pill part">PARTIAL</span><span class="note">Not on analysis or method edits</span></td><td><span class="pill ahead">AHEAD</span><span class="note">Every change, enforced in the database transaction</span></td><td>Carry the same rule into new modules</td></tr>
           <tr data-k="gap"><td class="area">Errors, alarms, notifications</td><td><span class="pill yes">YES</span><span class="note">Severity, open-to-closed lifecycle, immutable</span></td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td>Central error and alarm register</td></tr>
           <tr data-k="ahead"><td class="area">Compliance can be switched off</td><td><span class="pill no">RISK</span><span class="note"><code>cfr_enabled</code> turns it all off</span></td><td><span class="pill yes">NO SWITCH</span></td><td><span class="pill ahead">AHEAD</span><span class="note">Always on</span></td><td>Nothing</td></tr>
 
           <tr class="layer"><td colspan="5">Device layer</td></tr>
-          <tr data-k="gap"><td class="area">Device register</td><td><span class="pill yes">YES</span><span class="note">Serial, model, lifecycle, probe and machine master</span></td><td><span class="pill part">PARTIAL</span><span class="note">Instrument and service register, uncommitted</span></td><td><span class="pill no">NO</span></td><td>Device registration and lifecycle (spec §9)</td></tr>
-          <tr data-k="gap"><td class="area">Calibration management</td><td><span class="pill yes">YES</span><span class="note">Due dates, overdue lockout, slope 95–105 %, signed approval</span></td><td><span class="pill na">N/A</span><span class="note">Quantitation curves only</span></td><td><span class="pill no">NO</span></td><td>Calibration records, due dates, lockout, signed approval</td></tr>
+          <tr data-k="done"><td class="area">Device register</td><td><span class="pill yes">YES</span><span class="note">Serial, model, lifecycle, probe and machine master</span></td><td><span class="pill part">PARTIAL</span><span class="note">Instrument and service register, uncommitted</span></td><td><span class="pill done">DONE</span><span class="note">Lifecycle Active / Out of service / Retired; unique serial and asset tag; signed status changes</span></td><td class="action">Done · commit 28e1cfb</td></tr>
+          <tr data-k="done"><td class="area">Calibration management</td><td><span class="pill yes">YES</span><span class="note">Due dates, overdue lockout, slope 95–105 %, signed approval</span></td><td><span class="pill na">N/A</span><span class="note">Quantitation curves only</span></td><td><span class="pill done">DONE</span><span class="note">pH slope and offset against limits, due dates, overdue or failed blocks use, signed approval</span></td><td class="action">Done · commit 28e1cfb · conductivity and TLC use a checklist for now</td></tr>
           <tr data-k="gap"><td class="area">Diagnostics and readiness</td><td><span class="pill part">REGRESSED</span><span class="note">Module deleted Aug 2026; System Health remains</span></td><td><span class="pill yes">YES</span><span class="note">32 checks, analysis blocked on fail</span></td><td><span class="pill no">NO</span></td><td>Readiness checks that gate measurements</td></tr>
           <tr data-k="none"><td class="area">Secure device communication</td><td><span class="pill no">NO</span><span class="note">Plain ws://, no device authentication</span></td><td><span class="pill no">NO</span><span class="note">Plain ws:// and unauthenticated BLE</span></td><td><span class="pill no">NO</span></td><td>Device identity, TLS, signed and sequenced messages</td></tr>
 
           <tr class="layer"><td colspan="5">Business layer</td></tr>
           <tr data-k="gap"><td class="area">Measurement and analysis records</td><td><span class="pill yes">YES</span><span class="note">Immutable when final; revisions linked; status history</span></td><td><span class="pill part">PARTIAL</span><span class="note">Raw images hashed; unsigned analyses hard-deleted</span></td><td><span class="pill no">NO</span></td><td>Immutable result records with lineage</td></tr>
-          <tr data-k="gap"><td class="area">Method management</td><td><span class="pill na">N/A</span></td><td><span class="pill part">PARTIAL</span><span class="note">Versioned, approved; no Rf windows or SST rules</span></td><td><span class="pill no">NO</span></td><td>Versioned, approved, locked methods</td></tr>
+          <tr data-k="done"><td class="area">Method management</td><td><span class="pill na">N/A</span></td><td><span class="pill part">PARTIAL</span><span class="note">Versioned, approved; no Rf windows or SST rules</span></td><td><span class="pill done">DONE</span><span class="note">Versioned, reviewed and approved with signatures; locked once submitted</span></td><td class="action">Done · commit 0dcd3b8 · Rf windows and SST rules with the TLC module</td></tr>
           <tr data-k="gap"><td class="area">Sample, batch, AR master data</td><td><span class="pill yes">YES</span></td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td>Shared master data for all instruments</td></tr>
           <tr data-k="gap"><td class="area">Reports</td><td><span class="pill yes">YES</span><span class="note">Report ID, page N of M, watermarks</span></td><td><span class="pill yes">YES</span><span class="note">Signature manifest, raw image hashes</span></td><td><span class="pill no">NO</span></td><td>Report engine with signature manifest</td></tr>
           <tr data-k="gap"><td class="area">Document control (file manager)</td><td><span class="pill yes">YES</span><span class="note">Checksums, versions, legal hold, controlled print</span></td><td><span class="pill yes">YES</span><span class="note">Checksums, soft delete, approved files protected</span></td><td><span class="pill no">NO</span></td><td>Controlled document store</td></tr>
-          <tr data-k="gap"><td class="area">Backup and restore</td><td><span class="pill part">PARTIAL</span><span class="note">SHA-256 manifests, scheduled; not encrypted</span></td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td>Encrypted, verified, audited backups (spec §19)</td></tr>
+          <tr data-k="gap"><td class="area">Backup and restore</td><td><span class="pill part">PARTIAL</span><span class="note">SHA-256 manifests, scheduled; not encrypted</span></td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td class="action">Deferred at your request (7 Nov 2026)</td></tr>
 
           <tr class="layer"><td colspan="5">Platform and validation</td></tr>
           <tr data-k="ahead"><td class="area">Licensing and platform binding</td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td><span class="pill ahead">AHEAD</span><span class="note">Ed25519 licences, offline activation</span></td><td>Nothing</td></tr>
@@ -200,12 +221,12 @@ footer { color: var(--muted); font-size: 12.5px; }
     <h2 id="s-gaps">What is left to build, by platform layer</h2>
     <div class="gaps">
       <article class="gap-card">
-        <header><h3>A. Compliance core gaps</h3><span class="pill part">SMALL</span></header>
+        <header><h3>A. Compliance core gaps</h3><span class="pill part">4 OF 7 DONE</span></header>
         <ol>
-          <li>Audit trail export with hash columns, the export itself audited</li>
-          <li>Editable security policy, changed with reason and signature</li>
-          <li>Session-expiry warning with an audited extend</li>
-          <li>Administrator recovery signed by the vendor key</li>
+          <li><span class="pill done">DONE</span> Audit trail export with hash columns, the export itself audited</li>
+          <li><span class="pill done">DONE</span> Editable security policy, changed with reason and signature</li>
+          <li><span class="pill done">DONE</span> Session-expiry warning with an audited extend</li>
+          <li><span class="pill done">DONE</span> Administrator recovery signed by the vendor key</li>
           <li>Segregation-of-duties rules and maker-checker role changes</li>
           <li>Department, employee ID, designation; scoped permissions</li>
           <li>Error, alarm and notification register</li>
@@ -213,7 +234,7 @@ footer { color: var(--muted); font-size: 12.5px; }
         <span class="ref">Spec §4, §5, §6 · both apps have items 1–4</span>
       </article>
       <article class="gap-card">
-        <header><h3>B. Workflow engine</h3><span class="pill no">LARGEST</span></header>
+        <header><h3>B. Workflow engine</h3><span class="pill done">DONE</span></header>
         <ul>
           <li>Prepared → Reviewed → Approved, or Rejected back to a chosen stage</li>
           <li>Stages in order; separate reviewer enforced</li>
@@ -223,21 +244,22 @@ footer { color: var(--muted); font-size: 12.5px; }
         <span class="ref">Spec §4, §7 · TLC analyses and methods, LabApp reports and calibration</span>
       </article>
       <article class="gap-card">
-        <header><h3>C. Device layer</h3><span class="pill no">NOT STARTED</span></header>
+        <header><h3>C. Device layer</h3><span class="pill part">2 OF 4 DONE</span></header>
         <ul>
-          <li>Device register: serial, model, Active / Blocked / Retired, probes, maintenance log</li>
-          <li>Calibration: due dates, overdue lockout, versioned acceptance limits, signed approval</li>
+          <li><span class="pill done">DONE</span> Device register: serial, model, Active / Blocked / Retired, probes, maintenance log</li>
+          <li><span class="pill done">DONE</span> Calibration: due dates, overdue lockout, versioned acceptance limits, signed approval</li>
           <li>Diagnostics and readiness checks that gate measurements</li>
           <li>Secure communication: device identity, TLS, signed and sequenced messages</li>
         </ul>
         <span class="ref">Spec §9 · Technical Architecture (MQTT / WebSocket)</span>
       </article>
       <article class="gap-card">
-        <header><h3>D. Business layer</h3><span class="pill no">NOT STARTED</span></header>
+        <header><h3>D. Business layer</h3><span class="pill part">STARTED</span></header>
         <ul>
           <li>Immutable measurement records; corrections as linked revisions</li>
           <li>Raw TLC images written once with SHA-256</li>
-          <li>Versioned, approved methods; sample, batch and AR master data</li>
+          <li><span class="pill done">DONE</span> Versioned, approved methods</li>
+          <li>Sample, batch and AR master data</li>
           <li>Reports with signature manifest and watermarks</li>
           <li>Controlled document store; encrypted backup and restore</li>
         </ul>
@@ -290,15 +312,15 @@ footer { color: var(--muted); font-size: 12.5px; }
     <span class="eyebrow">Recommended order</span>
     <h2 id="s-plan">Build sequence</h2>
     <div class="plan">
-      <div class="step"><div><h3>Close the compliance core gaps</h3><p class="muted">Audit export, editable security policy, session warning, administrator recovery. Small, and every later module depends on them.</p></div></div>
-      <div class="step"><div><h3>Workflow engine</h3><p class="muted">Review, approval, locking and versioning, used by measurements, methods, calibrations and reports.</p></div></div>
-      <div class="step"><div><h3>Backup and restore</h3><p class="muted">Encrypted, verified and audited, in place before lab data exists.</p></div></div>
-      <div class="step"><div><h3>Device layer with secure communication</h3><p class="muted">Device register, calibration, readiness checks, authenticated device links.</p></div></div>
-      <div class="step"><div><h3>Measurements and TLC analyses</h3><p class="muted">Bring pH / EC results and TLC plate analyses onto the platform.</p></div></div>
+      <div class="step"><div><h3>Close the compliance core gaps <span class="pill done">DONE</span></h3><p class="muted">Audit export, editable security policy, session warning, administrator recovery.</p></div></div>
+      <div class="step"><div><h3>Workflow engine <span class="pill done">DONE</span></h3><p class="muted">Review, approval, locking and versioning; first used for methods.</p></div></div>
+      <div class="step"><div><h3>Backup and restore <span class="pill na">DEFERRED</span></h3><p class="muted">Encrypted, verified and audited. Postponed at your request; needed before production lab data.</p></div></div>
+      <div class="step"><div><h3>Device layer with secure communication <span class="pill part">HALF DONE</span></h3><p class="muted">Instrument register and calibration done. Next: authenticated, encrypted device links (protocol decision pending).</p></div></div>
+      <div class="step"><div><h3>Measurements and TLC analyses</h3><p class="muted">Bring pH / EC results and TLC plate analyses onto the platform, refusing blocked instruments.</p></div></div>
     </div>
   </section>
 
-  <footer>Prepared from a read-only review of both app repositories and the NxGen repository. App findings reflect working trees on 7 Nov 2026 and should be re-checked after their pending changes are committed.</footer>
+  <footer>Rev B updated 7 Nov 2026 from the NxGen repository. Prepared from a read-only review of both app repositories and the NxGen repository. App findings reflect working trees on 7 Nov 2026 and should be re-checked after their pending changes are committed.</footer>
 </div>
 </main>
 
