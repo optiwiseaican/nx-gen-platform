@@ -21,6 +21,8 @@ function Home() {
   const p = usePrincipal();
   const can = (perm: string) => p.permissions.includes(perm);
   const cards = [
+    { href: "/tasks/", title: "My Tasks", text: "Methods waiting for your review or approval signature.", show: can("methods.review") || can("methods.approve") },
+    { href: "/methods/", title: "Methods", text: "Controlled analytical methods: draft, review, approval and versions.", show: can("methods.view") },
     { href: "/users/", title: "Users", text: "Create accounts, assign roles, disable, unlock and reset passwords.", show: can("users.view") },
     { href: "/roles/", title: "Roles & Permissions", text: "See what each role may do; Super Administrators can adjust it.", show: can("users.view") },
     { href: "/audit/", title: "Audit Trail", text: "Review every recorded action, with chain-integrity verification.", show: can("audit.view") },

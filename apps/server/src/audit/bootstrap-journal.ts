@@ -19,7 +19,13 @@ export const SYSTEM_LICENSE_SERVICE = 'SYSTEM_LICENSE_SERVICE';
 
 export interface AuditEventInput {
   category:
-    'LICENSING' | 'PLATFORM' | 'SECURITY' | 'USER_MANAGEMENT' | 'SYSTEM';
+    | 'LICENSING'
+    | 'PLATFORM'
+    | 'SECURITY'
+    | 'USER_MANAGEMENT'
+    | 'SYSTEM'
+    | 'WORKFLOW'
+    | 'METHODS';
   action: string;
   result: 'SUCCESS' | 'FAILURE' | 'INFO';
   /** User ID, or a system identity such as SYSTEM_LICENSE_SERVICE. */

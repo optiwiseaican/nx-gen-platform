@@ -34,6 +34,11 @@ export function ReasonDialog({
   confirmLabel,
   destructive,
   action,
+  fixedMeaning,
+  minReason = 5,
+  reasonLabel = "Reason for change",
+  reasonPlaceholder = "e.g. Approved access request AR-2026-014",
+  children,
   onConfirm,
   onClose,
 }: {
@@ -44,6 +49,14 @@ export function ReasonDialog({
   destructive?: boolean;
   /** Signature-policy action code, e.g. USER_ROLES_CHANGE. */
   action?: string;
+  /** The meaning is set by the step (e.g. a review is always "Reviewed"); the signer cannot change it. */
+  fixedMeaning?: string;
+  /** Minimum reason length; 0 makes the reason optional. */
+  minReason?: number;
+  reasonLabel?: string;
+  reasonPlaceholder?: string;
+  /** Extra fields shown above the signature. */
+  children?: React.ReactNode;
   onConfirm: (reason: string, signature?: SignatureInput) => Promise<void>;
   onClose: () => void;
 }) {
@@ -76,23 +89,25 @@ export function ReasonDialog({
           const pol = p.policies.find((x) => x.actionCode === action) ?? null;
           setPolicy(pol);
           setMeanings(p.meanings);
-          setMeaning(pol?.defaultMeaning ?? "APPROVED");
+          setMeaning(fixedMeaning ?? pol?.defaultMeaning ?? "APPROVED");
         });
       }
     } else if (!open && d.open) d.close();
-  }, [open, action, principal.username]);
+  }, [open, action, fixedMeaning, principal.username]);
 
-  const signing = !!action && (policy?.required || optIn);
-  const statement = meanings.find((m) => m.code === meaning)?.statement;
+  // A fixed meaning means a workflow step, which is always signed: show the fields at once.
+  const signing = !!action && (!!fixedMeaning || policy?.required || optIn);
+  const statement = meanings.find((m) => m.code === (fixedMeaning ?? meaning))?.statement;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (reason.trim().length < 5) return setError("Enter a reason for this change (at least 5 characters).");
+    if (reason.trim().length < minReason)
+      return setError(`Enter ${reasonLabel.toLowerCase()} (at least ${minReason} characters).`);
     if (signing && (!username || !password)) return setError("Enter your username or email, and your password, to sign.");
     setBusy(true);
     setError(null);
     try {
-      await onConfirm(reason.trim(), signing ? { username, password, meaning } : undefined);
+      await onConfirm(reason.trim(), signing ? { username, password, meaning: fixedMeaning ?? meaning } : undefined);
     } catch (err) {
       setPassword("");
       setError(err instanceof Error ? err.message : "The change failed.");
@@ -112,7 +127,8 @@ export function ReasonDialog({
         <div className="text-sm text-muted">{description}</div>
         <div>
           <label htmlFor={`${uid}-change-reason`} className="mb-1.5 block text-sm font-semibold text-ink">
-            Reason for change
+            {reasonLabel}
+            {minReason === 0 && <span className="font-normal text-muted"> (optional)</span>}
           </label>
           <textarea
             id={`${uid}-change-reason`}
@@ -121,11 +137,13 @@ export function ReasonDialog({
             rows={3}
             maxLength={500}
             autoFocus
-            placeholder="e.g. Approved access request AR-2026-014"
+            placeholder={reasonPlaceholder}
             className="w-full rounded-md border border-line px-3 py-2 text-sm"
           />
           <p className="mt-1 text-xs text-muted">Recorded permanently in the audit trail with your name and the time.</p>
         </div>
+
+        {children}
 
         {action && policy && !policy.required && (
           <label className="flex items-center gap-2 text-sm">
@@ -141,18 +159,29 @@ export function ReasonDialog({
               <label htmlFor={`${uid}-sig-meaning`} className="mb-1 block text-sm font-semibold text-ink">
                 Meaning of signature
               </label>
-              <select
-                id={`${uid}-sig-meaning`}
-                value={meaning}
-                onChange={(e) => setMeaning(e.target.value)}
-                className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm"
-              >
-                {meanings.map((m) => (
-                  <option key={m.code} value={m.code}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
+{fixedMeaning ? (
+                <p
+                  id={`${uid}-sig-meaning`}
+                  className="rounded-md border border-line bg-canvas px-3 py-2 text-sm font-semibold text-ink"
+                >
+                  {meanings.find((m) => m.code === fixedMeaning)?.label ??
+                    fixedMeaning.charAt(0) + fixedMeaning.slice(1).toLowerCase()}
+                  <span className="font-normal text-muted"> · set by this step</span>
+                </p>
+              ) : (
+                <select
+                  id={`${uid}-sig-meaning`}
+                  value={meaning}
+                  onChange={(e) => setMeaning(e.target.value)}
+                  className="w-full rounded-md border border-line bg-white px-3 py-2 text-sm"
+                >
+                  {meanings.map((m) => (
+                    <option key={m.code} value={m.code}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              )}
               {statement && <p className="mt-1 text-xs text-muted">“{statement}”</p>}
             </div>
             <div className="grid gap-3 sm:grid-cols-2">

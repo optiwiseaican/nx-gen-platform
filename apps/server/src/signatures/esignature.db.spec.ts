@@ -210,9 +210,14 @@ describeDb('Electronic signatures on PostgreSQL (21 CFR 11 Subpart C)', () => {
     await expect(db.query('DELETE FROM electronic_signatures')).rejects.toThrow(
       /NXGEN-ESIG-001/,
     );
+    // Referenced by the workflow history, so a plain TRUNCATE is refused outright;
+    // with CASCADE the immutability triggers stop it.
     await expect(db.query('TRUNCATE electronic_signatures')).rejects.toThrow(
-      /NXGEN-ESIG-001/,
+      /NXGEN-ESIG-001|foreign key/,
     );
+    await expect(
+      db.query('TRUNCATE electronic_signatures CASCADE'),
+    ).rejects.toThrow(/NXGEN-(ESIG-001|WF-002)|NXGEN-AUDIT/);
   });
 
   it('detects a signature transferred to another record by bypassing the trigger', async () => {

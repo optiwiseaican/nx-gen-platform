@@ -47,8 +47,10 @@ export function BrandHeader({ title, children }: { title?: string; children?: Re
   );
 }
 
-const NAV = [
+const NAV: { href: string; label: string; permission: string | string[] | null }[] = [
   { href: "/home/", label: "Home", permission: null },
+  { href: "/tasks/", label: "My Tasks", permission: ["methods.review", "methods.approve"] },
+  { href: "/methods/", label: "Methods", permission: "methods.view" },
   { href: "/users/", label: "Users", permission: "users.view" },
   { href: "/roles/", label: "Roles", permission: "users.view" },
   { href: "/audit/", label: "Audit Trail", permission: "audit.view" },
@@ -109,8 +111,12 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
           </div>
         </BrandHeader>
         <nav className="border-b border-line bg-white" aria-label="Main">
-          <ul className="mx-auto flex max-w-6xl gap-1 px-4 sm:px-6">
-            {NAV.filter((n) => !n.permission || principal.permissions.includes(n.permission)).map((n) => (
+          <ul className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-4 sm:px-6">
+            {NAV.filter(
+              (n) =>
+                !n.permission ||
+                [n.permission].flat().some((perm) => principal.permissions.includes(perm)),
+            ).map((n) => (
               <li key={n.href}>
                 <Link
                   href={n.href}

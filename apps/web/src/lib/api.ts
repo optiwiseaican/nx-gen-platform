@@ -390,3 +390,122 @@ export const SERVICE_UNAVAILABLE: LicenseErrorInfo = {
   message: "The NxGen License Service could not complete the request. No laboratory data has been changed.",
   action: "Restart NxGen. If the problem continues, contact NxGen Support.",
 };
+
+// ---------------------------------------------------------------------------
+// Workflow engine and methods
+// ---------------------------------------------------------------------------
+export type WorkflowState = "DRAFT" | "IN_REVIEW" | "REVIEWED" | "APPROVED" | "INVALIDATED" | "SUPERSEDED";
+export type WorkflowStep = "SUBMIT" | "WITHDRAW" | "REVIEW" | "APPROVE" | "REJECT" | "INVALIDATE";
+
+export interface PersonRef {
+  id: string;
+  name: string;
+}
+
+export interface WorkflowInstance {
+  id: string;
+  definitionCode: string;
+  tableName: string;
+  recordId: string;
+  seriesId: string;
+  seriesVersion: number;
+  state: WorkflowState;
+  contentHash: string | null;
+  preparedBy: PersonRef | null;
+  reviewedBy: PersonRef | null;
+  approvedBy: PersonRef | null;
+  submittedAt: string | null;
+  approvedAt: string | null;
+  createdAt: string;
+}
+
+export interface WorkflowEvent {
+  id: string;
+  step: string;
+  fromState: string | null;
+  toState: string;
+  actorId: string;
+  actorName: string | null;
+  comment: string | null;
+  contentHash: string | null;
+  occurredAt: string;
+  signature: SignatureRecord | null;
+}
+
+export interface WorkflowTask {
+  instance: WorkflowInstance;
+  step: "REVIEW" | "APPROVE";
+  title: string;
+  link: string;
+  workflow: string;
+}
+
+export const workflowApi = {
+  tasks: () => call<WorkflowTask[]>("/workflow/tasks"),
+  act: (
+    instanceId: string,
+    step: WorkflowStep,
+    body: { reason?: string; returnTo?: WorkflowState; signature?: SignatureInput },
+  ) => post<WorkflowInstance>(`/workflow/instances/${instanceId}/${step.toLowerCase()}`, body),
+};
+
+export type InstrumentType = "PH" | "EC" | "TLC" | "OTHER";
+export const INSTRUMENT_LABELS: Record<InstrumentType, string> = {
+  PH: "pH meter",
+  EC: "Conductivity meter",
+  TLC: "TLC scanner",
+  OTHER: "Other",
+};
+
+export interface MethodParameter {
+  name: string;
+  value: string;
+  unit: string;
+}
+
+export interface MethodVersion {
+  id: string;
+  versionNumber: number;
+  name: string;
+  purpose: string;
+  procedure: string;
+  parameters: MethodParameter[];
+  changeSummary: string;
+  createdAt: string;
+  createdByName: string | null;
+  workflow: WorkflowInstance;
+  allowedSteps: WorkflowStep[];
+  history: WorkflowEvent[];
+}
+
+export interface MethodDetail {
+  id: string;
+  code: string;
+  instrumentType: InstrumentType;
+  createdAt: string;
+  versions: MethodVersion[];
+  canEditDraft: boolean;
+  canStartNewVersion: boolean;
+}
+
+export interface MethodSummary {
+  id: string;
+  code: string;
+  instrumentType: InstrumentType;
+  name: string;
+  latestVersion: number;
+  latestState: WorkflowState;
+  effectiveVersion: number | null;
+  createdAt: string;
+}
+
+export type MethodContentInput = Partial<Pick<MethodVersion, "name" | "purpose" | "procedure" | "parameters" | "changeSummary">>;
+
+export const methodsApi = {
+  list: () => call<MethodSummary[]>("/methods"),
+  get: (id: string) => call<MethodDetail>(`/methods/${id}`),
+  create: (body: MethodContentInput & { instrumentType: InstrumentType }) => post<MethodDetail>("/methods", body),
+  update: (id: string, versionId: string, body: MethodContentInput) =>
+    put<MethodDetail>(`/methods/${id}/versions/${versionId}`, body),
+  newVersion: (id: string, reason: string) => post<MethodDetail>(`/methods/${id}/versions`, { reason }),
+};
