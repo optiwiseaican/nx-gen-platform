@@ -67,9 +67,37 @@ export const moduleManifestSchema = z
           .strict(),
       )
       .max(10),
+    /** Approval workflows the core registers for the module's records (core workflow engine). */
+    workflows: z
+      .array(
+        z
+          .object({
+            code: z.string().regex(/^[A-Z][A-Z0-9_]{1,40}$/),
+            name: z.string().min(3).max(80),
+            recordTable: z.string().regex(/^[a-z][a-z0-9_]{1,62}$/),
+            editPermission: z.string().regex(PERMISSION),
+            reviewPermission: z.string().regex(PERMISSION),
+            approvePermission: z.string().regex(PERMISSION),
+            requireReview: z.boolean(),
+            independentReviewer: z.boolean(),
+            independentApprover: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(10)
+      .default([]),
   })
   .strict()
   .superRefine((m, ctx) => {
+    for (const w of m.workflows) {
+      if (!w.code.startsWith(`${m.id.toUpperCase().replace(/-/g, '_')}_`))
+        ctx.addIssue({ code: 'custom', message: `Workflow ${w.code} must start with "${m.id.toUpperCase()}_"` });
+      if (!w.recordTable.startsWith(m.tablePrefix))
+        ctx.addIssue({ code: 'custom', message: `Workflow ${w.code} must govern a "${m.tablePrefix}" table` });
+      for (const perm of [w.editPermission, w.reviewPermission, w.approvePermission])
+        if (!m.permissions.some((p) => p.code === perm))
+          ctx.addIssue({ code: 'custom', message: `Workflow ${w.code} uses undeclared permission ${perm}` });
+    }
     if (m.tablePrefix !== `${m.id.replace(/-/g, '')}_`)
       ctx.addIssue({ code: 'custom', message: 'tablePrefix must be the module id followed by "_"' });
     for (const p of m.permissions)

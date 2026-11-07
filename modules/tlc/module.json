@@ -1,0 +1,49 @@
+{
+  "id": "tlc",
+  "name": "TLC",
+  "version": "1.0.0",
+  "description": "TLC plate analyses: original plate images under white, UV 254 and UV 366 light, Rf evaluation against approved methods, and signed review and approval.",
+  "coreApi": 1,
+  "minCoreVersion": "2.0.0",
+  "entitlement": "tlc",
+  "tablePrefix": "tlc_",
+  "apiEntry": "api/index.js",
+  "uiEntry": "ui/index.html",
+  "instrumentTypes": [{ "code": "TLC", "label": "TLC scanner" }],
+  "permissions": [
+    {
+      "code": "tlc.view",
+      "description": "View TLC analyses, plate images and results",
+      "defaultRoles": ["SUPER_ADMINISTRATOR", "IT_ADMINISTRATOR", "QA_MANAGER", "QA_REVIEWER", "ANALYST", "OPERATOR", "AUDITOR"]
+    },
+    {
+      "code": "tlc.analyze",
+      "description": "Create TLC analyses, add plate images and evaluate them",
+      "defaultRoles": ["ANALYST", "OPERATOR"]
+    },
+    {
+      "code": "tlc.review",
+      "description": "Review TLC analyses (signed)",
+      "defaultRoles": ["QA_REVIEWER", "QA_MANAGER"]
+    },
+    {
+      "code": "tlc.approve",
+      "description": "Approve, reject and invalidate TLC analyses (signed)",
+      "defaultRoles": ["QA_MANAGER"]
+    }
+  ],
+  "menu": [{ "label": "TLC", "path": "/", "permission": "tlc.view" }],
+  "workflows": [
+    {
+      "code": "TLC_ANALYSIS_APPROVAL",
+      "name": "TLC analysis approval",
+      "recordTable": "tlc_analyses",
+      "editPermission": "tlc.analyze",
+      "reviewPermission": "tlc.review",
+      "approvePermission": "tlc.approve",
+      "requireReview": true,
+      "independentReviewer": true,
+      "independentApprover": true
+    }
+  ]
+}

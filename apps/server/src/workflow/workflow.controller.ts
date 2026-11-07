@@ -1,5 +1,6 @@
 import {
   Body,
+  ForbiddenException,
   Controller,
   Get,
   HttpCode,
@@ -22,6 +23,40 @@ export class WorkflowController {
   @Get('tasks')
   tasks(@CurrentPrincipal() p: Principal) {
     return this.workflow.tasks(p);
+  }
+
+  /**
+   * One record's approval state, the steps the user may take and the signed
+   * history. Visible to holders of the workflow's permissions or audit.view.
+   */
+  @Get('instances/:id')
+  async detail(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @CurrentPrincipal() p: Principal,
+  ) {
+    const instance = await this.workflow.get(id);
+    const d = await this.workflow.definition(instance.definitionCode);
+    if (
+      ![
+        d.editPermission,
+        d.reviewPermission,
+        d.approvePermission,
+        'audit.view',
+      ].some((x) => p.permissions.includes(x))
+    )
+      throw new ForbiddenException(
+        'You do not have permission to view this record.',
+      );
+    return {
+      instance,
+      definition: {
+        code: d.code,
+        name: d.name,
+        requireReview: d.requireReview,
+      },
+      allowedSteps: await this.workflow.allowedSteps(instance, p),
+      history: await this.workflow.history(id),
+    };
   }
 
   /**

@@ -70,6 +70,8 @@ export interface WorkflowRecordType {
    * analyst who performed a calibration). Omit to let any editor submit.
    */
   authorOf?(client: PoolClient, recordId: string): Promise<string | null>;
+  /** Why the record cannot be submitted yet (e.g. incomplete), or null. */
+  beforeSubmit?(client: PoolClient, recordId: string): Promise<string | null>;
 }
 
 export interface WorkflowDefinition {
@@ -520,6 +522,14 @@ export class WorkflowService {
             code: 'NX-WF-NOT-ALLOWED',
             message: 'Only the person who recorded it can submit it.',
           });
+        if (step === 'SUBMIT' && type.beforeSubmit) {
+          const why = await type.beforeSubmit(client, i.recordId);
+          if (why)
+            throw new ConflictException({
+              code: 'NX-WF-INCOMPLETE',
+              message: why,
+            });
+        }
         const { title, content } = await type.load(client, i.recordId);
         const hash = contentHash(content);
         if (step !== 'SUBMIT' && i.contentHash && hash !== i.contentHash) {

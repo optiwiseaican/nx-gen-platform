@@ -21,6 +21,7 @@ import {
 import type {
   ModuleContext,
   ModulePrincipal,
+  ModuleTx,
   ModuleRoute,
   NxGenModule,
   PacketHandler,
@@ -37,6 +38,8 @@ import { SignatureService } from '../signatures/signature.service';
 import type { SignatureInput } from '../signatures/signature.service';
 import { lintModuleSql } from './migration-lint';
 import { LoadedModule, ModuleRegistry } from './module-registry';
+import { WorkflowService } from '../workflow/workflow.service';
+import type { PoolClient } from 'pg';
 
 const STAGING_TTL_MS = 30 * 60_000;
 const MIME: Record<string, string> = {
@@ -138,7 +141,26 @@ export class ModuleManagerService implements OnModuleInit {
     private readonly registry: ModuleRegistry,
     private readonly devices: DevicesService,
     private readonly gateway: GatewayService,
+    private readonly workflow: WorkflowService,
   ) {}
+
+  /** Transactions handed to modules, mapped back to their database client. */
+  private readonly txClients = new WeakMap<ModuleTx, PoolClient>();
+
+  private txOf(client: PoolClient): ModuleTx {
+    const tx: ModuleTx = {
+      query: async <T>(sql: string, params: unknown[] = []) =>
+        (await client.query(sql, params)).rows as T[],
+    };
+    this.txClients.set(tx, client);
+    return tx;
+  }
+
+  private clientOf(tx: ModuleTx): PoolClient {
+    const c = this.txClients.get(tx);
+    if (!c) throw new Error('Not a transaction opened by ctx.db.transaction');
+    return c;
+  }
 
   private get root() {
     return join(this.config.dataDir, 'modules');
@@ -332,7 +354,116 @@ export class ModuleManagerService implements OnModuleInit {
           routes.push(r);
         },
       },
-      db: { query: (sql, params = []) => this.db.query(sql, params) as never },
+      db: {
+        query: (sql, params = []) => this.db.query(sql, params) as never,
+        transaction: (principal, reason, origin, fn) =>
+          this.db.transaction(
+            {
+              actorId: principal.userId,
+              actorName: principal.fullName,
+              reason: reason ?? undefined,
+              ipAddress: origin.ipAddress,
+              machineName: origin.machineName,
+            },
+            (client) => fn(this.txOf(client)),
+          ),
+      },
+      workflow: {
+        registerRecordType: (t) => {
+          if (!t.tableName.startsWith(manifest.tablePrefix))
+            throw new Error(
+              `Record table ${t.tableName} is not a ${manifest.tablePrefix} table`,
+            );
+          this.workflow.registerRecordType({
+            tableName: t.tableName,
+            load: (client, id) => t.load(this.txOf(client), id),
+            link: (seriesId) =>
+              `/modules/${manifest.id}/${t.link(seriesId).replace(/^\/+/, '')}`,
+            authorOf: t.authorOf
+              ? (client, id) => t.authorOf!(this.txOf(client), id)
+              : undefined,
+            beforeSubmit: t.beforeSubmit
+              ? (client, id) => t.beforeSubmit!(this.txOf(client), id)
+              : undefined,
+          });
+        },
+        start: (tx, principal, input) => {
+          if (
+            !manifest.workflows.some(
+              (w) =>
+                w.code === input.definitionCode &&
+                w.recordTable === input.tableName,
+            )
+          )
+            throw new Error(
+              `Workflow ${input.definitionCode} is not declared by module ${manifest.id} for ${input.tableName}`,
+            );
+          return this.workflow.start(
+            this.clientOf(tx),
+            {
+              userId: principal.userId,
+              fullName: principal.fullName,
+            } as Principal,
+            input,
+          );
+        },
+        assertEditable: (tx, tableName, recordId) =>
+          this.workflow.assertEditable(this.clientOf(tx), tableName, recordId),
+        forRecord: async (tableName, recordId) => {
+          if (!tableName.startsWith(manifest.tablePrefix))
+            throw new Error('Not this module’s table');
+          const [row] = await this.db.query<{ id: string }>(
+            'SELECT id FROM workflow_instances WHERE table_name = $1 AND record_id = $2',
+            [tableName, recordId],
+          );
+          if (!row) return null;
+          const i = await this.workflow.get(row.id);
+          return {
+            id: i.id,
+            definitionCode: i.definitionCode,
+            state: i.state,
+            contentHash: i.contentHash,
+            preparedBy: i.preparedBy,
+            reviewedBy: i.reviewedBy,
+            approvedBy: i.approvedBy,
+            submittedAt: i.submittedAt,
+            approvedAt: i.approvedAt,
+          };
+        },
+      },
+      methods: {
+        effective: async (instrumentType) => {
+          if (!types.has(instrumentType))
+            throw new Error(
+              `Module ${manifest.id} does not provide ${instrumentType} instruments`,
+            );
+          const rows = await this.db.query<{
+            method_id: string;
+            code: string;
+            version_id: string;
+            version_number: number;
+            name: string;
+            purpose: string;
+            parameters: { name: string; value: string; unit: string }[];
+          }>(
+            `SELECT m.id AS method_id, m.code, v.id AS version_id, v.version_number, v.name, v.purpose, v.parameters
+               FROM methods m
+               JOIN method_versions v ON v.method_id = m.id AND NOT v.is_deleted
+               JOIN workflow_instances wi ON wi.table_name = 'method_versions' AND wi.record_id = v.id::text AND wi.state = 'APPROVED'
+              WHERE m.instrument_type = $1 AND NOT m.is_deleted ORDER BY m.code`,
+            [instrumentType],
+          );
+          return rows.map((r) => ({
+            methodId: r.method_id,
+            code: r.code,
+            versionId: r.version_id,
+            versionNumber: r.version_number,
+            name: r.name,
+            purpose: r.purpose,
+            parameters: r.parameters,
+          }));
+        },
+      },
       audit: {
         record: (e) =>
           this.audit.record({
@@ -703,6 +834,23 @@ export class ModuleManagerService implements OnModuleInit {
                   [role, p.code],
                 );
           }
+          for (const w of m.workflows)
+            await client.query(
+              `INSERT INTO workflow_definitions (code, name, record_table, edit_permission, review_permission, approve_permission,
+                                                 require_review, independent_reviewer, independent_approver)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (code) DO NOTHING`,
+              [
+                w.code,
+                w.name,
+                w.recordTable,
+                w.editPermission,
+                w.reviewPermission,
+                w.approvePermission,
+                w.requireReview,
+                w.independentReviewer,
+                w.independentApprover,
+              ],
+            );
           for (const t of m.instrumentTypes)
             await client.query(
               `INSERT INTO instrument_types (code, label, module_id) VALUES ($1, $2, $3)

@@ -12,6 +12,7 @@ import {
   ForbiddenException,
   Post,
   Req,
+  StreamableFile,
 } from '@nestjs/common';
 import type { ModulePrincipal } from '@crescent/module-sdk';
 import {
@@ -154,13 +155,31 @@ export class ModulesController {
       permissions: p.permissions,
     };
     try {
-      return await hit.route.handler({
+      const out = await hit.route.handler({
         principal,
         params: hit.params,
         query: req.query as Record<string, string | undefined>,
         body: req.body,
         origin: originOf(req),
       });
+      const file = out as {
+        kind?: string;
+        contentType?: string;
+        data?: unknown;
+        fileName?: string;
+      } | null;
+      if (
+        file?.kind === 'file' &&
+        Buffer.isBuffer(file.data) &&
+        typeof file.contentType === 'string'
+      )
+        return new StreamableFile(file.data, {
+          type: file.contentType,
+          disposition: file.fileName
+            ? `inline; filename="${file.fileName.replace(/[^\w.-]/g, '_')}"`
+            : undefined,
+        });
+      return out;
     } catch (e) {
       if (e instanceof HttpException) throw e;
       const err = e as {

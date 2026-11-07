@@ -19,6 +19,12 @@ async function bootstrap() {
     '/api/modules/install/upload',
     raw({ type: 'application/octet-stream', limit: '60mb' }),
   );
+  // Modules may accept images (e.g. TLC plate photographs) as raw bytes; the
+  // module checks the content (PNG/JPEG signature) and size itself.
+  app.use(
+    '/api/modules',
+    raw({ type: ['image/png', 'image/jpeg'], limit: '15mb' }),
+  );
 
   // Module screens: /modules/<id>/… served from the verified copies of the module's UI files.
   const modules = app.get(ModuleManagerService);

@@ -52,10 +52,10 @@ The first is **pH** (`modules/ph`): pH meters that reach NxGen through the AICAN
 same JSON packets as the LabApp WebSocket app).
 
 ```bash
-npm run build:module:ph                      # builds modules/ph/dist (module.json, api/, ui/, migrations/)
+npm run build:modules                        # builds modules/ph/dist and modules/tlc/dist
 node tools/license-authority/dist/cli.js module-pack \
   --key tools/license-authority/keys/<vendor>.private.pem \
-  --dir modules/ph/dist --out dist-modules/nxgen-ph-1.0.0.nxmod
+  --dir modules/tlc/dist --out dist-modules/nxgen-tlc-1.0.0.nxmod     # same for ph
 ```
 
 Install it in NxGen under **Modules → Choose .nxmod package** (IT Administrator or Super Administrator; reason and
@@ -63,6 +63,9 @@ electronic signature). The core checks the Ed25519 signature, every file's SHA-2
 core version; runs the module's prefix-checked migrations (`ph_*` tables only); and re-verifies the files at every
 start. Disabling a module hides it and blocks its instruments; its data is kept.
 
+- **TLC** (`modules/tlc`): plate analyses (`TLC-0001`…) on an approved TLC method and a usable instrument; original
+  plate images (white / UV 254 / UV 366) stored once with SHA-256; Rf evaluation against the method's Rf windows
+  (method parameters with unit `Rf`, e.g. `Paracetamol · 0.40–0.50 · Rf`); signed review and approval; instrument check.
 - Contract a module may use: `packages/module-sdk` (core API v1).
 - Device gateway: **Instruments → Connections** configures the dongle's serial port. During development,
   `POST /api/gateway/simulator/packets` feeds packets (refused when `NODE_ENV=production`; data is marked simulated).

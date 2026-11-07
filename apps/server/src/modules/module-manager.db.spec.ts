@@ -106,6 +106,26 @@ describe('module migration lint', () => {
     );
     expect(
       lintModuleSql(
+        'CREATE TRIGGER ph_t BEFORE TRUNCATE ON ph_x FOR EACH STATEMENT EXECUTE FUNCTION ph_f();',
+        'ph_',
+      ),
+    ).toEqual([]);
+    expect(lintModuleSql('TRUNCATE users;', 'ph_')[0]).toMatch(/users/);
+    // Pinning a function to the current schema is fine; changing the session is not.
+    expect(
+      lintModuleSql(
+        'CREATE FUNCTION ph_f() RETURNS int LANGUAGE sql SET search_path FROM CURRENT AS $$ SELECT 1 $$;',
+        'ph_',
+      ),
+    ).toEqual([]);
+    expect(lintModuleSql('SET search_path TO public;', 'ph_')[0]).toMatch(
+      /search_path/,
+    );
+    expect(lintModuleSql('SET ROLE avnadmin;', 'ph_')[0]).toMatch(
+      /search_path or role/,
+    );
+    expect(
+      lintModuleSql(
         'CREATE FUNCTION ph_f() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$;',
         'ph_',
       )[0],
@@ -147,6 +167,7 @@ describeDb(
         registry,
         devices,
         gateway,
+        workflow,
       );
     };
     const call = async (

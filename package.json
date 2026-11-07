@@ -15,10 +15,12 @@
     "dev:desktop": "npm run dev -w @crescent/desktop",
     "build": "npm run build -w @crescent/shared -w @crescent/licensing && npm run build -w @crescent/license-authority -w @crescent/server -w @crescent/web -w @crescent/desktop",
     "lint": "npm run lint --workspaces --if-present",
-    "test": "npm run build:module:ph && npm run test -w @crescent/licensing -w @crescent/module-ph -w @crescent/server -w @crescent/desktop",
+    "test": "npm run build:modules && npm run test -w @crescent/licensing -w @crescent/module-ph -w @crescent/module-tlc -w @crescent/server -w @crescent/desktop",
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
-    "build:module:ph": "npm run build -w @crescent/module-sdk && npm run build -w @crescent/module-ph"
+    "build:module:ph": "npm run build -w @crescent/module-sdk && npm run build -w @crescent/module-ph",
+    "build:module:tlc": "npm run build -w @crescent/module-sdk && npm run build -w @crescent/module-tlc",
+    "build:modules": "npm run build -w @crescent/module-sdk && npm run build -w @crescent/module-ph -w @crescent/module-tlc"
   },
   "engines": {
     "node": ">=22"

@@ -1,0 +1,50 @@
+@import "tailwindcss";
+@import "@fontsource-variable/plus-jakarta-sans";
+
+/* Same theme as the NxGen core so the module feels part of the platform. */
+@theme {
+  --color-navy: #0f1d3d;
+  --color-navy-700: #1b2d57;
+  --color-brand: #2563eb;
+  --color-brand-700: #1d4fd8;
+  --color-brand-50: #eef3ff;
+  --color-pass: #13965a;
+  --color-pass-50: #eaf8f1;
+  --color-warn: #b45f06;
+  --color-warn-50: #fff6e8;
+  --color-fail: #e0344c;
+  --color-fail-50: #fdeef0;
+  --color-ink: #0f1b33;
+  --color-muted: #5a6680;
+  --color-line: #e3e8f2;
+  --color-canvas: #f3f6fb;
+  --font-sans: "Plus Jakarta Sans Variable", "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, "SF Mono", Menlo, Monaco, "Liberation Mono", monospace;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.125rem;
+  --shadow-card: 0 1px 2px rgb(15 27 51 / 0.04), 0 12px 32px -16px rgb(15 27 51 / 0.14);
+  --shadow-brand: 0 10px 24px -10px rgb(37 99 235 / 0.55);
+}
+
+html,
+body {
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  background-color: var(--color-canvas);
+  background-image:
+    radial-gradient(60rem 30rem at 85% -10%, rgb(37 99 235 / 0.08), transparent 70%),
+    radial-gradient(50rem 28rem at -10% 110%, rgb(37 99 235 / 0.06), transparent 70%);
+  background-attachment: fixed;
+}
+
+@layer components {
+  .rounded-lg.bg-white {
+    box-shadow: var(--shadow-card);
+    border-color: color-mix(in srgb, var(--color-line) 75%, transparent);
+  }
+}
+
+:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-brand) 55%, transparent);
+  outline-offset: 2px;
+}

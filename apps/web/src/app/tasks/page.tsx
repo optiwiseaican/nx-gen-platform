@@ -6,7 +6,7 @@ import { formatDate } from "@/components/admin";
 import { AppShell, useAuthRedirect } from "@/components/AppShell";
 import { Callout, StatusIcon } from "@/components/ui";
 import { WorkflowBadge } from "@/components/workflow";
-import { workflowApi, WorkflowTask } from "@/lib/api";
+import { moduleUrl, workflowApi, WorkflowTask } from "@/lib/api";
 
 function Tasks() {
   const redirect = useAuthRedirect();
@@ -35,10 +35,10 @@ function Tasks() {
     <ul className="space-y-3">
       {tasks.map((t) => (
         <li key={t.instance.id}>
-          <Link
-            href={t.link}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-white p-4 hover:border-brand"
-          >
+          {(() => {
+            const cls = "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-white p-4 hover:border-brand";
+            const body = (
+              <>
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-muted">
                 {t.workflow} · {t.step === "REVIEW" ? "Review" : "Approve"}
@@ -50,7 +50,19 @@ function Tasks() {
               </p>
             </div>
             <WorkflowBadge state={t.instance.state} />
-          </Link>
+              </>
+            );
+            // Records of a module (e.g. TLC analyses) open in that module's pages.
+            return t.link.startsWith("/modules/") ? (
+              <a href={moduleUrl(t.link)} className={cls}>
+                {body}
+              </a>
+            ) : (
+              <Link href={t.link} className={cls}>
+                {body}
+              </Link>
+            );
+          })()}
         </li>
       ))}
     </ul>

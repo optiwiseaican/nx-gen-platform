@@ -126,6 +126,28 @@ export interface ModuleContext {
   /** Queries on the module's own tables (prefix enforced by convention and review). */
   db: {
     query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+    /** Writes go through a transaction that records who acted and why. */
+    transaction<T>(principal: ModulePrincipal, reason: string | null, origin: RequestOrigin, fn: (tx: ModuleTx) => Promise<T>): Promise<T>;
+  };
+  /** The core workflow engine, for workflows declared in module.json. */
+  workflow: {
+    registerRecordType(type: {
+      tableName: string;
+      load(tx: ModuleTx, recordId: string): Promise<{ title: string; content: Record<string, unknown> }>;
+      /** Module page that shows the record (relative to /modules/<id>/). */
+      link(seriesId: string): string;
+      authorOf?(tx: ModuleTx, recordId: string): Promise<string | null>;
+      /** Why the record cannot be submitted yet, or null. Checked by the core before signing. */
+      beforeSubmit?(tx: ModuleTx, recordId: string): Promise<string | null>;
+    }): void;
+    /** Start the workflow for a new record, inside the transaction that created it. */
+    start(tx: ModuleTx, principal: ModulePrincipal, input: { definitionCode: string; tableName: string; recordId: string; seriesId: string; seriesVersion: number }): Promise<string>;
+    /** Throws unless the record is still a DRAFT (the database also refuses changes; attach workflow_lock()). */
+    assertEditable(tx: ModuleTx, tableName: string, recordId: string): Promise<void>;
+    forRecord(tableName: string, recordId: string): Promise<WorkflowSummary | null>;
+  };
+  methods: {
+    effective(instrumentType: string): Promise<EffectiveMethod[]>;
   };
   audit: {
     record(e: {
@@ -150,6 +172,44 @@ export interface ModuleContext {
     /** Store an original packet the module kept in memory (e.g. the measurement a record used). */
     persist(device: DeviceInfo, packet: InstrumentPacket, kind: PacketDecision['kind'], payload?: unknown): Promise<number>;
   };
+}
+
+/** A database transaction opened by the core with the acting user recorded (audit triggers need it). */
+export interface ModuleTx {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+}
+
+export type WorkflowState = 'DRAFT' | 'IN_REVIEW' | 'REVIEWED' | 'APPROVED' | 'INVALIDATED' | 'SUPERSEDED';
+
+export interface WorkflowSummary {
+  id: string;
+  definitionCode: string;
+  state: WorkflowState;
+  contentHash: string | null;
+  preparedBy: { id: string; name: string } | null;
+  reviewedBy: { id: string; name: string } | null;
+  approvedBy: { id: string; name: string } | null;
+  submittedAt: string | null;
+  approvedAt: string | null;
+}
+
+/** An APPROVED (effective) method version for an instrument type. */
+export interface EffectiveMethod {
+  methodId: string;
+  code: string;
+  versionId: string;
+  versionNumber: number;
+  name: string;
+  purpose: string;
+  parameters: { name: string; value: string; unit: string }[];
+}
+
+/** Return this from a route handler to send a file instead of JSON. */
+export interface ModuleFileResponse {
+  kind: 'file';
+  contentType: string;
+  data: Buffer;
+  fileName?: string;
 }
 
 export interface NxGenModule {

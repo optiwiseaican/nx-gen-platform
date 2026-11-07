@@ -4,6 +4,7 @@ import { DevicesModule } from '../devices/devices.module';
 import { GatewayModule } from '../gateway/gateway.module';
 import { LicensingModule } from '../licensing/licensing.module';
 import { SignaturesModule } from '../signatures/signatures.module';
+import { WorkflowModule } from '../workflow/workflow.module';
 import { ModuleManagerService } from './module-manager.service';
 import { ModulesController } from './modules.controller';
 
@@ -14,6 +15,7 @@ import { ModulesController } from './modules.controller';
     GatewayModule,
     LicensingModule,
     SignaturesModule,
+    WorkflowModule,
   ],
   controllers: [ModulesController],
   providers: [ModuleManagerService],

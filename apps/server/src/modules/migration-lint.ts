@@ -33,7 +33,7 @@ export function lintModuleSql(sql: string, prefix: string): string[] {
     'Trigger on',
   );
   check(
-    /\b(?:INSERT\s+INTO|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+([A-Za-z_][\w.]*)/gi,
+    /\b(?:INSERT\s+INTO|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?!ON\b)([A-Za-z_][\w.]*)/gi,
     'Write to',
   );
   // UPDATE as a statement — not "DO UPDATE SET", "INSERT OR UPDATE ON", "FOR UPDATE".
@@ -48,7 +48,7 @@ export function lintModuleSql(sql: string, prefix: string): string[] {
       'Creating roles, schemas, extensions or databases',
     ],
     [
-      /\bSET\s+(?:LOCAL\s+)?(search_path|role|session_authorization)\b/i,
+      /\bSET\s+(?:LOCAL\s+)?(?:search_path\b(?!\s+FROM\s+CURRENT)|role\b|session_authorization\b)/i,
       'Changing search_path or role',
     ],
     [

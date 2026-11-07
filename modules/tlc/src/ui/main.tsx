@@ -1,0 +1,1023 @@
+import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { evaluate, Evaluation, ILLUMINATIONS, Illumination, RfWindow, TrackInput, validatePlate } from "../shared/tlc";
+import "./styles.css";
+
+// ---------------------------------------------------------------------------
+// API (same origin: the core serves this page and the API)
+// ---------------------------------------------------------------------------
+
+class HttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+let idleExpiresAt: number | null = null;
+const idleListeners = new Set<() => void>();
+
+async function request(path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`/api${path}`, { ...init, credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", ...init?.headers } });
+  const idle = res.headers.get("X-NxGen-Session-Idle-Expires");
+  const now = Date.parse(res.headers.get("X-NxGen-Server-Time") ?? "");
+  if (idle) {
+    idleExpiresAt = Date.parse(idle) + (Number.isNaN(now) ? 0 : Date.now() - now);
+    idleListeners.forEach((f) => f());
+  }
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { message?: string | string[] } | null;
+    const m = body?.message;
+    throw new HttpError(res.status, Array.isArray(m) ? m.join(" ") : (m ?? `Request failed (${res.status})`));
+  }
+  return res;
+}
+const api = async <T,>(path: string, init?: RequestInit) => (await (await request(path, init)).json()) as T;
+const mod = <T,>(path: string, init?: RequestInit) => api<T>(`/modules/tlc/api${path}`, init);
+const send = (body: unknown, method = "POST"): RequestInit => ({ method, body: JSON.stringify(body) });
+
+interface Principal {
+  userId: string;
+  fullName: string;
+  username: string;
+  permissions: string[];
+}
+interface Readiness {
+  state: string;
+  usable: boolean;
+  message: string;
+  dueAt: string | null;
+}
+interface Device {
+  id: string;
+  code: string;
+  name: string;
+  model: string;
+  manufacturer: string;
+  location: string;
+  status: string;
+  readiness: Readiness;
+}
+interface Method {
+  methodId: string;
+  code: string;
+  versionId: string;
+  versionNumber: number;
+  name: string;
+  windows: RfWindow[];
+  problems: string[];
+}
+interface Workflow {
+  id: string;
+  state: "DRAFT" | "IN_REVIEW" | "REVIEWED" | "APPROVED" | "INVALIDATED" | "SUPERSEDED";
+  preparedBy: { name: string } | null;
+  reviewedBy: { name: string } | null;
+  approvedBy: { name: string } | null;
+}
+interface Analysis {
+  id: string;
+  code: string;
+  deviceId: string;
+  deviceCode?: string;
+  method: { code: string; version: number; name: string; rfWindows: RfWindow[] };
+  sampleId: string;
+  batch: string;
+  plateType: string;
+  plateLot: string;
+  mobilePhase: string;
+  solventFrontMm: number | null;
+  tracks: TrackInput[];
+  results: Partial<Evaluation>;
+  conclusion: string;
+  remarks: string;
+  analyzedBy: { id: string; name: string };
+  createdAt: string;
+  workflow: Workflow | null;
+}
+interface ImageMeta {
+  id: string;
+  illumination: Illumination;
+  fileName: string;
+  sizeBytes: number;
+  sha256: string;
+  uploadedBy: string | null;
+  uploadedAt: string;
+}
+interface Signature {
+  meaningLabel: string;
+  signerFullName: string;
+  signerUsername: string;
+  signedAt: string;
+  reason: string;
+  contentHash: string;
+  intact: boolean;
+}
+interface WorkflowDetail {
+  instance: Workflow;
+  allowedSteps: Step[];
+  history: { id: string; step: string; toState: string; actorName: string | null; comment: string | null; occurredAt: string; signature: Signature | null }[];
+}
+type Step = "SUBMIT" | "WITHDRAW" | "REVIEW" | "APPROVE" | "REJECT" | "INVALIDATE";
+
+// ---------------------------------------------------------------------------
+// UI pieces
+// ---------------------------------------------------------------------------
+
+const toneClass = {
+  pass: "border-pass/30 bg-pass-50 text-pass",
+  warn: "border-warn/30 bg-warn-50 text-warn",
+  fail: "border-fail/30 bg-fail-50 text-fail",
+  info: "border-brand/30 bg-brand-50 text-brand-700",
+  muted: "border-line bg-canvas text-muted",
+};
+type Tone = keyof typeof toneClass;
+function Badge({ tone, children }: { tone: Tone; children: React.ReactNode }) {
+  return <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-bold tracking-wide ${toneClass[tone]}`}>{children}</span>;
+}
+function Callout({ tone, title, children }: { tone: Exclude<Tone, "muted">; title?: string; children: React.ReactNode }) {
+  return (
+    <div className={`rounded-xl border px-4 py-3 text-sm ${toneClass[tone]}`} role={tone === "fail" ? "alert" : "status"}>
+      {title && <p className="font-semibold">{title}</p>}
+      <div className="text-ink">{children}</div>
+    </div>
+  );
+}
+const primary = "inline-flex min-h-11 items-center justify-center rounded-xl bg-brand px-5 font-semibold text-white shadow-[var(--shadow-brand)] hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-brand/40 disabled:shadow-none";
+const secondary = "inline-flex min-h-11 items-center justify-center rounded-xl border border-line bg-white px-5 font-semibold text-ink hover:border-brand/30 disabled:text-muted";
+const field = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 font-normal";
+const card = "rounded-lg border border-line bg-white p-5";
+const fmtDate = (v: string | null | undefined) => (v ? new Date(v).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—");
+
+const CONCLUSION: Record<string, { label: string; tone: Tone }> = {
+  CONFORMS: { label: "CONFORMS", tone: "pass" },
+  DOES_NOT_CONFORM: { label: "DOES NOT CONFORM", tone: "fail" },
+  SST_FAILED: { label: "SUITABILITY FAILED", tone: "fail" },
+  INCOMPLETE: { label: "NOT EVALUATED", tone: "muted" },
+};
+const STATE: Record<Workflow["state"], { label: string; tone: Tone }> = {
+  DRAFT: { label: "DRAFT", tone: "muted" },
+  IN_REVIEW: { label: "IN REVIEW", tone: "warn" },
+  REVIEWED: { label: "REVIEWED", tone: "warn" },
+  APPROVED: { label: "APPROVED", tone: "pass" },
+  INVALIDATED: { label: "INVALIDATED", tone: "fail" },
+  SUPERSEDED: { label: "SUPERSEDED", tone: "muted" },
+};
+const ILLUMINATION_LABEL: Record<Illumination, string> = { WHITE: "White light", UV254: "UV 254 nm", UV366: "UV 366 nm" };
+
+function SessionBanner() {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const f = () => tick((x) => x + 1);
+    idleListeners.add(f);
+    const t = setInterval(f, 1000);
+    return () => {
+      idleListeners.delete(f);
+      clearInterval(t);
+    };
+  }, []);
+  if (!idleExpiresAt) return null;
+  const left = idleExpiresAt - Date.now();
+  if (left > 120_000 || left <= 0) return null;
+  const s = Math.ceil(left / 1000);
+  return (
+    <div className="border-b border-warn/30 bg-warn-50 px-4 py-2 text-center text-sm" role="alert">
+      You will be signed out in {Math.floor(s / 60)}:{String(s % 60).padStart(2, "0")} because of inactivity.{" "}
+      <button className="font-semibold text-brand underline" onClick={() => void request("/auth/session/extend", send({}))}>
+        Stay signed in
+      </button>
+    </div>
+  );
+}
+
+const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]!.toUpperCase())
+    .join("");
+const ICON = {
+  plate: "M5 3.5h14v17H5zM9 16.5v.01M12 16.5v.01M15 16.5v.01M9 11a1.5 1.5 0 1 0 0-.01M15 8a1.5 1.5 0 1 0 0-.01M5 18.5h14",
+  home: "M3.5 10.5 12 4l8.5 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-4.5v-6h-5v6H5A1.5 1.5 0 0 1 3.5 19z",
+  list: "M9 6.5h11M9 12h11M9 17.5h11M4 6.5h.01M4 12h.01M4 17.5h.01",
+  tasks: "M9 6.5h11M9 12h11M9 17.5h11M4 6.5l1 1 2-2M4 12l1 1 2-2M4 17.5l1 1 2-2",
+};
+const Svg = ({ d }: { d: string }) => (
+  <svg aria-hidden viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d={d} />
+  </svg>
+);
+
+function Shell({ web, principal, title, children }: { web: string; principal: Principal; title: string; children: React.ReactNode }) {
+  const item = (href: string, label: string, d: string, active = false) => (
+    <a
+      href={href}
+      aria-current={active ? "page" : undefined}
+      className={`flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-[15px] font-semibold ${active ? "bg-brand-50 text-brand" : "text-ink/75 hover:bg-canvas hover:text-ink"}`}
+    >
+      <span className={active ? "text-brand" : "text-muted"}>
+        <Svg d={d} />
+      </span>
+      {label}
+    </a>
+  );
+  return (
+    <div className="min-h-screen lg:flex">
+      <aside className="border-b border-line/80 bg-white/85 backdrop-blur lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-[17rem] lg:shrink-0 lg:flex-col lg:border-r lg:border-b-0">
+        <a href={`${web}/home/`} className="flex items-center gap-3 px-5 pt-6 pb-5">
+          <span className="inline-grid h-11 w-11 place-items-center rounded-[30%] bg-gradient-to-br from-[#3b82f6] via-brand to-[#1e40af] text-white shadow-[var(--shadow-brand)]" aria-hidden>
+            <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9.5 3.5h5M10.5 3.5v5.5L6 17a2.2 2.2 0 0 0 1.9 3.3h8.2A2.2 2.2 0 0 0 18 17l-4.5-8V3.5" />
+              <path d="m9.5 15 1.8 1.8 3.3-3.3" />
+            </svg>
+          </span>
+          <span className="leading-tight">
+            <span className="block text-lg font-extrabold tracking-tight">
+              Nx<span className="text-brand">Gen</span>
+            </span>
+            <span className="block text-[13px] font-semibold text-muted">TLC module</span>
+          </span>
+        </a>
+        <nav aria-label="Main" className="flex flex-wrap gap-1 px-3 pb-3 lg:flex-1 lg:flex-col lg:flex-nowrap lg:space-y-1">
+          <p className="hidden px-3.5 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-muted/70 lg:block">TLC</p>
+          {item("/modules/tlc/", "Plate analyses", ICON.plate, true)}
+          <p className="hidden px-3.5 pt-4 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-muted/70 lg:block">NxGen</p>
+          {item(`${web}/home/`, "Home", ICON.home)}
+          {item(`${web}/tasks/`, "My Tasks", ICON.tasks)}
+          {item(`${web}/methods/`, "Methods", ICON.list)}
+        </nav>
+        <p className="hidden items-center gap-2.5 border-t border-line px-8 py-5 text-sm text-muted lg:flex">
+          <span className="h-2 w-2 rounded-full bg-pass shadow-[0_0_0_3px_rgb(19_150_90/0.15)]" aria-hidden />
+          Connected
+        </p>
+      </aside>
+      <div className="min-w-0 flex-1">
+        <SessionBanner />
+        <header className="flex flex-wrap items-center justify-between gap-4 px-4 pt-6 pb-2 sm:px-8 lg:pt-8">
+          <div>
+            <p className="text-[12px] font-bold uppercase tracking-[0.16em] text-muted">TLC module</p>
+            <h1 className="text-[28px] font-extrabold leading-tight tracking-tight">{title}</h1>
+          </div>
+          <div className="flex items-center gap-3 rounded-2xl border border-line/70 bg-white/80 py-1.5 pr-4 pl-1.5 shadow-[var(--shadow-card)]">
+            <span className="grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-navy-700 to-navy text-sm font-bold text-white" aria-hidden>
+              {initials(principal.fullName)}
+            </span>
+            <span className="leading-tight">
+              <span className="block text-sm font-bold">{principal.fullName}</span>
+              <span className="flex items-center gap-1.5 text-xs text-muted">
+                <span className="h-1.5 w-1.5 rounded-full bg-pass" aria-hidden />
+                {principal.username}
+              </span>
+            </span>
+          </div>
+        </header>
+        <main className="max-w-[84rem] space-y-6 px-4 py-6 sm:px-8">{children}</main>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------------------
+
+function Home({ principal }: { principal: Principal }) {
+  const [rows, setRows] = useState<Analysis[] | null>(null);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    mod<Analysis[]>("/analyses").then(setRows).catch((e: Error) => setError(e.message));
+    mod<{ devices: Device[] }>("/setup").then((s) => setDevices(s.devices)).catch(() => undefined);
+  }, []);
+  if (error) return <Callout tone="fail">{error}</Callout>;
+  const canAnalyze = principal.permissions.includes("tlc.analyze");
+  const canCalibrate = principal.permissions.includes("calibration.perform");
+  return (
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="max-w-3xl text-sm text-muted">
+          Each plate analysis uses an approved TLC method and a usable instrument. Plate images are kept as original records with their SHA-256;
+          Rf values are calculated by NxGen and the analysis is reviewed and approved with electronic signatures.
+        </p>
+        {canAnalyze && (
+          <a href="/modules/tlc/?new=1" className={primary}>
+            New analysis
+          </a>
+        )}
+      </div>
+      <section className="overflow-x-auto rounded-lg border border-line bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="border-b border-line bg-[#f7f9fd] text-xs uppercase tracking-wide text-muted">
+            <tr>
+              <th className="px-4 py-3">Analysis</th>
+              <th className="px-4 py-3">Sample</th>
+              <th className="px-4 py-3">Method</th>
+              <th className="px-4 py-3">Result</th>
+              <th className="px-4 py-3">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {(rows ?? []).map((a) => (
+              <tr key={a.id}>
+                <td className="px-4 py-3">
+                  <a href={`/modules/tlc/?analysis=${a.id}`} className="font-semibold text-brand hover:underline">
+                    {a.code}
+                  </a>
+                  <p className="text-xs text-muted">
+                    {a.deviceCode} · {fmtDate(a.createdAt)}
+                  </p>
+                </td>
+                <td className="px-4 py-3">
+                  {a.sampleId}
+                  {a.batch && <span className="text-muted"> · {a.batch}</span>}
+                </td>
+                <td className="px-4 py-3">
+                  {a.method.code} v{a.method.version}
+                </td>
+                <td className="px-4 py-3">
+                  <Badge tone={CONCLUSION[a.conclusion].tone}>{CONCLUSION[a.conclusion].label}</Badge>
+                </td>
+                <td className="px-4 py-3">{a.workflow && <Badge tone={STATE[a.workflow.state].tone}>{STATE[a.workflow.state].label}</Badge>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows && rows.length === 0 && <p className="px-4 py-6 text-center text-sm text-muted">No TLC analyses yet.</p>}
+        {!rows && <p className="px-4 py-6 text-center text-sm text-muted">Loading…</p>}
+      </section>
+      <section className={card}>
+        <h2 className="font-bold">TLC instruments</h2>
+        <ul className="mt-3 divide-y divide-line text-sm">
+          {devices.map((d) => (
+            <li key={d.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+              <span>
+                <span className="font-semibold">{d.code}</span> · {d.name} <span className="text-muted">· {d.location || "—"}</span>
+              </span>
+              <span className="flex items-center gap-3">
+                <Badge tone={d.readiness.usable ? (d.readiness.state === "DUE_SOON" ? "warn" : "pass") : "fail"}>{d.readiness.state.replace(/_/g, " ")}</Badge>
+                {canCalibrate && d.status === "ACTIVE" && (
+                  <a href={`/modules/tlc/?device=${d.id}`} className="font-semibold text-brand hover:underline">
+                    Instrument check
+                  </a>
+                )}
+              </span>
+            </li>
+          ))}
+          {devices.length === 0 && <li className="py-2.5 text-muted">No TLC instruments registered. Register one under NxGen → Instruments.</li>}
+        </ul>
+      </section>
+    </>
+  );
+}
+
+function NewAnalysis() {
+  const [setup, setSetup] = useState<{ devices: Device[]; methods: Method[] } | null>(null);
+  const [f, setF] = useState({ deviceId: "", methodVersionId: "", sampleId: "", batch: "", plateType: "Silica gel 60 F254 (glass)", plateLot: "", mobilePhase: "", remarks: "" });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    mod<{ devices: Device[]; methods: Method[] }>("/setup")
+      .then((s) => {
+        setSetup(s);
+        setF((x) => ({ ...x, deviceId: s.devices.find((d) => d.readiness.usable)?.id ?? "", methodVersionId: s.methods.find((m) => m.windows.length)?.versionId ?? "" }));
+      })
+      .catch((e: Error) => setError(e.message));
+  }, []);
+  if (!setup) return error ? <Callout tone="fail">{error}</Callout> : <p className="text-muted">Loading…</p>;
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
+  const method = setup.methods.find((m) => m.versionId === f.methodVersionId);
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const a = await mod<Analysis>("/analyses", send(f));
+      location.href = `/modules/tlc/?analysis=${a.id}`;
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={create} className={`${card} max-w-4xl space-y-5`}>
+      {!setup.methods.length && (
+        <Callout tone="warn" title="No approved TLC method">
+          Create a method for a TLC scanner under NxGen → Methods, with a parameter per compound whose unit is “Rf” (e.g. Paracetamol, 0.40–0.50,
+          Rf), and have it reviewed and approved.
+        </Callout>
+      )}
+      <div className="grid gap-5 sm:grid-cols-2">
+        <label className="text-sm font-semibold">
+          Instrument
+          <select value={f.deviceId} onChange={set("deviceId")} className={field}>
+            <option value="">Choose…</option>
+            {setup.devices.map((d) => (
+              <option key={d.id} value={d.id} disabled={!d.readiness.usable}>
+                {d.code} · {d.name}
+                {!d.readiness.usable && ` (${d.readiness.state.replace(/_/g, " ").toLowerCase()})`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm font-semibold">
+          Approved method
+          <select value={f.methodVersionId} onChange={set("methodVersionId")} className={field}>
+            <option value="">Choose…</option>
+            {setup.methods.map((m) => (
+              <option key={m.versionId} value={m.versionId}>
+                {m.code} v{m.versionNumber} · {m.name}
+              </option>
+            ))}
+          </select>
+          {method && (
+            <span className="mt-1 block text-xs font-normal text-muted">
+              {method.windows.length
+                ? `Rf windows: ${method.windows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ")}`
+                : "This method has no Rf windows (parameters with unit Rf)."}
+            </span>
+          )}
+        </label>
+        <label className="text-sm font-semibold">
+          Sample ID
+          <input value={f.sampleId} onChange={set("sampleId")} className={field} placeholder="e.g. SMP-2026-1187" required />
+        </label>
+        <label className="text-sm font-semibold">
+          Batch
+          <input value={f.batch} onChange={set("batch")} className={field} placeholder="e.g. B-24-0311" />
+        </label>
+        <label className="text-sm font-semibold">
+          Plate type
+          <input value={f.plateType} onChange={set("plateType")} className={field} />
+        </label>
+        <label className="text-sm font-semibold">
+          Plate lot
+          <input value={f.plateLot} onChange={set("plateLot")} className={field} placeholder="e.g. HX38412" />
+        </label>
+      </div>
+      <label className="block text-sm font-semibold">
+        Mobile phase
+        <input value={f.mobilePhase} onChange={set("mobilePhase")} className={field} placeholder="e.g. Toluene : ethyl acetate : formic acid (5:4:1)" />
+      </label>
+      <label className="block text-sm font-semibold">
+        Remarks
+        <textarea rows={2} value={f.remarks} onChange={set("remarks")} className={field} />
+      </label>
+      {error && <Callout tone="fail">{error}</Callout>}
+      <div className="flex justify-end gap-3">
+        <a href="/modules/tlc/" className={secondary}>
+          Cancel
+        </a>
+        <button className={primary} disabled={busy}>
+          {busy ? "Creating…" : "Create analysis"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+const STEP_UI: Record<Step, { label: string; title: string; meaning?: string; minReason: number; tone: "primary" | "secondary" }> = {
+  SUBMIT: { label: "Submit for review…", title: "Submit for review", meaning: "Authored", minReason: 0, tone: "primary" },
+  WITHDRAW: { label: "Withdraw…", title: "Withdraw to draft", minReason: 10, tone: "secondary" },
+  REVIEW: { label: "Review…", title: "Sign as reviewed", meaning: "Reviewed", minReason: 0, tone: "primary" },
+  APPROVE: { label: "Approve…", title: "Approve the analysis", meaning: "Approved", minReason: 0, tone: "primary" },
+  REJECT: { label: "Reject…", title: "Reject the analysis", meaning: "Rejected", minReason: 10, tone: "secondary" },
+  INVALIDATE: { label: "Invalidate…", title: "Invalidate the approved analysis", meaning: "Invalidated", minReason: 10, tone: "secondary" },
+};
+
+function StepDialog({ step, principal, onClose, onSign }: { step: Step | null; principal: Principal; onClose: () => void; onSign: (comment: string, password: string) => Promise<void> }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [comment, setComment] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const d = ref.current;
+    if (!d) return;
+    if (step && !d.open) {
+      setComment("");
+      setPassword("");
+      setError(null);
+      d.showModal();
+    } else if (!step && d.open) d.close();
+  }, [step]);
+  const ui = step ? STEP_UI[step] : null;
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ui) return;
+    if (comment.trim().length < ui.minReason) return setError(`Enter the reason (at least ${ui.minReason} characters).`);
+    if (ui.meaning && !password) return setError("Enter your password to sign.");
+    setBusy(true);
+    setError(null);
+    try {
+      await onSign(comment.trim(), password);
+    } catch (err) {
+      setPassword("");
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <dialog ref={ref} onClose={onClose} className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-[1.375rem] border border-line p-0 shadow-2xl backdrop:bg-navy/35">
+      <form onSubmit={submit} className="space-y-4 p-6">
+        <h2 className="text-lg font-bold">{ui?.title}</h2>
+        <label className="block text-sm font-semibold">
+          {ui?.minReason ? "Reason" : "Comment (optional)"}
+          <textarea rows={3} value={comment} onChange={(e) => setComment(e.target.value)} className={field} />
+        </label>
+        {ui?.meaning && (
+          <fieldset className="space-y-3 rounded-xl border border-brand/30 bg-brand-50 p-4">
+            <legend className="px-1 text-sm font-semibold text-brand-700">Electronic signature</legend>
+            <p className="text-sm">
+              Meaning: <b>{ui.meaning}</b> · set by this step
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-sm font-semibold">
+                Username
+                <input value={principal.username} readOnly className={`${field} bg-canvas`} />
+              </label>
+              <label className="text-sm font-semibold">
+                Password
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" className={field} />
+              </label>
+            </div>
+            <p className="text-xs text-muted">
+              By signing, I, <b className="text-ink">{principal.fullName}</b>, confirm that this electronic signature is the legally binding equivalent of
+              my handwritten signature.
+            </p>
+          </fieldset>
+        )}
+        {error && <Callout tone="fail">{error}</Callout>}
+        <div className="flex justify-end gap-3">
+          <button type="button" className={secondary} onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className={primary} disabled={busy}>
+            {busy ? "Signing…" : ui?.meaning ? `Sign & ${ui.label.replace("…", "")}` : ui?.label.replace("…", "")}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
+function AnalysisPage({ id, principal, web }: { id: string; principal: Principal; web: string }) {
+  const [a, setA] = useState<(Analysis & { images: ImageMeta[]; device: Device | null }) | null>(null);
+  const [wf, setWf] = useState<WorkflowDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [front, setFront] = useState("");
+  const [tracks, setTracks] = useState<TrackInput[]>([]);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [step, setStep] = useState<Step | null>(null);
+  const [illumination, setIllumination] = useState<Illumination>("UV254");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const x = await mod<Analysis & { images: ImageMeta[]; device: Device | null }>(`/analyses/${id}`);
+      setA(x);
+      setFront(x.solventFrontMm === null ? "" : String(x.solventFrontMm));
+      setTracks(
+        x.tracks.length
+          ? x.tracks
+          : [
+              { label: "S1", role: "STANDARD", spots: [] },
+              { label: "T1", role: "SAMPLE", spots: [] },
+            ],
+      );
+      if (x.workflow) setWf(await api<WorkflowDetail>(`/workflow/instances/${x.workflow.id}`));
+    } catch (e) {
+      if ((e as HttpError).status === 401) location.href = `${web}/login/?reason=session`;
+      else setError((e as Error).message);
+    }
+  }, [id, web]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (error) return <Callout tone="fail">{error}</Callout>;
+  if (!a || !wf) return <p className="text-muted">Loading…</p>;
+
+  const editable = wf.instance.state === "DRAFT" && a.analyzedBy.id === principal.userId && principal.permissions.includes("tlc.analyze");
+  const frontMm = front.trim() ? Number(front) : null;
+  const problems = validatePlate(frontMm, tracks);
+  const preview: Evaluation | null = !problems.length && frontMm ? evaluate(frontMm, tracks, a.method.rfWindows) : null;
+  const shown = (editable ? preview : (a.results as Evaluation)) ?? null;
+  const compounds = a.method.rfWindows.map((w) => w.compound);
+
+  async function upload(file: File) {
+    setNotice(null);
+    setSaveError(null);
+    try {
+      const r = await request(`/modules/tlc/api/analyses/${id}/images?illumination=${illumination}&name=${encodeURIComponent(file.name)}`, {
+        method: "POST",
+        body: file,
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+      });
+      const out = (await r.json()) as { sha256: string };
+      await load();
+      setNotice(`${ILLUMINATION_LABEL[illumination]} image stored · SHA-256 ${out.sha256.slice(0, 16)}…`);
+    } catch (e) {
+      setSaveError((e as Error).message);
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function save() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await mod(`/analyses/${id}/evaluation`, send({ solventFrontMm: frontMm, tracks }, "PUT"));
+      await load();
+      setNotice("Evaluation saved. NxGen recalculated the Rf values and the conclusion.");
+    } catch (e) {
+      setSaveError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function sign(comment: string, password: string) {
+    const ui = STEP_UI[step!];
+    await api(`/workflow/instances/${wf!.instance.id}/${step!.toLowerCase()}`, send({ reason: comment, signature: ui.meaning ? { username: principal.username, password } : undefined }));
+    const done = step!;
+    await load(); // show the new (locked) state before announcing it
+    setStep(null);
+    setNotice(
+      { SUBMIT: "Submitted for review and locked.", WITHDRAW: "Withdrawn to draft.", REVIEW: "Signed as reviewed.", APPROVE: "Approved.", REJECT: "Rejected.", INVALIDATE: "Invalidated." }[done],
+    );
+  }
+
+  const setTrack = (i: number, t: Partial<TrackInput>) => setTracks(tracks.map((x, j) => (j === i ? { ...x, ...t } : x)));
+  const stages = [
+    { label: "Prepared", who: wf.instance.preparedBy?.name, done: wf.instance.state !== "DRAFT" },
+    { label: "Reviewed", who: wf.instance.reviewedBy?.name, done: ["REVIEWED", "APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
+    { label: "Approved", who: wf.instance.approvedBy?.name, done: ["APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
+  ];
+
+  return (
+    <>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-mono text-sm text-muted">
+            {a.code} · {a.device?.code} {a.device?.name}
+          </p>
+          <h2 className="text-xl font-bold">
+            {a.sampleId}
+            {a.batch && <span className="font-normal text-muted"> · batch {a.batch}</span>}
+          </h2>
+        </div>
+        <span className="flex gap-2">
+          <Badge tone={STATE[wf.instance.state].tone}>{STATE[wf.instance.state].label}</Badge>
+          <Badge tone={CONCLUSION[a.conclusion].tone}>{CONCLUSION[a.conclusion].label}</Badge>
+        </span>
+      </div>
+      {notice && <Callout tone="pass">{notice}</Callout>}
+
+      <ol className="grid gap-2 sm:grid-cols-3" aria-label="Approval progress">
+        {stages.map((s, i) => (
+          <li key={s.label} className={`rounded-xl border px-4 py-2.5 text-sm ${s.done ? "border-pass/30 bg-pass-50" : "border-line bg-white"}`}>
+            <p className="text-xs font-bold uppercase tracking-wide text-muted">
+              {i + 1}. {s.label}
+            </p>
+            <p className="font-semibold">{s.done ? (s.who ?? "—") : "Not yet"}</p>
+          </li>
+        ))}
+      </ol>
+      {wf.allowedSteps.length > 0 && (
+        <div className="flex flex-wrap gap-3">
+          {wf.allowedSteps.map((s) => (
+            <button key={s} className={STEP_UI[s].tone === "primary" ? primary : secondary} onClick={() => setStep(s)}>
+              {STEP_UI[s].label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <section className={card}>
+        <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
+          {[
+            ["Method", `${a.method.code} v${a.method.version} · ${a.method.name}`],
+            ["Rf windows", a.method.rfWindows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ") || "—"],
+            ["Plate", `${a.plateType}${a.plateLot ? ` · lot ${a.plateLot}` : ""}`],
+            ["Mobile phase", a.mobilePhase || "—"],
+            ["Analyst", a.analyzedBy.name],
+            ["Created", fmtDate(a.createdAt)],
+          ].map(([k, v]) => (
+            <div key={k} className="grid grid-cols-[8rem_1fr] gap-3">
+              <dt className="text-muted">{k}</dt>
+              <dd className="font-medium">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section className={`${card} space-y-4`}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="font-bold">Plate images</h3>
+          {editable && (
+            <div className="flex flex-wrap items-center gap-2">
+              <select aria-label="Illumination" value={illumination} onChange={(e) => setIllumination(e.target.value as Illumination)} className="rounded-xl border border-line bg-white px-3 py-2 text-sm">
+                {ILLUMINATIONS.map((i) => (
+                  <option key={i} value={i}>
+                    {ILLUMINATION_LABEL[i]}
+                  </option>
+                ))}
+              </select>
+              <input ref={fileRef} id="plate-image" type="file" accept="image/png,image/jpeg" className="sr-only" onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])} />
+              <button className={secondary} onClick={() => fileRef.current?.click()}>
+                Add image…
+              </button>
+            </div>
+          )}
+        </div>
+        {a.images.length === 0 && <p className="text-sm text-muted">No images yet. Images are stored as original records and cannot be changed or removed.</p>}
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {a.images.map((img) => (
+            <figure key={img.id} className="overflow-hidden rounded-xl border border-line">
+              <img src={`/api/modules/tlc/api/images/${img.id}`} alt={`${ILLUMINATION_LABEL[img.illumination]} plate image`} className="aspect-[4/3] w-full bg-canvas object-contain" />
+              <figcaption className="space-y-0.5 p-3 text-xs">
+                <p className="font-semibold text-ink">
+                  {ILLUMINATION_LABEL[img.illumination]} · {img.fileName}
+                </p>
+                <p className="text-muted">
+                  {(img.sizeBytes / 1024).toFixed(0)} KB · {img.uploadedBy} · {fmtDate(img.uploadedAt)}
+                </p>
+                <p className="break-all font-mono text-[11px] text-muted">SHA-256 {img.sha256}</p>
+              </figcaption>
+            </figure>
+          ))}
+        </div>
+      </section>
+
+      <section className={`${card} space-y-4`}>
+        <h3 className="font-bold">Evaluation</h3>
+        {editable ? (
+          <>
+            <label className="block max-w-xs text-sm font-semibold">
+              Solvent front from origin (mm)
+              <input inputMode="decimal" value={front} onChange={(e) => setFront(e.target.value)} className={`${field} font-mono`} />
+            </label>
+            <div className="space-y-3">
+              {tracks.map((t, i) => (
+                <div key={i} className="rounded-xl border border-line p-3">
+                  <div className="flex flex-wrap items-end gap-3">
+                    <label className="text-sm font-semibold">
+                      Track
+                      <input aria-label={`Track ${i + 1} label`} value={t.label} onChange={(e) => setTrack(i, { label: e.target.value })} className={`${field} w-24`} />
+                    </label>
+                    <label className="text-sm font-semibold">
+                      Applied
+                      <select aria-label={`Track ${i + 1} role`} value={t.role} onChange={(e) => setTrack(i, { role: e.target.value as TrackInput["role"] })} className={field}>
+                        <option value="STANDARD">Reference standard</option>
+                        <option value="SAMPLE">Sample</option>
+                      </select>
+                    </label>
+                    <button type="button" className="pb-2 text-sm font-semibold text-fail hover:underline" onClick={() => setTracks(tracks.filter((_, j) => j !== i))}>
+                      Remove track
+                    </button>
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {t.spots.map((s, k) => (
+                      <div key={k} className="flex flex-wrap items-center gap-2 text-sm">
+                        <input
+                          aria-label={`Track ${i + 1} spot ${k + 1} distance`}
+                          inputMode="decimal"
+                          placeholder="mm"
+                          value={Number.isNaN(s.distanceMm) ? "" : s.distanceMm || ""}
+                          onChange={(e) => setTrack(i, { spots: t.spots.map((x, m) => (m === k ? { ...x, distanceMm: e.target.value === "" ? NaN : Number(e.target.value) } : x)) })}
+                          className="w-24 rounded-xl border border-line px-3 py-1.5 font-mono"
+                        />
+                        <select
+                          aria-label={`Track ${i + 1} spot ${k + 1} compound`}
+                          value={s.compound}
+                          onChange={(e) => setTrack(i, { spots: t.spots.map((x, m) => (m === k ? { ...x, compound: e.target.value } : x)) })}
+                          className="rounded-xl border border-line bg-white px-3 py-1.5"
+                        >
+                          <option value="">Unassigned spot</option>
+                          {compounds.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+                        {frontMm && Number.isFinite(s.distanceMm) && s.distanceMm > 0 && <span className="font-mono text-muted">Rf {(s.distanceMm / frontMm).toFixed(3)}</span>}
+                        <button type="button" className="text-fail hover:underline" onClick={() => setTrack(i, { spots: t.spots.filter((_, m) => m !== k) })}>
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                    <button type="button" className="text-sm font-semibold text-brand hover:underline" onClick={() => setTrack(i, { spots: [...t.spots, { distanceMm: NaN, compound: "" }] })}>
+                      + Add spot
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button type="button" className="text-sm font-semibold text-brand hover:underline" onClick={() => setTracks([...tracks, { label: `T${tracks.length}`, role: "SAMPLE", spots: [] }])}>
+                + Add track
+              </button>
+            </div>
+            {problems.length > 0 && <p className="text-sm text-muted">{problems.join(" ")}</p>}
+          </>
+        ) : (
+          !a.tracks.length && <p className="text-sm text-muted">Not evaluated.</p>
+        )}
+
+        {shown?.tracks && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">{editable ? "Preview" : "Result"}</span>
+              <Badge tone={CONCLUSION[shown.conclusion].tone}>{CONCLUSION[shown.conclusion].label}</Badge>
+            </div>
+            {shown.reasons.length > 0 && (
+              <ul className="list-disc pl-5 text-sm text-muted">
+                {shown.reasons.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-left text-xs uppercase tracking-wide text-muted">
+                  <tr>
+                    <th className="pb-1">Check</th>
+                    <th className="pb-1">Track</th>
+                    <th className="pb-1">Compound</th>
+                    <th className="pb-1">Rf</th>
+                    <th className="pb-1">Window</th>
+                    <th className="pb-1">Result</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {[...shown.suitability.map((s) => ({ ...s, kind: "Suitability" })), ...shown.identification.map((s) => ({ ...s, kind: "Identification" }))].map((s, i) => (
+                    <tr key={i}>
+                      <td className="py-1.5">{s.kind}</td>
+                      <td>{s.track}</td>
+                      <td>{s.compound}</td>
+                      <td className="font-mono">{s.rf === null ? "not found" : s.rf.toFixed(3)}</td>
+                      <td className="font-mono">
+                        {s.window.min}–{s.window.max}
+                      </td>
+                      <td>{s.pass ? <Badge tone="pass">PASS</Badge> : <Badge tone="fail">FAIL</Badge>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        {editable && (
+          <>
+            {saveError && <Callout tone="fail">{saveError}</Callout>}
+            <button className={primary} onClick={() => void save()} disabled={saving || problems.length > 0}>
+              {saving ? "Saving…" : "Save evaluation"}
+            </button>
+          </>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h3 className="font-bold">History</h3>
+        {[...wf.history].reverse().map((e) => (
+          <div key={e.id} className={card}>
+            <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+              <p className="font-semibold">
+                {e.step.charAt(0) + e.step.slice(1).toLowerCase()} <span className="font-normal text-muted">· {e.actorName}</span>
+              </p>
+              <p className="text-xs text-muted">{fmtDate(e.occurredAt)}</p>
+            </div>
+            {e.comment && <p className="mt-1 text-sm text-muted">“{e.comment}”</p>}
+            {e.signature && (
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-canvas/60 p-3 text-sm">
+                <span>
+                  <b>{e.signature.meaningLabel}</b> — {e.signature.signerFullName} ({e.signature.signerUsername}) · {fmtDate(e.signature.signedAt)}
+                </span>
+                <Badge tone={e.signature.intact ? "pass" : "fail"}>{e.signature.intact ? "SIGNATURE VERIFIED" : "SIGNATURE INVALID"}</Badge>
+              </div>
+            )}
+          </div>
+        ))}
+      </section>
+      <StepDialog step={step} principal={principal} onClose={() => setStep(null)} onSign={sign} />
+    </>
+  );
+}
+
+const DEFAULT_CHECKS = [
+  { check: "Camera focus on reference plate", expected: "Sharp edges, no blur", observed: "", pass: true },
+  { check: "White light uniformity", expected: "Even illumination", observed: "", pass: true },
+  { check: "UV 254 nm lamp", expected: "On, fluorescence visible", observed: "", pass: true },
+  { check: "UV 366 nm lamp", expected: "On, fluorescence visible", observed: "", pass: true },
+];
+
+function InstrumentCheck({ deviceId, web }: { deviceId: string; web: string }) {
+  const [device, setDevice] = useState<Device | null>(null);
+  const [checks, setChecks] = useState(DEFAULT_CHECKS);
+  const [remarks, setRemarks] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<{ calibrationId: string; code: string } | null>(null);
+  useEffect(() => {
+    mod<{ devices: Device[] }>("/setup")
+      .then((s) => setDevice(s.devices.find((d) => d.id === deviceId) ?? null))
+      .catch((e: Error) => setError(e.message));
+  }, [deviceId]);
+  async function record(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      setDone(await mod<{ calibrationId: string; code: string }>(`/instruments/${deviceId}/calibrations`, send({ readings: checks, remarks })));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+  if (!device) return error ? <Callout tone="fail">{error}</Callout> : <p className="text-muted">Loading…</p>;
+  return (
+    <form onSubmit={record} className={`${card} max-w-4xl space-y-4`}>
+      <h2 className="text-lg font-bold">
+        {device.code} · {device.name}
+      </h2>
+      <p className="text-sm text-muted">Record the instrument check. It is saved as a draft calibration that you submit and a QA approver signs in NxGen.</p>
+      {done ? (
+        <Callout tone="pass" title={`${done.code} saved as a draft`}>
+          <a className="font-semibold text-brand underline" href={`${web}/devices/view/?calibration=${done.calibrationId}`}>
+            Open it to submit for approval
+          </a>
+          .
+        </Callout>
+      ) : (
+        <>
+          {checks.map((c, i) => (
+            <div key={i} className="grid gap-2 sm:grid-cols-[2fr_1.4fr_1.4fr_auto] sm:items-center">
+              <span className="text-sm font-semibold">{c.check}</span>
+              <span className="text-sm text-muted">{c.expected}</span>
+              <input
+                aria-label={`${c.check} observed`}
+                placeholder="Observed"
+                value={c.observed}
+                onChange={(e) => setChecks(checks.map((x, j) => (j === i ? { ...x, observed: e.target.value } : x)))}
+                className="rounded-xl border border-line px-3 py-2 text-sm"
+              />
+              <label className="flex items-center gap-1.5 text-sm">
+                <input type="checkbox" checked={c.pass} onChange={(e) => setChecks(checks.map((x, j) => (j === i ? { ...x, pass: e.target.checked } : x)))} />
+                Pass
+              </label>
+            </div>
+          ))}
+          <label className="block text-sm font-semibold">
+            Remarks
+            <textarea rows={2} value={remarks} onChange={(e) => setRemarks(e.target.value)} className={field} />
+          </label>
+          {error && <Callout tone="fail">{error}</Callout>}
+          <button className={primary}>Save instrument check as draft</button>
+        </>
+      )}
+    </form>
+  );
+}
+
+function App() {
+  const [boot, setBoot] = useState<{ web: string; principal: Principal } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    Promise.all([api<{ webBaseUrl: string }>("/modules/tlc/context"), api<Principal>("/auth/me")])
+      .then(([c, p]) => setBoot({ web: c.webBaseUrl, principal: p }))
+      .catch((e: HttpError) => {
+        if (e.status === 401 || e.status === 403) location.href = `${location.port === "4000" ? "http://localhost:3000" : ""}/login/?reason=session`;
+        else setError(e.message);
+      });
+  }, []);
+  if (error)
+    return (
+      <div className="p-8">
+        <Callout tone="fail">{error}</Callout>
+      </div>
+    );
+  if (!boot) return <p className="p-8 text-muted">Loading…</p>;
+  const q = new URLSearchParams(location.search);
+  const analysis = q.get("analysis");
+  const device = q.get("device");
+  const title = analysis ? "Plate analysis" : q.get("new") ? "New plate analysis" : device ? "Instrument check" : "Plate analyses";
+  return (
+    <Shell web={boot.web} principal={boot.principal} title={title}>
+      {analysis ? (
+        <AnalysisPage id={analysis} principal={boot.principal} web={boot.web} />
+      ) : q.get("new") ? (
+        <NewAnalysis />
+      ) : device ? (
+        <InstrumentCheck deviceId={device} web={boot.web} />
+      ) : (
+        <Home principal={boot.principal} />
+      )}
+    </Shell>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
