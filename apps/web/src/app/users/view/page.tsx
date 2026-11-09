@@ -34,6 +34,26 @@ type Action =
   | { kind: "unlock" }
   | { kind: "reset" };
 
+/** Quick choices for an account's own session timing (filtered to the server's limits). */
+const SESSION_PRESETS = {
+  idle: [5, 10, 15, 20, 30, 45, 60],
+  max: [1, 2, 4, 6, 8, 10, 12, 16, 24],
+} as const;
+
+/** A saved value that is not one of the quick choices is shown as "Custom". */
+function customFor(u: UserSummary) {
+  return {
+    idle:
+      u.sessionIdleMinutes !== null &&
+      !(SESSION_PRESETS.idle as readonly number[]).includes(
+        u.sessionIdleMinutes,
+      ),
+    max:
+      u.sessionMaxHours !== null &&
+      !(SESSION_PRESETS.max as readonly number[]).includes(u.sessionMaxHours),
+  };
+}
+
 function describe(e: AuditEntry): string {
   const d = (e.details ?? {}) as Record<string, string>;
   switch (e.action) {
@@ -85,6 +105,7 @@ function UserDetail() {
     maxOwn: false,
     max: "",
   });
+  const [customKeys, setCustomKeys] = useState({ idle: false, max: false });
   const [tempPassword, setTempPassword] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -99,6 +120,9 @@ function UserDetail() {
         ]);
         setUser(u);
         setDefaults(sd);
+        if (editingRef.current !== "session") {
+          setCustomKeys(customFor(u));
+        }
         if (editingRef.current !== "session")
           setSession({
             idleOwn: u.sessionIdleMinutes !== null,
@@ -438,31 +462,75 @@ function UserDetail() {
                     <legend className="mb-2 text-sm font-semibold text-ink">
                       {label}
                     </legend>
-                    <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="radio"
-                        name={`s-${key}`}
-                        checked={!session[own]}
-                        onChange={() =>
-                          setSession({
-                            ...session,
-                            [own]: false,
-                            [key]: String(sys),
-                          })
-                        }
-                      />
-                      System setting ({sys} {unit})
-                    </label>
-                    <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="radio"
-                        name={`s-${key}`}
-                        checked={session[own]}
-                        onChange={() => setSession({ ...session, [own]: true })}
-                      />
-                      This account only
-                    </label>
-                    {session[own] && (
+                    <div className="flex flex-wrap gap-2">
+                      {(() => {
+                        const presets = SESSION_PRESETS[key].filter(
+                          (v) => v >= lim.min && v <= lim.max,
+                        );
+                        const current = Number(session[key]);
+                        const custom = customKeys[key];
+                        const chip = (
+                          text: string,
+                          selected: boolean,
+                          onClick: () => void,
+                          testId: string,
+                        ) => (
+                          <button
+                            key={testId}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={onClick}
+                            className={`rounded-full border px-3.5 py-1.5 text-sm font-medium transition ${
+                              selected
+                                ? "border-brand bg-brand text-white shadow-sm"
+                                : "border-line bg-white text-ink hover:border-brand hover:text-brand"
+                            }`}
+                          >
+                            {text}
+                          </button>
+                        );
+                        return [
+                          chip(
+                            `System · ${sys} ${unit === "minutes" ? "min" : "h"}`,
+                            !session[own],
+                            () => {
+                              setCustomKeys({ ...customKeys, [key]: false });
+                              setSession({
+                                ...session,
+                                [own]: false,
+                                [key]: String(sys),
+                              });
+                            },
+                            "system",
+                          ),
+                          ...presets.map((v) =>
+                            chip(
+                              `${v} ${unit === "minutes" ? "min" : v === 1 ? "hour" : "hours"}`,
+                              session[own] && !custom && current === v,
+                              () => {
+                                setCustomKeys({ ...customKeys, [key]: false });
+                                setSession({
+                                  ...session,
+                                  [own]: true,
+                                  [key]: String(v),
+                                });
+                              },
+                              String(v),
+                            ),
+                          ),
+                          chip(
+                            "Custom…",
+                            session[own] && custom,
+                            () => {
+                              setCustomKeys({ ...customKeys, [key]: true });
+                              setSession({ ...session, [own]: true });
+                            },
+                            "custom",
+                          ),
+                        ];
+                      })()}
+                    </div>
+                    {session[own] && customKeys[key] && (
                       <TextField
                         id={`s-${key}-value`}
                         label={`${label} (${unit})`}
@@ -474,9 +542,14 @@ function UserDetail() {
                         onChange={(e) =>
                           setSession({ ...session, [key]: e.target.value })
                         }
-                        hint={`${lim.min}–${lim.max} ${unit}, the validated limits.`}
+                        hint={`Any whole number from ${lim.min} to ${lim.max} ${unit} (the validated limits).`}
                       />
                     )}
+                    <p className="text-xs text-muted">
+                      {session[own]
+                        ? `This account only: ${session[key] || "?"} ${unit}. It stays at this value if the system setting changes later.`
+                        : `Follows the system setting (Security), now ${sys} ${unit}.`}
+                    </p>
                   </fieldset>
                 ))}
                 <div className="flex justify-end gap-3 md:col-span-2">
@@ -484,6 +557,7 @@ function UserDetail() {
                     variant="secondary"
                     onClick={() => {
                       setEditing(null);
+                      setCustomKeys(customFor(user));
                       setSession({
                         idleOwn: user.sessionIdleMinutes !== null,
                         idle: String(
