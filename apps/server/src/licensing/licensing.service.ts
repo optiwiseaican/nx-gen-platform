@@ -108,6 +108,9 @@ export class LicensingService implements OnApplicationBootstrap {
   private licenseText: string | null = null;
   private fingerprintMatch: FingerprintMatch | null = null;
   private lastErrorCode: LicenseErrorCode | null = null;
+  private readonly changeListeners = new Set<() => void>();
+  /** False until the stored licence has been checked once at start-up. */
+  private checked = false;
   private warnings: LicenseErrorCode[] = [];
   private activating = false;
 
@@ -252,6 +255,23 @@ export class LicensingService implements OnApplicationBootstrap {
     this.lastErrorCode = errorCode;
     this.licenseText = active?.text ?? null;
     this.fingerprintMatch = active?.fingerprint ?? null;
+    this.checked = true;
+    for (const listener of this.changeListeners) listener();
+  }
+
+  /** Whether the stored licence has been checked yet (it is checked at application bootstrap). */
+  hasChecked(): boolean {
+    return this.checked;
+  }
+
+  /**
+   * Called whenever the licence in force is (re)validated, activated or lost,
+   * so module entitlements can be re-checked. The licence is validated at
+   * application bootstrap, after modules were first loaded.
+   */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
   }
 
   // ---------------------------------------------------------------------------

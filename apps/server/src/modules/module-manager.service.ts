@@ -168,6 +168,9 @@ export class ModuleManagerService implements OnModuleInit {
 
   async onModuleInit() {
     if (!this.db.enabled) return;
+    // The licence is validated later in start-up (and can be activated or lost
+    // while running): re-check entitlements whenever it changes.
+    this.licensing.onChange?.(() => void this.reconcileLicence());
     for (const row of await this.rows()) {
       if (row.module_status !== 'ENABLED') {
         this.runtime.set(row.module_id, { state: 'DISABLED', message: null });
@@ -176,6 +179,31 @@ export class ModuleManagerService implements OnModuleInit {
       await this.load(row);
     }
   }
+
+  /** Load modules the licence now includes; take out those it no longer does. */
+  private reconcileLicence = (() => {
+    let running: Promise<void> = Promise.resolve();
+    return () =>
+      (running = running
+        .then(async () => {
+          for (const row of await this.rows()) {
+            if (row.module_status !== 'ENABLED') continue;
+            const state = this.runtime.get(row.module_id)?.state;
+            const entitled = this.licensing.hasModule(row.manifest.entitlement);
+            if (entitled && state === 'LICENSE_MISSING') {
+              this.logger.log(
+                `Licence now includes ${row.module_id}; loading it.`,
+              );
+              await this.load(row);
+            } else if (!entitled && state === 'RUNNING') {
+              await this.load(row); // fails as LICENSE_MISSING and unloads it
+            }
+          }
+        })
+        .catch((e: unknown) =>
+          this.logger.error(`Licence re-check failed: ${String(e)}`),
+        ));
+  })();
 
   private async rows(): Promise<InstalledRow[]> {
     return this.db.query<InstalledRow>(
@@ -248,6 +276,17 @@ export class ModuleManagerService implements OnModuleInit {
 
     const incompatible = this.compatibility(row.manifest);
     if (incompatible) return fail('INCOMPATIBLE', incompatible);
+    if (
+      !this.licensing.hasModule(row.manifest.entitlement) &&
+      this.licensing.hasChecked?.() === false
+    ) {
+      // Start-up: the licence is checked after modules; loaded when it is (see reconcileLicence).
+      this.runtime.set(id, {
+        state: 'LICENSE_MISSING',
+        message: 'Waiting for the licence check.',
+      });
+      return false;
+    }
     if (!this.licensing.hasModule(row.manifest.entitlement))
       return fail(
         'LICENSE_MISSING',
