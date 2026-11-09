@@ -115,9 +115,9 @@ footer { color: var(--muted); font-size: 12.5px; }
 
 <header class="band">
   <div class="wrap">
-    <div class="doc-meta"><span>NXGEN COMPLIANCE PLATFORM</span><span>GAP ANALYSIS · REV B</span><span>7 NOV 2026</span><span>21 CFR PART 11 · EU ANNEX 11 · GAMP 5</span></div>
+    <div class="doc-meta"><span>NXGEN COMPLIANCE PLATFORM</span><span>GAP ANALYSIS · REV C</span><span>9 NOV 2026</span><span>21 CFR PART 11 · EU ANNEX 11 · GAMP 5</span></div>
     <h1>What the lab apps already enforce, and what NxGen still has to own</h1>
-    <p class="lede">LabApp-WebSocket-M (pH / EC meters) and TLC-Tablet-App (NxGen TLC Scan 10) each built their own compliance layer on the tablet. The master specification moves that layer into the NxGen platform. This page lists every compliance capability in the two apps and shows where NxGen stands on each.</p>
+    <p class="lede">LabApp-WebSocket-M (pH / EC meters) and TLC-Tablet-App (NxGen TLC Scan 10) each built their own compliance layer on the tablet. The master specification moves that layer into the NxGen platform. This page lists every compliance capability in the two apps and shows where NxGen stands on each. Rev C adds a pH section comparing the NxGen pH module with NxGen Sense (LabApp-WebSocket-M) feature by feature.</p>
   </div>
 </header>
 
@@ -126,15 +126,29 @@ footer { color: var(--muted); font-size: 12.5px; }
 
   <section aria-labelledby="s-summary">
     <span class="eyebrow">Summary</span>
-    <h2 id="s-summary">Where NxGen stands across 32 compliance areas</h2>
+    <h2 id="s-summary">Where NxGen stands across 40 compliance areas</h2>
     <div class="summary">
-      <div class="stat done"><b>8</b><span>Closed since Rev A</span></div>
+      <div class="stat done"><b>9</b><span>Closed since Rev A</span></div>
       <div class="stat ahead"><b>6</b><span>NxGen ahead of both apps</span></div>
-      <div class="stat part"><b>5</b><span>Partly done in NxGen</span></div>
-      <div class="stat gap"><b>7</b><span>In an app, still missing in NxGen</span></div>
+      <div class="stat part"><b>8</b><span>Partly done in NxGen</span></div>
+      <div class="stat gap"><b>11</b><span>In an app, still missing in NxGen</span></div>
       <div class="stat none"><b>6</b><span>Missing everywhere</span></div>
     </div>
-    <p class="muted">Sources: source code and docs of both app repositories (working trees as of 7 Nov 2026, including uncommitted changes), the NxGen repository at commit <code>28e1cfb</code>, and the master specification v1.0.</p>
+    <p class="muted">Sources: source code and docs of both app repositories (working trees as of 7 Nov 2026, including uncommitted changes), the NxGen repository at commit <code>3a2e1a3</code>, and the master specification v1.0.</p>
+  </section>
+
+  <section aria-labelledby="s-revc">
+    <span class="eyebrow">Rev C · 9 Nov 2026</span>
+    <h2 id="s-revc">What changed since Rev B</h2>
+    <div class="findings revb">
+      <ul>
+        <li><strong>Module system</strong> (commit <code>2b93100</code>): instrument modules installed as vendor-signed <code>.nxmod</code> packages, verified on every start, with their own audited tables, permissions and workflows.</li>
+        <li><strong>pH module, first version</strong> (commit <code>2b93100</code>): live readings from pH portables through the USB dongle; every packet stored once with SHA-256; calibration taken from the meter and graded against the LabApp limits.</li>
+        <li><strong>TLC module, first version</strong> (commit <code>50a90aa</code>): plate analyses on approved methods and usable instruments; plate images written once with SHA-256; Rf windows and system suitability; Prepared → Reviewed → Approved with signatures covering the image hashes.</li>
+        <li><strong>Per-user session timing</strong> (commits <code>8aefaca</code>, <code>3a2e1a3</code>): administrators can give one account its own inactivity sign-out and maximum session, within the validated limits, with reason and signature.</li>
+        <li><strong>New pH section</strong>: eight pH capabilities of NxGen Sense compared with the NxGen pH module. Saved pH measurements are the largest remaining gap.</li>
+      </ul>
+    </div>
   </section>
 
   <section aria-labelledby="s-revb">
@@ -162,8 +176,8 @@ footer { color: var(--muted); font-size: 12.5px; }
       <span><span class="pill na">N/A</span> not applicable</span>
     </div>
     <div class="filters" role="group" aria-label="Filter rows by NxGen status">
-      <button type="button" id="f-all" data-f="all" aria-pressed="true">All 32</button>
-      <button type="button" id="f-done" data-f="done" aria-pressed="false">Closed in Rev B</button>
+      <button type="button" id="f-all" data-f="all" aria-pressed="true">All 40</button>
+      <button type="button" id="f-done" data-f="done" aria-pressed="false">Closed</button>
       <button type="button" id="f-gap" data-f="gap" aria-pressed="false">Gaps in NxGen</button>
       <button type="button" id="f-none" data-f="none" aria-pressed="false">Missing everywhere</button>
       <button type="button" id="f-ahead" data-f="ahead" aria-pressed="false">NxGen ahead</button>
@@ -175,13 +189,13 @@ footer { color: var(--muted); font-size: 12.5px; }
           <tr class="layer"><td colspan="5">Compliance core</td></tr>
           <tr data-k="part"><td class="area">Users, roles, permissions</td><td><span class="pill yes">YES</span><span class="note">7 roles + custom, ~110 permissions, global / department / owner scopes</span></td><td><span class="pill yes">YES</span><span class="note">7 fixed roles, 15 permissions, employee ID, department</span></td><td><span class="pill part">PARTIAL</span><span class="note">7 roles + custom roles, 7 permissions, no scopes</span></td><td>Permission scopes; department, employee ID, designation on users</td></tr>
           <tr data-k="ahead"><td class="area">Password storage</td><td><span class="pill no">WEAK</span><span class="note">Unsalted SHA-256, plaintext fallback for legacy values</span></td><td><span class="pill no">WEAK</span><span class="note">Unsalted SHA-256</span></td><td><span class="pill ahead">AHEAD</span><span class="note">Salted scrypt</span></td><td>Nothing; apps should adopt NxGen auth</td></tr>
-          <tr data-k="ahead"><td class="area">Inactivity sign-out</td><td><span class="pill no">NO</span><span class="note">Fixed 8 h session only</span></td><td><span class="pill no">NO</span><span class="note">Fixed 8 h session only</span></td><td><span class="pill ahead">AHEAD</span><span class="note">15 min idle, 12 h maximum</span></td><td>Nothing</td></tr>
+          <tr data-k="ahead"><td class="area">Inactivity sign-out</td><td><span class="pill no">NO</span><span class="note">Fixed 8 h session only</span></td><td><span class="pill no">NO</span><span class="note">Fixed 8 h session only</span></td><td><span class="pill ahead">AHEAD</span><span class="note">15 min idle, 12 h maximum; per-account timing set by administrators with signature</span></td><td>Nothing</td></tr>
           <tr data-k="done"><td class="area">Session-expiry warning and extend</td><td><span class="pill yes">YES</span><span class="note">Countdown overlay, audited</span></td><td><span class="pill yes">YES</span><span class="note">Warning at 5 min, autosave on timeout</span></td><td><span class="pill done">DONE</span><span class="note">Countdown 2 min before inactivity sign-out; audited “Stay signed in”; notice before the maximum session ends</span></td><td class="action">Done · commit 253cdc1</td></tr>
           <tr data-k="done"><td class="area">Editable security policy</td><td><span class="pill yes">YES</span></td><td><span class="pill yes">YES</span><span class="note">Old / new diff in audit</span></td><td><span class="pill done">DONE</span><span class="note">Signed changes with reason; limits enforced by the database</span></td><td class="action">Done · commit 253cdc1</td></tr>
           <tr data-k="done"><td class="area">Administrator recovery</td><td><span class="pill part">WEAK</span><span class="note">Challenge / response, HMAC secret in APK</span></td><td><span class="pill part">WEAK</span><span class="note">Same design, secret in APK</span></td><td><span class="pill done">DONE</span><span class="note">Response signed with the vendor Ed25519 key; single use, expiring, 3 attempts; no secret in the software</span></td><td class="action">Done · commit 253cdc1</td></tr>
           <tr data-k="ahead"><td class="area">Audit trail storage and tamper evidence</td><td><span class="pill part">PARTIAL</span><span class="note">SQLite hash chain; chain check never called</span></td><td><span class="pill part">PARTIAL</span><span class="note">SQLite hash chain, unencrypted DB</span></td><td><span class="pill ahead">AHEAD</span><span class="note">PostgreSQL triggers block edits; chain verified on screen</span></td><td>Nothing</td></tr>
           <tr data-k="done"><td class="area">Audit trail export</td><td><span class="pill yes">YES</span><span class="note">PDF / XLSX with fingerprint manifest</span></td><td><span class="pill yes">YES</span><span class="note">CSV with hash columns, export audited</span></td><td><span class="pill done">DONE</span><span class="note">Filters; CSV with hash columns; SHA-256 shown; export itself audited</span></td><td class="action">Done · commit 253cdc1</td></tr>
-          <tr data-k="part"><td class="area">Electronic signatures</td><td><span class="pill yes">YES</span><span class="note">Reports, calibration, file approval</span></td><td><span class="pill yes">YES</span><span class="note">Analyses, methods, files; own hash chain</span></td><td><span class="pill part">PARTIAL</span><span class="note">User, role and security changes; method and calibration approvals</span></td><td class="action">Result approval and report release, with those modules (spec §7)</td></tr>
+          <tr data-k="part"><td class="area">Electronic signatures</td><td><span class="pill yes">YES</span><span class="note">Reports, calibration, file approval</span></td><td><span class="pill yes">YES</span><span class="note">Analyses, methods, files; own hash chain</span></td><td><span class="pill part">PARTIAL</span><span class="note">User, role and security changes; method, calibration and TLC analysis approvals</span></td><td class="action">pH result approval and report release (spec §7)</td></tr>
           <tr data-k="done"><td class="area">Review and approval workflow</td><td><span class="pill yes">YES</span><span class="note">Prepared, Reviewed, Approved, Rejected with return stage</span></td><td><span class="pill yes">YES</span><span class="note">Lock on submit, invalidate, new version</span></td><td><span class="pill done">DONE</span><span class="note">Generic engine: prepare, review, approve, reject to a chosen stage, withdraw, invalidate, versions; database lock</span></td><td class="action">Done · commit 0dcd3b8</td></tr>
           <tr data-k="part"><td class="area">Segregation of duties</td><td><span class="pill yes">YES</span><span class="note">Blocked permission pairs; second approval on role changes</span></td><td><span class="pill part">PARTIAL</span><span class="note">Separate reviewer, off by default</span></td><td><span class="pill part">PARTIAL</span><span class="note">Independent reviewer and approver enforced; separate roles by default; no self role or status changes</span></td><td class="action">Blocked permission pairs, maker-checker role changes</td></tr>
           <tr data-k="ahead"><td class="area">Reason for change</td><td><span class="pill yes">YES</span><span class="note">Enforced in the service layer</span></td><td><span class="pill part">PARTIAL</span><span class="note">Not on analysis or method edits</span></td><td><span class="pill ahead">AHEAD</span><span class="note">Every change, enforced in the database transaction</span></td><td>Carry the same rule into new modules</td></tr>
@@ -191,16 +205,26 @@ footer { color: var(--muted); font-size: 12.5px; }
           <tr class="layer"><td colspan="5">Device layer</td></tr>
           <tr data-k="done"><td class="area">Device register</td><td><span class="pill yes">YES</span><span class="note">Serial, model, lifecycle, probe and machine master</span></td><td><span class="pill part">PARTIAL</span><span class="note">Instrument and service register, uncommitted</span></td><td><span class="pill done">DONE</span><span class="note">Lifecycle Active / Out of service / Retired; unique serial and asset tag; signed status changes</span></td><td class="action">Done · commit 28e1cfb</td></tr>
           <tr data-k="done"><td class="area">Calibration management</td><td><span class="pill yes">YES</span><span class="note">Due dates, overdue lockout, slope 95–105 %, signed approval</span></td><td><span class="pill na">N/A</span><span class="note">Quantitation curves only</span></td><td><span class="pill done">DONE</span><span class="note">pH slope and offset against limits, due dates, overdue or failed blocks use, signed approval</span></td><td class="action">Done · commit 28e1cfb · conductivity and TLC use a checklist for now</td></tr>
-          <tr data-k="gap"><td class="area">Diagnostics and readiness</td><td><span class="pill part">REGRESSED</span><span class="note">Module deleted Aug 2026; System Health remains</span></td><td><span class="pill yes">YES</span><span class="note">32 checks, analysis blocked on fail</span></td><td><span class="pill no">NO</span></td><td>Readiness checks that gate measurements</td></tr>
+          <tr data-k="part"><td class="area">Diagnostics and readiness</td><td><span class="pill part">REGRESSED</span><span class="note">Module deleted Aug 2026; System Health remains</span></td><td><span class="pill yes">YES</span><span class="note">32 checks, analysis blocked on fail</span></td><td><span class="pill part">PARTIAL</span><span class="note">Instrument status, calibration and module availability block TLC analyses; no diagnostic run</span></td><td class="action">Diagnostic checks (battery, probe, sensors) that gate measurements</td></tr>
           <tr data-k="none"><td class="area">Secure device communication</td><td><span class="pill no">NO</span><span class="note">Plain ws://, no device authentication</span></td><td><span class="pill no">NO</span><span class="note">Plain ws:// and unauthenticated BLE</span></td><td><span class="pill no">NO</span></td><td>Device identity, TLS, signed and sequenced messages</td></tr>
 
           <tr class="layer"><td colspan="5">Business layer</td></tr>
-          <tr data-k="gap"><td class="area">Measurement and analysis records</td><td><span class="pill yes">YES</span><span class="note">Immutable when final; revisions linked; status history</span></td><td><span class="pill part">PARTIAL</span><span class="note">Raw images hashed; unsigned analyses hard-deleted</span></td><td><span class="pill no">NO</span></td><td>Immutable result records with lineage</td></tr>
-          <tr data-k="done"><td class="area">Method management</td><td><span class="pill na">N/A</span></td><td><span class="pill part">PARTIAL</span><span class="note">Versioned, approved; no Rf windows or SST rules</span></td><td><span class="pill done">DONE</span><span class="note">Versioned, reviewed and approved with signatures; locked once submitted</span></td><td class="action">Done · commit 0dcd3b8 · Rf windows and SST rules with the TLC module</td></tr>
+          <tr data-k="part"><td class="area">Measurement and analysis records</td><td><span class="pill yes">YES</span><span class="note">Immutable when final; revisions linked; status history</span></td><td><span class="pill part">PARTIAL</span><span class="note">Raw images hashed; unsigned analyses hard-deleted</span></td><td><span class="pill part">PARTIAL</span><span class="note">TLC analyses: images written once with SHA-256, locked on submit, signed approval, never deleted. pH results not saved yet</span></td><td class="action">pH measurement records (see pH section)</td></tr>
+          <tr data-k="done"><td class="area">Method management</td><td><span class="pill na">N/A</span></td><td><span class="pill part">PARTIAL</span><span class="note">Versioned, approved; no Rf windows or SST rules</span></td><td><span class="pill done">DONE</span><span class="note">Versioned, reviewed and approved with signatures; locked once submitted</span></td><td class="action">Done · commit 0dcd3b8 · Rf windows and system suitability added with the TLC module (commit 50a90aa)</td></tr>
           <tr data-k="gap"><td class="area">Sample, batch, AR master data</td><td><span class="pill yes">YES</span></td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td>Shared master data for all instruments</td></tr>
           <tr data-k="gap"><td class="area">Reports</td><td><span class="pill yes">YES</span><span class="note">Report ID, page N of M, watermarks</span></td><td><span class="pill yes">YES</span><span class="note">Signature manifest, raw image hashes</span></td><td><span class="pill no">NO</span></td><td>Report engine with signature manifest</td></tr>
           <tr data-k="gap"><td class="area">Document control (file manager)</td><td><span class="pill yes">YES</span><span class="note">Checksums, versions, legal hold, controlled print</span></td><td><span class="pill yes">YES</span><span class="note">Checksums, soft delete, approved files protected</span></td><td><span class="pill no">NO</span></td><td>Controlled document store</td></tr>
           <tr data-k="gap"><td class="area">Backup and restore</td><td><span class="pill part">PARTIAL</span><span class="note">SHA-256 manifests, scheduled; not encrypted</span></td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td class="action">Deferred at your request (7 Nov 2026)</td></tr>
+
+          <tr class="layer"><td colspan="5">pH module compared with NxGen Sense (LabApp-WebSocket-M)</td></tr>
+          <tr data-k="done"><td class="area">Live pH readings from the meter</td><td><span class="pill yes">YES</span><span class="note">WebSocket JSON packets</span></td><td><span class="pill na">N/A</span></td><td><span class="pill done">DONE</span><span class="note">Same JSON over the USB dongle; every packet stored once with SHA-256; simulated data labelled</span></td><td class="action">Done · commit 2b93100</td></tr>
+          <tr data-k="gap"><td class="area">Saved pH measurements with sample and batch</td><td><span class="pill yes">YES</span><span class="note">MeasurementRecordService: sample, batch, AR number; immutable when final</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span><span class="note">Readings are shown live only</span></td><td class="action">pH measurement records on the workflow engine: sample, batch, AR number, signed approval</td></tr>
+          <tr data-k="gap"><td class="area">Stable-reading detection</td><td><span class="pill yes">YES</span><span class="note">PhReadingStabilityTracker accepts a reading only when stable</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span></td><td class="action">Stability criterion before a reading can be recorded</td></tr>
+          <tr data-k="part"><td class="area">Calibration acceptance profiles</td><td><span class="pill yes">YES</span><span class="note">Editable profiles: limits per buffer, buffer ranges, overall status policy</span></td><td><span class="pill na">N/A</span></td><td><span class="pill part">PARTIAL</span><span class="note">Fixed slope and offset limits; buffer sets</span></td><td class="action">Versioned, approved acceptance profiles</td></tr>
+          <tr data-k="gap"><td class="area">Pre-calibration checks</td><td><span class="pill yes">YES</span><span class="note">Battery, storage, device ID, probe ID, temperature sensor, connection; PDF</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span></td><td class="action">Checks recorded with the calibration; failed checks block it</td></tr>
+          <tr data-k="gap"><td class="area">Probe register and probe health</td><td><span class="pill yes">YES</span><span class="note">Probe master, probe health history</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span></td><td class="action">Probes linked to instruments and calibrations</td></tr>
+          <tr data-k="gap"><td class="area">Buffer lot and expiry</td><td><span class="pill yes">YES</span><span class="note">Buffer lot recorded with calibration</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span><span class="note">Buffer sets have no lot or expiry</span></td><td class="action">Lot and expiry on buffers; expired buffers refused</td></tr>
+          <tr data-k="gap"><td class="area">Alarms, logs and trends per meter</td><td><span class="pill yes">YES</span><span class="note">pH alert rules, alarm, log and trend screens</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span></td><td class="action">pH alarms in the central register; logs and trends</td></tr>
 
           <tr class="layer"><td colspan="5">Platform and validation</td></tr>
           <tr data-k="ahead"><td class="area">Licensing and platform binding</td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td><span class="pill ahead">AHEAD</span><span class="note">Ed25519 licences, offline activation</span></td><td>Nothing</td></tr>
@@ -244,11 +268,11 @@ footer { color: var(--muted); font-size: 12.5px; }
         <span class="ref">Spec §4, §7 · TLC analyses and methods, LabApp reports and calibration</span>
       </article>
       <article class="gap-card">
-        <header><h3>C. Device layer</h3><span class="pill part">2 OF 4 DONE</span></header>
+        <header><h3>C. Device layer</h3><span class="pill part">2 OF 4 DONE · 1 PARTIAL</span></header>
         <ul>
           <li><span class="pill done">DONE</span> Device register: serial, model, Active / Blocked / Retired, probes, maintenance log</li>
           <li><span class="pill done">DONE</span> Calibration: due dates, overdue lockout, versioned acceptance limits, signed approval</li>
-          <li>Diagnostics and readiness checks that gate measurements</li>
+          <li><span class="pill part">PARTIAL</span> Readiness gates TLC analyses; diagnostic checks still to come</li>
           <li>Secure communication: device identity, TLS, signed and sequenced messages</li>
         </ul>
         <span class="ref">Spec §9 · Technical Architecture (MQTT / WebSocket)</span>
@@ -256,14 +280,29 @@ footer { color: var(--muted); font-size: 12.5px; }
       <article class="gap-card">
         <header><h3>D. Business layer</h3><span class="pill part">STARTED</span></header>
         <ul>
-          <li>Immutable measurement records; corrections as linked revisions</li>
-          <li>Raw TLC images written once with SHA-256</li>
+          <li><span class="pill done">DONE</span> TLC plate analyses: locked on submit, signed approval</li>
+          <li><span class="pill done">DONE</span> Raw TLC images written once with SHA-256</li>
+          <li>pH measurement records; corrections as linked revisions</li>
           <li><span class="pill done">DONE</span> Versioned, approved methods</li>
           <li>Sample, batch and AR master data</li>
           <li>Reports with signature manifest and watermarks</li>
           <li>Controlled document store; encrypted backup and restore</li>
         </ul>
         <span class="ref">Spec §4, §19</span>
+      </article>
+      <article class="gap-card">
+        <header><h3>F. pH module vs NxGen Sense</h3><span class="pill part">1 OF 8 DONE</span></header>
+        <ol>
+          <li><span class="pill done">DONE</span> Live readings over the USB dongle, packets stored with SHA-256</li>
+          <li>Saved measurements with sample, batch and AR number, signed approval</li>
+          <li>Stable-reading detection before a reading is recorded</li>
+          <li><span class="pill part">PARTIAL</span> Editable, approved calibration acceptance profiles</li>
+          <li>Pre-calibration checks: battery, probe, temperature sensor, connection</li>
+          <li>Probe register and probe health</li>
+          <li>Buffer lot and expiry</li>
+          <li>pH alarms, logs and trends</li>
+        </ol>
+        <span class="ref">LabApp-WebSocket-M packages ph2, measurement, probe, ph/calibration</span>
       </article>
       <article class="gap-card">
         <header><h3>E. Missing in both apps</h3><span class="pill no">NEW WORK</span></header>
@@ -280,14 +319,15 @@ footer { color: var(--muted); font-size: 12.5px; }
       <article class="gap-card">
         <header><h3>Already ahead in NxGen</h3><span class="pill ahead">DONE</span></header>
         <ul>
-          <li>Salted scrypt passwords; 15-minute inactivity sign-out</li>
+          <li>Salted scrypt passwords; 15-minute inactivity sign-out; per-account session timing</li>
+          <li>Signed, verified module packages for each instrument</li>
           <li>Database-enforced append-only audit trail with on-screen chain check</li>
           <li>Reason enforced on every change, inside the database transaction</li>
           <li>Configurable signature policy, itself signature-protected</li>
           <li>Compliance cannot be switched off</li>
           <li>Licensing and platform binding</li>
         </ul>
-        <span class="ref">Commits 76fc77d to 0d5946d</span>
+        <span class="ref">Commits 76fc77d to 3a2e1a3</span>
       </article>
     </div>
   </section>
@@ -316,11 +356,13 @@ footer { color: var(--muted); font-size: 12.5px; }
       <div class="step"><div><h3>Workflow engine <span class="pill done">DONE</span></h3><p class="muted">Review, approval, locking and versioning; first used for methods.</p></div></div>
       <div class="step"><div><h3>Backup and restore <span class="pill na">DEFERRED</span></h3><p class="muted">Encrypted, verified and audited. Postponed at your request; needed before production lab data.</p></div></div>
       <div class="step"><div><h3>Device layer with secure communication <span class="pill part">HALF DONE</span></h3><p class="muted">Instrument register and calibration done. Next: authenticated, encrypted device links (protocol decision pending).</p></div></div>
-      <div class="step"><div><h3>Measurements and TLC analyses</h3><p class="muted">Bring pH / EC results and TLC plate analyses onto the platform, refusing blocked instruments.</p></div></div>
+      <div class="step"><div><h3>TLC plate analyses <span class="pill done">DONE</span></h3><p class="muted">TLC module v1: images, Rf evaluation, signed approval.</p></div></div>
+      <div class="step"><div><h3>pH measurement records <span class="pill part">NEXT</span></h3><p class="muted">Saved pH results with sample, batch and AR number, stable-reading detection, signed approval; then acceptance profiles, pre-calibration checks, probes and buffer lots.</p></div></div>
+      <div class="step"><div><h3>Reports and alarms</h3><p class="muted">Report engine with signature manifest; central alarm register fed by the pH alert rules.</p></div></div>
     </div>
   </section>
 
-  <footer>Rev B updated 7 Nov 2026 from the NxGen repository. Prepared from a read-only review of both app repositories and the NxGen repository. App findings reflect working trees on 7 Nov 2026 and should be re-checked after their pending changes are committed.</footer>
+  <footer>Rev C updated 9 Nov 2026 from the NxGen repository (Rev B 7 Nov 2026). Prepared from a read-only review of both app repositories and the NxGen repository. App findings reflect working trees on 7 Nov 2026 and should be re-checked after their pending changes are committed.</footer>
 </div>
 </main>
 
