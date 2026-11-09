@@ -397,9 +397,11 @@ export class IdentityService {
           'UPDATE user_security_state SET failed_login_count = 0, locked_until = NULL, last_login_at = now() WHERE user_id = $1',
           [user.id],
         );
+        // The account's own maximum session length, or the system's.
         const { rows } = await c.query<{ id: string }>(
           `INSERT INTO sessions (user_id, token_hash, expires_at, ip_address, machine_name, user_agent)
-         VALUES ($1, $2, now() + make_interval(hours => $3), $4, $5, $6) RETURNING id`,
+         VALUES ($1, $2, now() + make_interval(hours => COALESCE((SELECT session_max_hours FROM users WHERE id = $1), $3)), $4, $5, $6)
+         RETURNING id`,
           [
             user.id,
             hashToken(token),
@@ -445,17 +447,23 @@ export class IdentityService {
   ): Promise<Principal | null> {
     if (!this.db.enabled || !token) return null;
     const [s] = await this.db.query<
-      SessionRow & { status: string; is_deleted: boolean; full_name: string }
+      SessionRow & {
+        status: string;
+        is_deleted: boolean;
+        full_name: string;
+        session_idle_minutes: number | null;
+      }
     >(
       `SELECT s.id AS session_id, s.user_id, s.last_seen_at, s.expires_at, now() AS now,
-              u.status, u.is_deleted, u.full_name
+              u.status, u.is_deleted, u.full_name, u.session_idle_minutes
          FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token_hash = $1 AND s.ended_at IS NULL`,
       [hashToken(token)],
     );
     if (!s) return null;
 
-    const idleMs = this.policy.sessionIdleMinutes * 60_000;
+    const idleMs =
+      (s.session_idle_minutes ?? this.policy.sessionIdleMinutes) * 60_000;
     const endReason =
       s.status !== 'ACTIVE' || s.is_deleted
         ? 'ACCOUNT_DISABLED'
@@ -502,8 +510,9 @@ export class IdentityService {
       password_changed_at: Date | null;
       roles: string[] | null;
       permissions: string[] | null;
+      session_idle_minutes: number | null;
     }>(
-      `SELECT u.username, u.full_name, u.must_change_password, u.password_changed_at,
+      `SELECT u.username, u.full_name, u.must_change_password, u.password_changed_at, u.session_idle_minutes,
               (SELECT array_agg(ur.role_code ORDER BY ur.role_code) FROM user_roles ur
                 WHERE ur.user_id = u.id AND NOT ur.is_deleted) AS roles,
               (SELECT array_agg(DISTINCT rp.permission_code) FROM user_roles ur
@@ -516,6 +525,8 @@ export class IdentityService {
       'SELECT last_seen_at, expires_at FROM sessions WHERE id = $1',
       [sessionId],
     );
+    const idleMinutes =
+      u.session_idle_minutes ?? this.policy.sessionIdleMinutes;
     const expiresAt = u.password_changed_at
       ? new Date(
           u.password_changed_at.getTime() +
@@ -538,14 +549,14 @@ export class IdentityService {
         ? {
             idleExpiresAt: new Date(
               Math.min(
-                s.last_seen_at.getTime() +
-                  this.policy.sessionIdleMinutes * 60_000,
+                s.last_seen_at.getTime() + idleMinutes * 60_000,
                 s.expires_at.getTime(),
               ),
             ).toISOString(),
             expiresAt: s.expires_at.toISOString(),
           }
         : undefined,
+      sessionIdleMinutes: idleMinutes,
     };
   }
 

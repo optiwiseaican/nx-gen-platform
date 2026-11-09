@@ -69,13 +69,18 @@ export class AuthController {
     @Inject(NXGEN_CONFIG) private readonly config: NxGenConfig,
   ) {}
 
-  private setCookie(res: Response, token: string) {
+  private setCookie(res: Response, token: string, principal: Principal) {
+    // The cookie lives as long as this session may (the account's own
+    // maximum session length or the system's); the server enforces it anyway.
+    const until = principal.session
+      ? Date.parse(principal.session.expiresAt) - Date.now()
+      : this.config.security.sessionMaxHours * 3_600_000;
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: 'strict',
       secure: this.config.production,
       path: '/',
-      maxAge: this.config.security.sessionMaxHours * 3_600_000,
+      maxAge: Math.max(until, 60_000),
     });
   }
 
@@ -92,7 +97,7 @@ export class AuthController {
       str(body?.password, 'password', 256),
       originOf(req),
     );
-    this.setCookie(res, token);
+    this.setCookie(res, token, principal);
     return principal;
   }
 
@@ -114,7 +119,8 @@ export class AuthController {
   me(@CurrentPrincipal() principal: Principal) {
     return {
       ...principal,
-      sessionIdleMinutes: this.config.security.sessionIdleMinutes,
+      sessionIdleMinutes:
+        principal.sessionIdleMinutes ?? this.config.security.sessionIdleMinutes,
     };
   }
 

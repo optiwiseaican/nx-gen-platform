@@ -554,6 +554,96 @@ describeDb('User & Role Management on PostgreSQL', () => {
     expect(trail.map((e) => e.action)).toContain('ROLE_CREATED');
   });
 
+  it('per-user session timing: administrators only, within limits, enforced on open sessions', async () => {
+    const { user } = await createAndSignIn(
+      superAdmin,
+      'shop.floor',
+      'Shop Floor Terminal',
+      ['OPERATOR'],
+    );
+    const { token } = await identity.login('shop.floor', USER_PW, ORIGIN);
+    const timing = (idleMinutes: unknown, maxHours: unknown, by = superAdmin) =>
+      admin.setSessionTiming(
+        by,
+        user.id,
+        { idleMinutes, maxHours, reason: REASON },
+        ORIGIN,
+      );
+
+    // Never on one's own account; never outside the validated limits.
+    await expect(
+      admin.setSessionTiming(
+        superAdmin,
+        superAdmin.userId,
+        { idleMinutes: 30, maxHours: null, reason: REASON },
+        ORIGIN,
+      ),
+    ).rejects.toThrow(/your own/);
+    await expect(timing(4, null)).rejects.toThrow(/5 to 60/);
+    await expect(timing(null, 25)).rejects.toThrow(/1 to 24/);
+    await expect(timing(7.5, null)).rejects.toThrow(/whole number/);
+    await expect(
+      db.transaction({ actorId: 'TEST', reason: 'limit check' }, (c) =>
+        c.query('UPDATE users SET session_idle_minutes = 61 WHERE id = $1', [
+          user.id,
+        ]),
+      ),
+    ).rejects.toThrow(/check constraint/);
+
+    const updated = await timing(5, 2);
+    expect(updated).toMatchObject({
+      sessionIdleMinutes: 5,
+      sessionMaxHours: 2,
+    });
+
+    // The open session now ends after 5 idle minutes and within 2 hours.
+    const p = (await identity.authenticate(token, ORIGIN))!;
+    expect(p.sessionIdleMinutes).toBe(5);
+    expect(Date.parse(p.session!.expiresAt) - Date.now()).toBeLessThanOrEqual(
+      2 * 3_600_000,
+    );
+    await db.query(
+      "UPDATE sessions SET last_seen_at = now() - interval '6 minutes' WHERE id = $1",
+      [p.sessionId],
+    );
+    expect(await identity.authenticate(token, ORIGIN)).toBeNull();
+
+    // New sessions get the account's maximum.
+    const { principal: fresh } = await identity.login(
+      'shop.floor',
+      USER_PW,
+      ORIGIN,
+    );
+    const left = Date.parse(fresh.session!.expiresAt) - Date.now();
+    expect(left).toBeGreaterThan(1.9 * 3_600_000);
+    expect(left).toBeLessThanOrEqual(2 * 3_600_000);
+
+    await expect(timing(5, 2)).rejects.toThrow('Nothing changed.');
+    const back = await timing(null, null);
+    expect(back).toMatchObject({
+      sessionIdleMinutes: null,
+      sessionMaxHours: null,
+    });
+    expect(
+      (await identity.loadPrincipal(user.id, fresh.sessionId))
+        .sessionIdleMinutes,
+    ).toBe(DEFAULT_SECURITY_POLICY.sessionIdleMinutes);
+
+    const events = (await admin.userHistory(user.id)).filter(
+      (e) => e.action === 'USER_SESSION_TIMING_CHANGED',
+    );
+    expect(events.map((e) => e.details)).toEqual(
+      expect.arrayContaining([
+        {
+          idleFrom: 'system setting',
+          idleTo: '5 min',
+          maxFrom: 'system setting',
+          maxTo: '2 h',
+        },
+      ]),
+    );
+  });
+
   it('leaves the audit chain intact', async () => {
     expect(await audit.verifyChain()).toEqual({ valid: true });
   });

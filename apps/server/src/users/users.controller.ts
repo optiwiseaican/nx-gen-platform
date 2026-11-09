@@ -28,6 +28,12 @@ export class UsersController {
   }
 
   @RequirePermission('users.view')
+  @Get('session-defaults')
+  sessionDefaults() {
+    return this.users.sessionDefaults();
+  }
+
+  @RequirePermission('users.view')
   @Get(':id')
   get(@Param('id') id: string) {
     return this.users.getUser(id);
@@ -72,6 +78,27 @@ export class UsersController {
       p,
       id,
       { fullName: body?.fullName, email: body?.email, reason: body?.reason },
+      originOf(req),
+      sig(body),
+    );
+  }
+
+  @RequirePermission('users.manage')
+  @Put(':id/session')
+  session(
+    @Param('id') id: string,
+    @Body() body: Payload,
+    @CurrentPrincipal() p: Principal,
+    @Req() req: NxGenRequest,
+  ) {
+    return this.users.setSessionTiming(
+      p,
+      id,
+      {
+        idleMinutes: body?.idleMinutes,
+        maxHours: body?.maxHours,
+        reason: body?.reason,
+      },
       originOf(req),
       sig(body),
     );

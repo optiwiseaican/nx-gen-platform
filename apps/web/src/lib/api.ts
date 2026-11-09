@@ -268,6 +268,15 @@ export interface UserSummary {
   createdBy: string;
   createdByName: string | null;
   versionNo: number;
+  /** The account's own session timing; null = the system security setting. */
+  sessionIdleMinutes: number | null;
+  sessionMaxHours: number | null;
+}
+
+export interface SessionDefaults {
+  idleMinutes: number;
+  maxHours: number;
+  limits: { idleMinutes: { min: number; max: number }; maxHours: { min: number; max: number } };
 }
 
 export interface RoleSummary {
@@ -344,6 +353,11 @@ export const usersApi = {
     post<{ user: UserSummary; temporaryPassword: string }>("/users", body),
   updateProfile: (id: string, body: { fullName: string; email: string; reason: string; signature?: SignatureInput }) =>
     put<UserSummary>(`/users/${id}/profile`, body),
+  sessionDefaults: () => call<SessionDefaults>("/users/session-defaults"),
+  setSessionTiming: (
+    id: string,
+    body: { idleMinutes: number | null; maxHours: number | null; reason: string; signature?: SignatureInput },
+  ) => put<UserSummary>(`/users/${id}/session`, body),
   setRoles: (id: string, roles: string[], reason: string, signature?: SignatureInput) =>
     put<UserSummary>(`/users/${id}/roles`, { roles, reason, signature }),
   disable: (id: string, reason: string, signature?: SignatureInput) =>

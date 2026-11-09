@@ -42,7 +42,16 @@ export interface UserSummary {
   createdBy: string;
   createdByName: string | null;
   versionNo: number;
+  /** The account's own session timing; null means the system security setting applies. */
+  sessionIdleMinutes: number | null;
+  sessionMaxHours: number | null;
 }
+
+/** Limits enforced by the database (migrations 005 and 010). */
+export const SESSION_LIMITS = {
+  idleMinutes: { min: 5, max: 60 },
+  maxHours: { min: 1, max: 24 },
+} as const;
 
 export interface RoleSummary {
   code: string;
@@ -70,11 +79,13 @@ interface UserRow {
   created_by: string;
   created_by_name: string | null;
   version_no: number;
+  session_idle_minutes: number | null;
+  session_max_hours: number | null;
 }
 
 const USER_SELECT = `
   SELECT u.id, u.username, u.full_name, u.email, u.status, u.must_change_password, u.password_changed_at,
-         u.created_at, u.created_by, u.version_no,
+         u.created_at, u.created_by, u.version_no, u.session_idle_minutes, u.session_max_hours,
          (SELECT full_name FROM users c WHERE c.id::text = u.created_by) AS created_by_name,
          (SELECT array_agg(ur.role_code ORDER BY ur.role_code) FROM user_roles ur
            WHERE ur.user_id = u.id AND NOT ur.is_deleted) AS roles,
@@ -101,6 +112,8 @@ const toSummary = (r: UserRow): UserSummary => ({
     r.created_by_name ??
     (r.created_by === 'SYSTEM_SETUP' ? 'Initial setup' : null),
   versionNo: r.version_no,
+  sessionIdleMinutes: r.session_idle_minutes,
+  sessionMaxHours: r.session_max_hours,
 });
 
 const TEMP_ALPHABET = {
@@ -614,6 +627,123 @@ export class UserAdminService {
                 username: target.username,
                 from: { fullName: target.fullName, email: target.email },
                 to: { fullName, email },
+              },
+            },
+            origin,
+          );
+      },
+    );
+    return this.getUser(id);
+  }
+
+  /** System session timing, shown next to an account's own setting. */
+  sessionDefaults() {
+    return {
+      idleMinutes: this.config.security.sessionIdleMinutes,
+      maxHours: this.config.security.sessionMaxHours,
+      limits: SESSION_LIMITS,
+    };
+  }
+
+  /**
+   * Give one account its own inactivity sign-out and maximum session length,
+   * or return it to the system setting (null). Administrators only, never on
+   * their own account. A shorter setting takes effect on the user's open
+   * sessions at once; a longer maximum applies from their next sign-in.
+   */
+  async setSessionTiming(
+    principal: Principal,
+    id: string,
+    input: { idleMinutes: unknown; maxHours: unknown; reason: unknown },
+    origin: RequestOrigin,
+    signature?: SignatureInput,
+  ): Promise<UserSummary> {
+    const reason = this.requireReason(input.reason);
+    this.assertNotSelf(principal, id, 'change the session timing of');
+    const value = (
+      v: unknown,
+      field: 'idleMinutes' | 'maxHours',
+      label: string,
+    ): number | null => {
+      if (v === null || v === undefined || v === '') return null;
+      const n = typeof v === 'number' ? v : Number(v);
+      const { min, max } = SESSION_LIMITS[field];
+      if (!Number.isInteger(n) || n < min || n > max)
+        throw new BadRequestException({
+          message: `${label} must be a whole number from ${min} to ${max}, or the system setting.`,
+          field,
+        });
+      return n;
+    };
+    const idle = value(input.idleMinutes, 'idleMinutes', 'Inactivity sign-out');
+    const maxHours = value(input.maxHours, 'maxHours', 'Maximum session');
+    const effectiveIdle = idle ?? this.config.security.sessionIdleMinutes;
+    const effectiveMax = maxHours ?? this.config.security.sessionMaxHours;
+    if (effectiveIdle > effectiveMax * 60)
+      throw new BadRequestException({
+        message:
+          'The inactivity sign-out cannot be longer than the maximum session.',
+        field: 'idleMinutes',
+      });
+    const signer = await this.signatures.authorize(
+      'USER_SESSION_CHANGE',
+      principal,
+      signature,
+      reason,
+      origin,
+    );
+    await this.db.transaction(
+      this.actor(principal, reason, origin),
+      async (client) => {
+        const target = await this.lockUser(client, id);
+        this.assertCanManage(principal, target);
+        if (
+          idle === target.sessionIdleMinutes &&
+          maxHours === target.sessionMaxHours
+        )
+          throw new BadRequestException('Nothing changed.');
+        await client.query(
+          'UPDATE users SET session_idle_minutes = $2, session_max_hours = $3 WHERE id = $1',
+          [id, idle, maxHours],
+        );
+        // A shorter maximum applies to sessions already open.
+        await client.query(
+          `UPDATE sessions SET expires_at = LEAST(expires_at, created_at + make_interval(hours => $2))
+            WHERE user_id = $1 AND ended_at IS NULL`,
+          [id, effectiveMax],
+        );
+        const show = (v: number | null, unit: string) =>
+          v === null ? 'system setting' : `${v} ${unit}`;
+        await this.event(
+          client,
+          principal,
+          origin,
+          'USER_SESSION_TIMING_CHANGED',
+          { id },
+          reason,
+          {
+            idleFrom: show(target.sessionIdleMinutes, 'min'),
+            idleTo: show(idle, 'min'),
+            maxFrom: show(target.sessionMaxHours, 'h'),
+            maxTo: show(maxHours, 'h'),
+          },
+        );
+        if (signer)
+          await this.signatures.apply(
+            client,
+            signer,
+            {
+              tableName: 'users',
+              recordId: id,
+              recordVersion: await this.userVersion(client, id),
+              content: {
+                userId: id,
+                username: target.username,
+                sessionIdleMinutes: {
+                  from: target.sessionIdleMinutes,
+                  to: idle,
+                },
+                sessionMaxHours: { from: target.sessionMaxHours, to: maxHours },
               },
             },
             origin,

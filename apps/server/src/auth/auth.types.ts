@@ -13,6 +13,8 @@ export interface Principal {
   sessionId: string;
   /** When this session ends: after inactivity, and at the latest. */
   session?: { idleExpiresAt: string; expiresAt: string };
+  /** Inactivity sign-out in force for this account (its own setting or the system's). */
+  sessionIdleMinutes?: number;
 }
 
 /** Response headers that tell the client when its session ends. */

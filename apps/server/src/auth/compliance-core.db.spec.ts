@@ -96,9 +96,9 @@ describeDb('Compliance Core on PostgreSQL', () => {
         client.release();
       }
       const entries = await audit.list({ action: 'SCHEMA_MIGRATION_APPLIED' });
-      expect(entries.map((e) => e.recordId).sort()).toEqual(
-        loadMigrations().map((m) => String(m.version)),
-      );
+      expect(
+        entries.map((e) => e.recordId).sort((a, b) => Number(a) - Number(b)),
+      ).toEqual(loadMigrations().map((m) => String(m.version)));
     });
 
     it('refuse to start if an applied migration was modified', async () => {
