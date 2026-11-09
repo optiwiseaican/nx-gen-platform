@@ -45,6 +45,16 @@ const describeDb = baseDb ? describe : describe.skip;
 jest.setTimeout(240_000);
 
 const PH_DIST = resolve(__dirname, '../../../../modules/ph/dist');
+/** The version being built (the tests follow it). */
+const PH_VERSION = existsSync(join(PH_DIST, 'module.json'))
+  ? (
+      JSON.parse(readFileSync(join(PH_DIST, 'module.json'), 'utf8')) as {
+        version: string;
+      }
+    ).version
+  : '0.0.0';
+const NEXT_VERSION = PH_VERSION.replace(/\d+$/, (n) => String(Number(n) + 1));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ORIGIN: RequestOrigin = {
   ipAddress: '10.0.0.9',
   machineName: 'QC-LAB-PC',
@@ -269,6 +279,7 @@ describeDb(
       for (const [username, fullName, roles] of [
         ['itadmin', 'Ivan IT', ['IT_ADMINISTRATOR']],
         ['analyst', 'Asha Analyst', ['ANALYST']],
+        ['reviewer', 'Ravi Reviewer', ['QA_REVIEWER']],
         ['manager', 'Meera Manager', ['QA_MANAGER']],
       ] as const) {
         const { temporaryPassword } = await admin.createUser(
@@ -405,9 +416,12 @@ describeDb(
       expect(staged.problems).toEqual([]);
       expect(staged.module).toMatchObject({
         id: 'ph',
-        version: '1.0.0',
+        version: PH_VERSION,
         installedVersion: null,
-        migrations: [{ name: '001_ph_buffer_sets.sql', applied: false }],
+        migrations: [
+          { name: '001_ph_buffer_sets.sql', applied: false },
+          { name: '002_ph_measurements.sql', applied: false },
+        ],
       });
       await expect(
         manager.install(
@@ -450,10 +464,13 @@ describeDb(
       expect(buffers.code).toBe('AICAN_STANDARD');
       expect(
         await db.query(
-          'SELECT filename FROM module_migrations WHERE module_id = $1',
+          'SELECT filename FROM module_migrations WHERE module_id = $1 ORDER BY filename',
           ['ph'],
         ),
-      ).toEqual([{ filename: '001_ph_buffer_sets.sql' }]);
+      ).toEqual([
+        { filename: '001_ph_buffer_sets.sql' },
+        { filename: '002_ph_measurements.sql' },
+      ]);
       await relogin('analyst');
       expect(people.analyst.p.permissions).toContain('ph.view');
       expect(manager.menu(people.analyst.p)).toEqual([
@@ -479,7 +496,7 @@ describeDb(
       });
       const [installed] = await audit.list({ action: 'MODULE_INSTALLED' });
       expect(installed.details).toMatchObject({
-        version: '1.0.0',
+        version: PH_VERSION,
         signingKeyId: vendor.keyId,
       });
       // Same package again: nothing to do.
@@ -740,6 +757,212 @@ describeDb(
       ).toMatchObject({ state: 'READY', usable: true });
     });
 
+    it('pH measurements: only a stable reading from the instrument, kept with its packets, then signed review and approval', async () => {
+      for (const who of ['analyst', 'reviewer', 'manager']) await relogin(who);
+      expect(people.analyst.p.permissions).toContain('ph.measure');
+      expect(people.reviewer.p.permissions).toContain('ph.review');
+      expect(people.manager.p.permissions).toContain('ph.approve');
+      const details = {
+        sampleId: 'SMP-2026-1187',
+        batch: 'B-24-0311',
+        arNumber: 'AR-2026-118',
+        product: 'Paracetamol oral suspension',
+      };
+      const measure = (body: unknown = details) =>
+        call('analyst', 'POST', `/instruments/${deviceId}/measurements`, body);
+
+      // A drifting reading is refused, and the refusal is on the audit trail.
+      for (const v of ['6.80', '6.90', '6.95', '7.00']) {
+        await feed({ PH_VAL: v, TEMP_VAL: '25.1', ATC: '1' });
+        await sleep(700);
+      }
+      await expect(measure()).rejects.toMatchObject({ status: 409 });
+      await expect(measure()).rejects.toThrow(/not stable/);
+      const [blocked] = await audit.list({ action: 'PH_MEASUREMENT_BLOCKED' });
+      expect(blocked.result).toBe('FAILURE');
+      expect(blocked.reason).toMatch(/not stable/);
+
+      // Settled for more than 5 s.
+      for (const v of [
+        '7.01',
+        '7.01',
+        '7.02',
+        '7.01',
+        '7.02',
+        '7.01',
+        '7.01',
+      ]) {
+        await feed({ PH_VAL: v, TEMP_VAL: '25.1', ATC: '1' });
+        await sleep(900);
+      }
+      const live = (await call(
+        'analyst',
+        'GET',
+        `/instruments/${deviceId}/live`,
+      )) as { live: { stability: { state: string } } };
+      expect(live.live.stability.state).toBe('STABLE');
+      await expect(
+        measure({ ...details, arNumber: 'NA' }),
+      ).rejects.toMatchObject({ status: 400, field: 'arNumber' });
+      await expect(
+        call(
+          'manager',
+          'POST',
+          `/instruments/${deviceId}/measurements`,
+          details,
+        ),
+      ).rejects.toThrow(/forbidden: ph.measure/);
+
+      // The browser cannot supply the value: anything it sends besides the details is ignored.
+      const m = (await measure({ ...details, ph: 4.0 })) as {
+        id: string;
+        code: string;
+        ph: number;
+        temperatureC: number;
+        atc: string;
+        dataSource: string;
+        sourceMessages: number[];
+        stability: { state: string; samples: number };
+        calibration: { code: string; outcome: string };
+      };
+      expect(m).toMatchObject({
+        code: 'PHM-0001',
+        ph: 7.01,
+        temperatureC: 25.1,
+        atc: 'ON',
+        dataSource: 'SIMULATED',
+        stability: { state: 'STABLE' },
+        calibration: { code: 'CAL-00001', outcome: 'PASS' },
+      });
+      expect(m.stability.samples).toBeGreaterThanOrEqual(6);
+      const packets = await db.query<{
+        kind: string;
+        received_at: Date;
+        raw: string;
+      }>(
+        'SELECT kind, received_at, raw FROM device_messages WHERE id = ANY($1::bigint[]) ORDER BY id',
+        [m.sourceMessages],
+      );
+      expect(packets.length).toBe(m.sourceMessages.length);
+      expect(
+        packets.every(
+          (x) =>
+            ['MEASUREMENT', 'STATUS'].includes(x.kind) &&
+            x.raw.includes('"PH_VAL"'),
+        ),
+      ).toBe(true);
+      // Stored with their arrival time, not the time they were saved: they span the stability window.
+      const span =
+        packets[packets.length - 1].received_at.getTime() -
+        packets[0].received_at.getTime();
+      expect(span).toBeGreaterThanOrEqual(5000);
+
+      // Measured values are original data, even in a draft; records are never removed.
+      await expect(
+        db.transaction(
+          { actorId: people.analyst.p.userId, reason: 'try to edit' },
+          (c) =>
+            c.query('UPDATE ph_measurements SET ph = 7.50 WHERE id = $1', [
+              m.id,
+            ]),
+        ),
+      ).rejects.toThrow(/NXGEN-PH-001/);
+      await expect(
+        db.transaction(
+          { actorId: people.analyst.p.userId, reason: 'try to delete' },
+          (c) => c.query('DELETE FROM ph_measurements WHERE id = $1', [m.id]),
+        ),
+      ).rejects.toThrow(/NXGEN-DB-002/);
+      await expect(
+        db.transaction(
+          { actorId: people.analyst.p.userId, reason: 'try to soft-delete' },
+          (c) =>
+            c.query(
+              'UPDATE ph_measurements SET is_deleted = true WHERE id = $1',
+              [m.id],
+            ),
+        ),
+      ).rejects.toThrow(/NXGEN-PH-002/);
+
+      // Sample details can be corrected in the draft, with a reason, by the person who measured.
+      await expect(
+        call('analyst', 'PUT', `/measurements/${m.id}/details`, {
+          ...details,
+          arNumber: 'AR-2026-119',
+        }),
+      ).rejects.toMatchObject({ field: 'reason' });
+      await call('analyst', 'PUT', `/measurements/${m.id}/details`, {
+        ...details,
+        arNumber: 'AR-2026-119',
+        reason: 'AR number mistyped; label reads AR-2026-119',
+      });
+      const updates = await audit.list({ recordId: m.id, action: 'UPDATE' });
+      expect(updates[0].reason).toBe(
+        'AR number mistyped; label reads AR-2026-119',
+      );
+
+      // Prepared -> Reviewed -> Approved, each signed; the reviewer cannot be the analyst.
+      const wf = (await call('analyst', 'GET', `/measurements/${m.id}`)) as {
+        workflow: { id: string };
+      };
+      await workflow.act(
+        people.analyst.p,
+        wf.workflow.id,
+        'SUBMIT',
+        { signature: sign(people.analyst) },
+        ORIGIN,
+      );
+      await expect(
+        call('analyst', 'PUT', `/measurements/${m.id}/details`, {
+          ...details,
+          reason: 'Late correction attempt',
+        }),
+      ).rejects.toThrow(/draft|locked|editable/i);
+      await workflow.act(
+        people.reviewer.p,
+        wf.workflow.id,
+        'REVIEW',
+        { signature: sign(people.reviewer) },
+        ORIGIN,
+      );
+      await workflow.act(
+        people.manager.p,
+        wf.workflow.id,
+        'APPROVE',
+        { signature: sign(people.manager) },
+        ORIGIN,
+      );
+      const done = (await call('reviewer', 'GET', `/measurements/${m.id}`)) as {
+        arNumber: string;
+        workflow: { state: string };
+        packets: { sha256: string }[];
+      };
+      expect(done).toMatchObject({
+        arNumber: 'AR-2026-119',
+        workflow: { state: 'APPROVED' },
+      });
+      expect(done.packets.every((x) => /^[0-9a-f]{64}$/.test(x.sha256))).toBe(
+        true,
+      );
+      const sigs = await signatures.list({
+        tableName: 'ph_measurements',
+        recordId: m.id,
+      });
+      expect(sigs.map((x) => [x.meaningCode, x.intact])).toEqual(
+        expect.arrayContaining([
+          ['AUTHORED', true],
+          ['REVIEWED', true],
+          ['APPROVED', true],
+        ]),
+      );
+      const list = (await call(
+        'analyst',
+        'GET',
+        '/measurements',
+      )) as unknown as { code: string }[];
+      expect(list.map((x) => x.code)).toContain('PHM-0001');
+    });
+
     it('a manual pH calibration is validated by the module and marked MANUAL', async () => {
       await expect(
         call('analyst', 'POST', `/instruments/${deviceId}/calibrations`, {
@@ -906,24 +1129,29 @@ describeDb(
     it('upgrades keep the previous version for rollback; downgrades are refused', async () => {
       const { manifest, files } = readDist(PH_DIST);
       const v101 = packModule({
-        manifest: { ...manifest, version: '1.0.1' },
+        manifest: { ...manifest, version: NEXT_VERSION },
         files,
         privateKeyPem: vendor.privateKeyPem,
       });
-      const up = (await install(v101, 'Upgrade to 1.0.1 per CC-2026-044')) as {
+      const up = (await install(
+        v101,
+        `Upgrade to ${NEXT_VERSION} per CC-2026-044`,
+      )) as {
         result: { module: { version: string; previousVersion: string } };
       };
       expect(up.result.module).toMatchObject({
-        version: '1.0.1',
-        previousVersion: '1.0.0',
+        version: NEXT_VERSION,
+        previousVersion: PH_VERSION,
       });
-      expect(existsSync(join(dataDir, 'modules', 'ph', '1.0.0'))).toBe(true);
+      expect(existsSync(join(dataDir, 'modules', 'ph', PH_VERSION))).toBe(true);
       const down = await manager.stage(people.itadmin.p, pkg, 'old.nxmod');
-      expect(down.problems[0]).toMatch(/downgrading to 1.0.0 is not allowed/);
+      expect(down.problems[0]).toMatch(
+        `downgrading to ${PH_VERSION} is not allowed`,
+      );
       // Migrations already applied are not run twice.
       expect(
         await db.query('SELECT filename FROM module_migrations'),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
     });
 
     it('leaves the audit chain intact', async () => {

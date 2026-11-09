@@ -186,3 +186,129 @@ export function display(r: PhResult, temperatureC: number) {
     { label: 'Temperature', value: `${temperatureC} °C` },
   ];
 }
+
+// ---------------------------------------------------------------------------
+// Stable readings (NxGen Sense PhReadingStabilityTracker)
+// ---------------------------------------------------------------------------
+
+export interface StabilityRule {
+  /** How long readings must stay settled. */
+  windowMs: number;
+  /** Largest spread (max − min) across the window that still counts as settled, in pH. */
+  tolerance: number;
+  /** A longer silence between readings breaks the run. */
+  maxGapMs: number;
+  /** Fewest readings in the window that can show a spread. */
+  minSamples: number;
+}
+
+export const DEFAULT_STABILITY: StabilityRule = { windowMs: 5_000, tolerance: 0.01, maxGapMs: 15_000, minSamples: 2 };
+
+export interface TimedReading {
+  /** null: the instrument sent "nan" (no reading). */
+  value: number | null;
+  /** Arrival time, ms. */
+  at: number;
+}
+
+export interface Stability {
+  state: 'NO_READING' | 'UNSTABLE' | 'STABLE';
+  /** Readings inside the window. */
+  samples: number;
+  /** How long the current unbroken run of readings has lasted, ms. */
+  coveredMs: number;
+  min: number | null;
+  max: number | null;
+  spread: number | null;
+  /** The newest reading. */
+  latest: number | null;
+  /** Arrival of the oldest and newest reading in the window, ms. */
+  from: number | null;
+  to: number | null;
+  rule: StabilityRule;
+}
+
+/** How long the readings the decision used span, ms. */
+export const windowSpanMs = (s: Stability) => (s.from !== null && s.to !== null ? s.to - s.from : 0);
+
+/**
+ * Whether the live pH has settled: readings arriving without a break across
+ * the whole window, and spread within the tolerance across it (from the last
+ * reading at or before the window start to the newest). Conservative,
+ * like NxGen Sense: unstable until a full window is covered, and any break
+ * (no reading, a long gap, a clock going backwards, or a stream that stopped)
+ * starts again.
+ */
+export function assessStability(readings: TimedReading[], now: number, rule: StabilityRule = DEFAULT_STABILITY): Stability {
+  const empty = (state: Stability['state'], latest: number | null = null, coveredMs = 0): Stability => ({
+    state, samples: 0, coveredMs, min: null, max: null, spread: null, latest, from: null, to: null, rule,
+  });
+  let run: { value: number; at: number }[] = [];
+  let last: number | null = null;
+  for (const r of readings) {
+    if (last !== null && r.at === last) continue; // the same reading twice
+    if (r.value === null || !Number.isFinite(r.value) || (last !== null && (r.at < last || r.at - last > rule.maxGapMs))) run = [];
+    if (r.value !== null && Number.isFinite(r.value)) run.push({ value: r.value, at: r.at });
+    last = r.at;
+  }
+  if (!run.length) return empty('NO_READING');
+  const newest = run[run.length - 1];
+  if (now - newest.at > rule.maxGapMs) return empty('NO_READING');
+  // The window starts at the last reading at or before (newest − windowMs), so the
+  // readings kept as evidence always span the whole window.
+  const cutoff = newest.at - rule.windowMs;
+  let anchor = -1;
+  for (let i = 0; i < run.length; i++) if (run[i].at <= cutoff) anchor = i;
+  const window = anchor >= 0 ? run.slice(anchor) : run;
+  const values = window.map((r) => r.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const spread = Math.round((max - min) * 1e6) / 1e6;
+  const coveredMs = newest.at - run[0].at;
+  const stable = anchor >= 0 && window.length >= rule.minSamples && max - min <= rule.tolerance + 1e-9;
+  return {
+    state: stable ? 'STABLE' : 'UNSTABLE',
+    samples: window.length,
+    coveredMs,
+    min,
+    max,
+    spread,
+    latest: newest.value,
+    from: window[0].at,
+    to: newest.at,
+    rule,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Measurement details (NxGen Sense: mandatory, approved characters only)
+// ---------------------------------------------------------------------------
+
+export interface MeasurementDetails {
+  sampleId: string;
+  batch: string;
+  arNumber: string;
+  product: string;
+  remarks: string;
+}
+
+const SAFE_TEXT = /^[A-Za-z0-9 ._\-/#(),:+]*$/;
+const DETAIL_FIELDS: [keyof MeasurementDetails, string, number][] = [
+  ['sampleId', 'Sample ID', 80],
+  ['batch', 'Batch / lot number', 80],
+  ['arNumber', 'AR number', 80],
+  ['product', 'Product', 120],
+];
+
+/** Problems per field ({} when valid). "NA" is not a value. */
+export function validateDetails(d: MeasurementDetails): Partial<Record<keyof MeasurementDetails, string>> {
+  const p: Partial<Record<keyof MeasurementDetails, string>> = {};
+  for (const [key, label, max] of DETAIL_FIELDS) {
+    const v = d[key].trim();
+    if (!v || /^n\/?a$/i.test(v)) p[key] = `${label} is required.`;
+    else if (v.length > max) p[key] = `${label}: at most ${max} characters.`;
+    else if (!SAFE_TEXT.test(v)) p[key] = `${label}: use letters, numbers, spaces and . _ - / # ( ) , : + only.`;
+  }
+  if (d.remarks.length > 2000) p.remarks = 'Remarks: at most 2000 characters.';
+  return p;
+}

@@ -1,21 +1,76 @@
 {
   "id": "ph",
   "name": "pH",
-  "version": "1.0.0",
-  "description": "pH meters connected through the AICAN USB dongle: live readings, calibration from the instrument and pH calibration rules.",
+  "version": "1.1.0",
+  "description": "pH meters connected through the AICAN USB dongle: live readings with stability, saved measurements with sample, batch and AR number, signed review and approval, calibration from the instrument.",
   "coreApi": 1,
   "minCoreVersion": "2.0.0",
   "entitlement": "ph",
   "tablePrefix": "ph_",
   "apiEntry": "api/index.js",
   "uiEntry": "ui/index.html",
-  "instrumentTypes": [{ "code": "PH", "label": "pH meter" }],
+  "instrumentTypes": [
+    {
+      "code": "PH",
+      "label": "pH meter"
+    }
+  ],
   "permissions": [
     {
       "code": "ph.view",
       "description": "View pH instruments, live readings and pH calibration data",
-      "defaultRoles": ["SUPER_ADMINISTRATOR", "IT_ADMINISTRATOR", "QA_MANAGER", "QA_REVIEWER", "ANALYST", "OPERATOR", "AUDITOR"]
+      "defaultRoles": [
+        "SUPER_ADMINISTRATOR",
+        "IT_ADMINISTRATOR",
+        "QA_MANAGER",
+        "QA_REVIEWER",
+        "ANALYST",
+        "OPERATOR",
+        "AUDITOR"
+      ]
+    },
+    {
+      "code": "ph.measure",
+      "description": "Record pH measurements from stable instrument readings and correct their sample details while in draft",
+      "defaultRoles": [
+        "ANALYST",
+        "OPERATOR"
+      ]
+    },
+    {
+      "code": "ph.review",
+      "description": "Review pH measurements (signed)",
+      "defaultRoles": [
+        "QA_REVIEWER",
+        "QA_MANAGER"
+      ]
+    },
+    {
+      "code": "ph.approve",
+      "description": "Approve, reject and invalidate pH measurements (signed)",
+      "defaultRoles": [
+        "QA_MANAGER"
+      ]
     }
   ],
-  "menu": [{ "label": "pH", "path": "/", "permission": "ph.view" }]
+  "menu": [
+    {
+      "label": "pH",
+      "path": "/",
+      "permission": "ph.view"
+    }
+  ],
+  "workflows": [
+    {
+      "code": "PH_MEASUREMENT_APPROVAL",
+      "name": "pH measurement approval",
+      "recordTable": "ph_measurements",
+      "editPermission": "ph.measure",
+      "reviewPermission": "ph.review",
+      "approvePermission": "ph.approve",
+      "requireReview": true,
+      "independentReviewer": true,
+      "independentApprover": true
+    }
+  ]
 }

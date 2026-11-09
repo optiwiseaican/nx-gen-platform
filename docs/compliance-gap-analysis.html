@@ -128,10 +128,10 @@ footer { color: var(--muted); font-size: 12.5px; }
     <span class="eyebrow">Summary</span>
     <h2 id="s-summary">Where NxGen stands across 40 compliance areas</h2>
     <div class="summary">
-      <div class="stat done"><b>9</b><span>Closed since Rev A</span></div>
+      <div class="stat done"><b>12</b><span>Closed since Rev A</span></div>
       <div class="stat ahead"><b>6</b><span>NxGen ahead of both apps</span></div>
-      <div class="stat part"><b>8</b><span>Partly done in NxGen</span></div>
-      <div class="stat gap"><b>11</b><span>In an app, still missing in NxGen</span></div>
+      <div class="stat part"><b>7</b><span>Partly done in NxGen</span></div>
+      <div class="stat gap"><b>9</b><span>In an app, still missing in NxGen</span></div>
       <div class="stat none"><b>6</b><span>Missing everywhere</span></div>
     </div>
     <p class="muted">Sources: source code and docs of both app repositories (working trees as of 7 Nov 2026, including uncommitted changes), the NxGen repository at commit <code>3a2e1a3</code>, and the master specification v1.0.</p>
@@ -146,7 +146,8 @@ footer { color: var(--muted); font-size: 12.5px; }
         <li><strong>pH module, first version</strong> (commit <code>2b93100</code>): live readings from pH portables through the USB dongle; every packet stored once with SHA-256; calibration taken from the meter and graded against the LabApp limits.</li>
         <li><strong>TLC module, first version</strong> (commit <code>50a90aa</code>): plate analyses on approved methods and usable instruments; plate images written once with SHA-256; Rf windows and system suitability; Prepared → Reviewed → Approved with signatures covering the image hashes.</li>
         <li><strong>Per-user session timing</strong> (commits <code>8aefaca</code>, <code>3a2e1a3</code>): administrators can give one account its own inactivity sign-out and maximum session, within the validated limits, with reason and signature.</li>
-        <li><strong>New pH section</strong>: eight pH capabilities of NxGen Sense compared with the NxGen pH module. Saved pH measurements are the largest remaining gap.</li>
+        <li><strong>New pH section</strong>: eight pH capabilities of NxGen Sense compared with the NxGen pH module.</li>
+        <li><strong>pH measurements</strong> (pH module 1.1.0): stable readings recorded from the instrument packets with sample, batch and AR number; measured values unchangeable; signed review and approval.</li>
       </ul>
     </div>
   </section>
@@ -209,7 +210,7 @@ footer { color: var(--muted); font-size: 12.5px; }
           <tr data-k="none"><td class="area">Secure device communication</td><td><span class="pill no">NO</span><span class="note">Plain ws://, no device authentication</span></td><td><span class="pill no">NO</span><span class="note">Plain ws:// and unauthenticated BLE</span></td><td><span class="pill no">NO</span></td><td>Device identity, TLS, signed and sequenced messages</td></tr>
 
           <tr class="layer"><td colspan="5">Business layer</td></tr>
-          <tr data-k="part"><td class="area">Measurement and analysis records</td><td><span class="pill yes">YES</span><span class="note">Immutable when final; revisions linked; status history</span></td><td><span class="pill part">PARTIAL</span><span class="note">Raw images hashed; unsigned analyses hard-deleted</span></td><td><span class="pill part">PARTIAL</span><span class="note">TLC analyses: images written once with SHA-256, locked on submit, signed approval, never deleted. pH results not saved yet</span></td><td class="action">pH measurement records (see pH section)</td></tr>
+          <tr data-k="done"><td class="area">Measurement and analysis records</td><td><span class="pill yes">YES</span><span class="note">Immutable when final; revisions linked; status history</span></td><td><span class="pill part">PARTIAL</span><span class="note">Raw images hashed; unsigned analyses hard-deleted</span></td><td><span class="pill done">DONE</span><span class="note">TLC analyses and pH measurements: original data kept with SHA-256, locked on submit, signed approval, never deleted</span></td><td class="action">EC results; corrections as linked revisions after approval</td></tr>
           <tr data-k="done"><td class="area">Method management</td><td><span class="pill na">N/A</span></td><td><span class="pill part">PARTIAL</span><span class="note">Versioned, approved; no Rf windows or SST rules</span></td><td><span class="pill done">DONE</span><span class="note">Versioned, reviewed and approved with signatures; locked once submitted</span></td><td class="action">Done · commit 0dcd3b8 · Rf windows and system suitability added with the TLC module (commit 50a90aa)</td></tr>
           <tr data-k="gap"><td class="area">Sample, batch, AR master data</td><td><span class="pill yes">YES</span></td><td><span class="pill no">NO</span></td><td><span class="pill no">NO</span></td><td>Shared master data for all instruments</td></tr>
           <tr data-k="gap"><td class="area">Reports</td><td><span class="pill yes">YES</span><span class="note">Report ID, page N of M, watermarks</span></td><td><span class="pill yes">YES</span><span class="note">Signature manifest, raw image hashes</span></td><td><span class="pill no">NO</span></td><td>Report engine with signature manifest</td></tr>
@@ -218,8 +219,8 @@ footer { color: var(--muted); font-size: 12.5px; }
 
           <tr class="layer"><td colspan="5">pH module compared with NxGen Sense (LabApp-WebSocket-M)</td></tr>
           <tr data-k="done"><td class="area">Live pH readings from the meter</td><td><span class="pill yes">YES</span><span class="note">WebSocket JSON packets</span></td><td><span class="pill na">N/A</span></td><td><span class="pill done">DONE</span><span class="note">Same JSON over the USB dongle; every packet stored once with SHA-256; simulated data labelled</span></td><td class="action">Done · commit 2b93100</td></tr>
-          <tr data-k="gap"><td class="area">Saved pH measurements with sample and batch</td><td><span class="pill yes">YES</span><span class="note">MeasurementRecordService: sample, batch, AR number; immutable when final</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span><span class="note">Readings are shown live only</span></td><td class="action">pH measurement records on the workflow engine: sample, batch, AR number, signed approval</td></tr>
-          <tr data-k="gap"><td class="area">Stable-reading detection</td><td><span class="pill yes">YES</span><span class="note">PhReadingStabilityTracker accepts a reading only when stable</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span></td><td class="action">Stability criterion before a reading can be recorded</td></tr>
+          <tr data-k="done"><td class="area">Saved pH measurements with sample and batch</td><td><span class="pill yes">YES</span><span class="note">MeasurementRecordService: sample, batch, AR number; immutable when final</span></td><td><span class="pill na">N/A</span></td><td><span class="pill done">DONE</span><span class="note">PHM records with sample, batch, AR number, product; value taken only from stored instrument packets; measured values unchangeable in the database; details corrected in draft with reason; Prepared → Reviewed → Approved, signed</span></td><td class="action">Done · pH module 1.1.0</td></tr>
+          <tr data-k="done"><td class="area">Stable-reading detection</td><td><span class="pill yes">YES</span><span class="note">PhReadingStabilityTracker accepts a reading only when stable</span></td><td><span class="pill na">N/A</span></td><td><span class="pill done">DONE</span><span class="note">Same rule (±0.01 pH, 5 s, 15 s gap), checked on the server; the stored readings always span the full window; refused attempts audited</span></td><td class="action">Done · pH module 1.1.0</td></tr>
           <tr data-k="part"><td class="area">Calibration acceptance profiles</td><td><span class="pill yes">YES</span><span class="note">Editable profiles: limits per buffer, buffer ranges, overall status policy</span></td><td><span class="pill na">N/A</span></td><td><span class="pill part">PARTIAL</span><span class="note">Fixed slope and offset limits; buffer sets</span></td><td class="action">Versioned, approved acceptance profiles</td></tr>
           <tr data-k="gap"><td class="area">Pre-calibration checks</td><td><span class="pill yes">YES</span><span class="note">Battery, storage, device ID, probe ID, temperature sensor, connection; PDF</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span></td><td class="action">Checks recorded with the calibration; failed checks block it</td></tr>
           <tr data-k="gap"><td class="area">Probe register and probe health</td><td><span class="pill yes">YES</span><span class="note">Probe master, probe health history</span></td><td><span class="pill na">N/A</span></td><td><span class="pill no">NO</span></td><td class="action">Probes linked to instruments and calibrations</td></tr>
@@ -282,7 +283,7 @@ footer { color: var(--muted); font-size: 12.5px; }
         <ul>
           <li><span class="pill done">DONE</span> TLC plate analyses: locked on submit, signed approval</li>
           <li><span class="pill done">DONE</span> Raw TLC images written once with SHA-256</li>
-          <li>pH measurement records; corrections as linked revisions</li>
+          <li><span class="pill done">DONE</span> pH measurement records from stable instrument readings, signed approval</li>
           <li><span class="pill done">DONE</span> Versioned, approved methods</li>
           <li>Sample, batch and AR master data</li>
           <li>Reports with signature manifest and watermarks</li>
@@ -291,11 +292,11 @@ footer { color: var(--muted); font-size: 12.5px; }
         <span class="ref">Spec §4, §19</span>
       </article>
       <article class="gap-card">
-        <header><h3>F. pH module vs NxGen Sense</h3><span class="pill part">1 OF 8 DONE</span></header>
+        <header><h3>F. pH module vs NxGen Sense</h3><span class="pill part">3 OF 8 DONE</span></header>
         <ol>
           <li><span class="pill done">DONE</span> Live readings over the USB dongle, packets stored with SHA-256</li>
-          <li>Saved measurements with sample, batch and AR number, signed approval</li>
-          <li>Stable-reading detection before a reading is recorded</li>
+          <li><span class="pill done">DONE</span> Saved measurements with sample, batch and AR number, signed approval</li>
+          <li><span class="pill done">DONE</span> Stable-reading detection before a reading is recorded</li>
           <li><span class="pill part">PARTIAL</span> Editable, approved calibration acceptance profiles</li>
           <li>Pre-calibration checks: battery, probe, temperature sensor, connection</li>
           <li>Probe register and probe health</li>
@@ -357,7 +358,8 @@ footer { color: var(--muted); font-size: 12.5px; }
       <div class="step"><div><h3>Backup and restore <span class="pill na">DEFERRED</span></h3><p class="muted">Encrypted, verified and audited. Postponed at your request; needed before production lab data.</p></div></div>
       <div class="step"><div><h3>Device layer with secure communication <span class="pill part">HALF DONE</span></h3><p class="muted">Instrument register and calibration done. Next: authenticated, encrypted device links (protocol decision pending).</p></div></div>
       <div class="step"><div><h3>TLC plate analyses <span class="pill done">DONE</span></h3><p class="muted">TLC module v1: images, Rf evaluation, signed approval.</p></div></div>
-      <div class="step"><div><h3>pH measurement records <span class="pill part">NEXT</span></h3><p class="muted">Saved pH results with sample, batch and AR number, stable-reading detection, signed approval; then acceptance profiles, pre-calibration checks, probes and buffer lots.</p></div></div>
+      <div class="step"><div><h3>pH measurement records <span class="pill done">DONE</span></h3><p class="muted">pH module 1.1.0: saved results with sample, batch and AR number, stable-reading detection, signed approval.</p></div></div>
+      <div class="step"><div><h3>pH calibration depth <span class="pill part">NEXT</span></h3><p class="muted">Acceptance profiles, pre-calibration checks, probes, buffer lots and expiry.</p></div></div>
       <div class="step"><div><h3>Reports and alarms</h3><p class="muted">Report engine with signature manifest; central alarm register fed by the pH alert rules.</p></div></div>
     </div>
   </section>

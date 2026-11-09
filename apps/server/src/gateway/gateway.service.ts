@@ -407,10 +407,12 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     payload: unknown,
     accepted: boolean,
     rejection: string | null,
+    /** When the packet arrived; packets a module held in memory are stored later. */
+    receivedAt: string | null = null,
   ): Promise<number> {
     const [row] = await this.db.query<{ id: string }>(
-      `INSERT INTO device_messages (transport, port_path, raw, raw_sha256, device_identifier, device_id, kind, payload, accepted, rejection_reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+      `INSERT INTO device_messages (received_at, transport, port_path, raw, raw_sha256, device_identifier, device_id, kind, payload, accepted, rejection_reason)
+       VALUES (COALESCE($11::timestamptz, now()), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
       [
         transport,
         portPath,
@@ -422,6 +424,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
         payload === undefined ? null : JSON.stringify(payload),
         accepted,
         rejection,
+        receivedAt,
       ],
     );
     return Number(row.id);
@@ -444,6 +447,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
       payload,
       true,
       null,
+      packet.receivedAt,
     );
   }
 
@@ -649,6 +653,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
           decision.payload,
           true,
           null,
+          packet.receivedAt,
         )
       : null;
     await handler.accepted(packet, device, messageId);

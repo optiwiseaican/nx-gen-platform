@@ -1,6 +1,6 @@
-import { StrictMode, useCallback, useEffect, useState } from "react";
+import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { computePh, PhLimits, PhResult, validateReadings } from "../shared/ph";
+import { computePh, windowSpanMs, MeasurementDetails, PhLimits, PhResult, Stability, StabilityRule, validateDetails, validateReadings } from "../shared/ph";
 import "./styles.css";
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,7 @@ class HttpError extends Error {
 }
 
 let idleExpiresAt: number | null = null;
+let maxExpiresAt: number | null = null;
 const idleListeners = new Set<() => void>();
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -26,7 +27,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const idle = res.headers.get("X-NxGen-Session-Idle-Expires");
   const now = Date.parse(res.headers.get("X-NxGen-Server-Time") ?? "");
   if (idle) {
-    idleExpiresAt = Date.parse(idle) + (Number.isNaN(now) ? 0 : Date.now() - now);
+    const skew = Number.isNaN(now) ? 0 : Date.now() - now;
+    idleExpiresAt = Date.parse(idle) + skew;
+    const max = res.headers.get("X-NxGen-Session-Expires");
+    if (max) maxExpiresAt = Date.parse(max) + skew;
     idleListeners.forEach((f) => f());
   }
   if (!res.ok) {
@@ -37,8 +41,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 const mod = <T,>(path: string, init?: RequestInit) => api<T>(`/modules/ph/api${path}`, init);
+const send = (body: unknown, method = "POST"): RequestInit => ({ method, body: JSON.stringify(body) });
 
 interface Principal {
+  userId: string;
   fullName: string;
   username: string;
   permissions: string[];
@@ -67,6 +73,47 @@ interface Live {
   lastSeenAt: string;
   online: boolean;
   simulated: boolean;
+  stability: Stability;
+}
+interface Workflow {
+  id: string;
+  state: "DRAFT" | "IN_REVIEW" | "REVIEWED" | "APPROVED" | "INVALIDATED" | "SUPERSEDED";
+  preparedBy: { name: string } | null;
+  reviewedBy: { name: string } | null;
+  approvedBy: { name: string } | null;
+}
+interface Measurement {
+  id: string;
+  code: string;
+  device: { id: string; code?: string; name?: string };
+  sampleId: string;
+  batch: string;
+  arNumber: string;
+  product: string;
+  remarks: string;
+  ph: number;
+  temperatureC: number;
+  atc: "ON" | "OFF" | "UNKNOWN";
+  stability: Stability;
+  dataSource: "INSTRUMENT" | "SIMULATED";
+  sourceMessages: number[];
+  calibration: { code: string | null; outcome: string | null; performedAt: string | null; dueAt: string | null };
+  measuredBy: { id: string; name: string };
+  measuredAt: string;
+  workflow: Workflow | null;
+}
+interface Signature {
+  meaningLabel: string;
+  signerFullName: string;
+  signerUsername: string;
+  signedAt: string;
+  intact: boolean;
+}
+type Step = "SUBMIT" | "WITHDRAW" | "REVIEW" | "APPROVE" | "REJECT" | "INVALIDATE";
+interface WorkflowDetail {
+  instance: Workflow;
+  allowedSteps: Step[];
+  history: { id: string; step: string; toState: string; actorName: string | null; comment: string | null; occurredAt: string; signature: Signature | null }[];
 }
 interface InstrumentCalibration {
   bufferSet: string;
@@ -87,11 +134,13 @@ const toneClass = {
   warn: "border-warn/30 bg-warn-50 text-warn",
   fail: "border-fail/30 bg-fail-50 text-fail",
   info: "border-brand/30 bg-brand-50 text-brand-700",
+  muted: "border-line bg-canvas text-muted",
 };
-function Badge({ tone, children }: { tone: keyof typeof toneClass; children: React.ReactNode }) {
+type Tone = keyof typeof toneClass;
+function Badge({ tone, children }: { tone: Tone; children: React.ReactNode }) {
   return <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-bold tracking-wide ${toneClass[tone]}`}>{children}</span>;
 }
-function Callout({ tone, title, children }: { tone: keyof typeof toneClass; title?: string; children: React.ReactNode }) {
+function Callout({ tone, title, children }: { tone: Exclude<Tone, "muted">; title?: string; children: React.ReactNode }) {
   return (
     <div className={`rounded-xl border px-4 py-3 text-sm ${toneClass[tone]}`} role={tone === "fail" ? "alert" : "status"}>
       {title && <p className="font-semibold">{title}</p>}
@@ -102,7 +151,42 @@ function Callout({ tone, title, children }: { tone: keyof typeof toneClass; titl
 const outcomeTone = (o: string) => (o === "PASS" ? "pass" : o === "WARNING" ? "warn" : "fail");
 const readinessTone = (r: Readiness) => (r.state === "READY" ? "pass" : r.state === "DUE_SOON" ? "warn" : "fail");
 const btn = "inline-flex min-h-11 items-center justify-center rounded-xl px-5 font-semibold shadow-[var(--shadow-brand)] disabled:cursor-not-allowed disabled:shadow-none";
+const secondary = "inline-flex min-h-11 items-center justify-center rounded-xl border border-line bg-white px-5 font-semibold text-ink hover:border-brand/30 disabled:text-muted";
+const primary = `${btn} bg-brand text-white hover:bg-brand-700 disabled:bg-brand/40`;
+const field = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 font-normal";
+const card = "rounded-lg border border-line bg-white p-5";
+const fmtDate = (v: string | null | undefined) => (v ? new Date(v).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" }) : "—");
+const STATE: Record<Workflow["state"], { label: string; tone: Tone }> = {
+  DRAFT: { label: "DRAFT", tone: "muted" },
+  IN_REVIEW: { label: "IN REVIEW", tone: "warn" },
+  REVIEWED: { label: "REVIEWED", tone: "warn" },
+  APPROVED: { label: "APPROVED", tone: "pass" },
+  INVALIDATED: { label: "INVALIDATED", tone: "fail" },
+  SUPERSEDED: { label: "SUPERSEDED", tone: "muted" },
+};
 const fmt = (v: number | null | undefined, d = 2) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(d) : "—");
+
+function SessionTimer({ className = "" }: { className?: string }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const f = () => tick((x) => x + 1);
+    idleListeners.add(f);
+    const t = setInterval(f, 1000);
+    return () => {
+      idleListeners.delete(f);
+      clearInterval(t);
+    };
+  }, []);
+  if (!maxExpiresAt) return null;
+  const s = Math.max(0, Math.ceil((maxExpiresAt - Date.now()) / 1000));
+  const seconds = String(s % 60).padStart(2, "0");
+  const text = s < 3600 ? `${Math.floor(s / 60)}:${seconds}` : `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${seconds}`;
+  return (
+    <span role="timer" aria-label="Time until the session ends" className={`text-muted ${className}`}>
+      Session ends in <span className="font-mono font-semibold tabular-nums">{text}</span>
+    </span>
+  );
+}
 
 function SessionBanner() {
   const [, tick] = useState(0);
@@ -160,7 +244,7 @@ const Svg = ({ d }: { d: string }) => (
   </svg>
 );
 
-function Shell({ web, principal, title, children }: { web: string; principal: Principal; title: string; children: React.ReactNode }) {
+function Shell({ web, principal, title, active, children }: { web: string; principal: Principal; title: string; active: "instruments" | "measurements"; children: React.ReactNode }) {
   const item = (href: string, label: string, d: string, active = false) => (
     <a
       href={href}
@@ -189,12 +273,14 @@ function Shell({ web, principal, title, children }: { web: string; principal: Pr
         </a>
         <nav aria-label="Main" className="flex gap-1 px-3 pb-3 lg:flex-1 lg:flex-col lg:space-y-1">
           <p className="hidden px-3.5 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-muted/70 lg:block">pH</p>
-          {item("/modules/ph/", "pH instruments", ICON.flask, true)}
+          {item("/modules/ph/", "pH instruments", ICON.flask, active === "instruments")}
+          {item("/modules/ph/?measurements=1", "Measurements", ICON.list, active === "measurements")}
           <p className="hidden px-3.5 pt-4 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-muted/70 lg:block">NxGen</p>
           {item(`${web}/home/`, "Home", ICON.home)}
           {item(`${web}/devices/`, "All instruments", ICON.list)}
         </nav>
-        <p className="hidden items-center gap-2.5 border-t border-line px-8 py-5 text-sm text-muted lg:flex">
+        <SessionTimer className="hidden border-t border-line px-8 pt-5 text-sm lg:block" />
+        <p className="hidden items-center gap-2.5 px-8 pt-2 pb-5 text-sm text-muted lg:flex">
           <span className="h-2 w-2 rounded-full bg-pass shadow-[0_0_0_3px_rgb(19_150_90/0.15)]" aria-hidden />
           Connected
         </p>
@@ -216,6 +302,7 @@ function Shell({ web, principal, title, children }: { web: string; principal: Pr
                 <span className="h-1.5 w-1.5 rounded-full bg-pass" aria-hidden />
                 {principal.username}
               </span>
+              <SessionTimer className="block text-xs lg:hidden" />
             </span>
           </div>
         </header>
@@ -287,7 +374,7 @@ function InstrumentList() {
 const DEFAULT_BUFFERS = ["4.01", "7.00", "10.01"];
 
 function Instrument({ id, web, principal }: { id: string; web: string; principal: Principal }) {
-  const [data, setData] = useState<{ device: Device; live: Live | null; calibration: InstrumentCalibration | null; limits: PhLimits } | null>(null);
+  const [data, setData] = useState<{ device: Device; live: Live | null; calibration: InstrumentCalibration | null; limits: PhLimits; stabilityRule: StabilityRule } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"INSTRUMENT" | "MANUAL">("INSTRUMENT");
   const [temperature, setTemperature] = useState("25.0");
@@ -379,6 +466,7 @@ function Instrument({ id, web, principal }: { id: string; web: string; principal
           <h2 className="font-semibold">Live readings</h2>
           {live?.online ? <Badge tone="pass">CONNECTED</Badge> : <Badge tone="fail">NO DATA</Badge>}
           {live?.simulated && <Badge tone="warn">SIMULATED</Badge>}
+          {live?.online && <StabilityBadge stability={live.stability} />}
         </div>
         {!d.deviceIdentifier && <Callout tone="warn">Set this instrument’s ID (the DEVICE_ID it sends) on its instrument record to receive data.</Callout>}
         <div className="grid gap-3 sm:grid-cols-4">
@@ -388,6 +476,10 @@ function Instrument({ id, web, principal }: { id: string; web: string; principal
           {tile("Last data", live ? new Date(live.lastSeenAt).toLocaleTimeString() : "—")}
         </div>
       </section>
+
+      {principal.permissions.includes("ph.measure") && (
+        <RecordMeasurement device={d} live={live} rule={data.stabilityRule} onRecorded={load} />
+      )}
 
       {canCalibrate && (
         <section className="space-y-4 rounded-lg border border-line bg-white p-5" aria-label="Record calibration">
@@ -536,6 +628,508 @@ function Instrument({ id, web, principal }: { id: string; web: string; principal
   );
 }
 
+// ---------------------------------------------------------------------------
+// Measurements
+// ---------------------------------------------------------------------------
+
+function StabilityBadge({ stability }: { stability: Stability }) {
+  if (stability.state === "STABLE") return <Badge tone="pass">STABLE</Badge>;
+  if (stability.state === "NO_READING") return <Badge tone="muted">NO READING</Badge>;
+  return <Badge tone="warn">SETTLING</Badge>;
+}
+
+function stabilityText(st: Stability) {
+  const rule = `needs a spread of at most ${st.rule.tolerance} pH for ${st.rule.windowMs / 1000} s`;
+  if (st.state === "NO_READING") return "No pH reading is arriving.";
+  const span = (windowSpanMs(st) / 1000).toFixed(1);
+  if (st.state === "STABLE") return `Stable: ${st.samples} readings within ${fmt(st.spread, 3)} pH over ${span} s.`;
+  return `Settling: spread ${fmt(st.spread, 3)} pH over ${span} s (${rule}).`;
+}
+
+const EMPTY_DETAILS: MeasurementDetails = { sampleId: "", batch: "", arNumber: "", product: "", remarks: "" };
+const DETAIL_LABELS: [keyof MeasurementDetails, string, string][] = [
+  ["sampleId", "Sample ID", "e.g. SMP-2026-1187"],
+  ["batch", "Batch / lot number", "e.g. B-24-0311"],
+  ["arNumber", "AR number", "e.g. AR-2026-118"],
+  ["product", "Product", "e.g. Paracetamol oral suspension"],
+];
+
+function DetailFields({ value, onChange, errors, idPrefix }: { value: MeasurementDetails; onChange: (v: MeasurementDetails) => void; errors: Partial<Record<keyof MeasurementDetails, string>>; idPrefix: string }) {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      {DETAIL_LABELS.map(([k, label, ph]) => (
+        <label key={k} className="block text-sm font-semibold" htmlFor={`${idPrefix}-${k}`}>
+          {label}
+          <input
+            id={`${idPrefix}-${k}`}
+            value={value[k]}
+            placeholder={ph}
+            onChange={(e) => onChange({ ...value, [k]: e.target.value })}
+            aria-invalid={!!errors[k]}
+            className={`${field} ${errors[k] ? "border-fail" : ""}`}
+          />
+          {errors[k] && <span className="mt-1 block text-xs font-normal text-fail">{errors[k]}</span>}
+        </label>
+      ))}
+      <label className="block text-sm font-semibold sm:col-span-2" htmlFor={`${idPrefix}-remarks`}>
+        Remarks (optional)
+        <textarea id={`${idPrefix}-remarks`} rows={2} value={value.remarks} onChange={(e) => onChange({ ...value, remarks: e.target.value })} className={field} />
+      </label>
+    </div>
+  );
+}
+
+function RecordMeasurement({ device, live, rule, onRecorded }: { device: Device; live: Live | null; rule: StabilityRule; onRecorded: () => void }) {
+  const [form, setForm] = useState<MeasurementDetails>(EMPTY_DETAILS);
+  const [touched, setTouched] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<Measurement | null>(null);
+  const errors = touched ? validateDetails(form) : {};
+  const stable = live?.online && live.stability.state === "STABLE";
+  async function record() {
+    setTouched(true);
+    if (Object.keys(validateDetails(form)).length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const m = await mod<Measurement>(`/instruments/${device.id}/measurements`, send(form));
+      setCreated(m);
+      setForm({ ...form, sampleId: "", remarks: "" });
+      setTouched(false);
+      onRecorded();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="space-y-4 rounded-lg border border-line bg-white p-5" aria-label="Record measurement">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-semibold">Record measurement</h2>
+        {live?.online && <StabilityBadge stability={live.stability} />}
+      </div>
+      <p className="text-sm text-muted">
+        NxGen records the reading the instrument is sending, only once it is stable (spread at most {rule.tolerance} pH for {rule.windowMs / 1000} s). The
+        value cannot be typed or changed; the packets it came from are kept with it.
+      </p>
+      {created && (
+        <Callout tone="pass" title={`${created.code} recorded: pH ${created.ph.toFixed(2)} at ${created.temperatureC.toFixed(1)} °C`}>
+          Saved as a draft.{" "}
+          <a className="font-semibold text-brand underline" href={`/modules/ph/?measurement=${created.id}`}>
+            Open it to submit for review
+          </a>
+          .
+        </Callout>
+      )}
+      <DetailFields value={form} onChange={setForm} errors={errors} idPrefix="m" />
+      <div className="rounded-md border border-line bg-canvas p-4 text-sm" aria-live="polite">
+        {live?.online ? (
+          <p>
+            <b className="font-mono text-lg tabular-nums">pH {fmt(live.stability.latest ?? live.values.PH_VAL)}</b>{" "}
+            <span className="text-muted">· {fmt(live.values.TEMP_VAL, 1)} °C · {stabilityText(live.stability)}</span>
+          </p>
+        ) : (
+          <p className="text-muted">No data from the instrument.</p>
+        )}
+      </div>
+      {!device.readiness.usable && <Callout tone="fail">This instrument cannot be used: {device.readiness.message}</Callout>}
+      {error && <Callout tone="fail">{error}</Callout>}
+      <button className={primary} disabled={busy || !stable || !device.readiness.usable} onClick={() => void record()}>
+        {busy ? "Recording…" : stable ? "Record stable reading" : "Waiting for a stable reading…"}
+      </button>
+    </section>
+  );
+}
+
+function MeasurementList({ principal }: { principal: Principal }) {
+  const [rows, setRows] = useState<Measurement[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | "todo">("all");
+  useEffect(() => {
+    mod<Measurement[]>("/measurements").then(setRows).catch((e: Error) => setError(e.message));
+  }, []);
+  if (error) return <Callout tone="fail">{error}</Callout>;
+  if (!rows) return <p className="text-muted">Loading…</p>;
+  const mine = (m: Measurement) =>
+    (m.workflow?.state === "DRAFT" && m.measuredBy.id === principal.userId) ||
+    (m.workflow?.state === "IN_REVIEW" && principal.permissions.includes("ph.review")) ||
+    (m.workflow?.state === "REVIEWED" && principal.permissions.includes("ph.approve"));
+  const shown = filter === "todo" ? rows.filter(mine) : rows;
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="max-w-3xl text-sm text-muted">
+          Each measurement is the stable reading an instrument sent, with sample, batch and AR number. It is reviewed and approved with electronic
+          signatures; once submitted it is locked.
+        </p>
+        <div className="flex gap-1 rounded-xl border border-line bg-white p-1 text-sm">
+          {(["all", "todo"] as const).map((f) => (
+            <button key={f} aria-pressed={filter === f} onClick={() => setFilter(f)} className={`rounded-lg px-3 py-1.5 font-semibold ${filter === f ? "bg-brand text-white" : "text-muted"}`}>
+              {f === "all" ? "All" : "Waiting for me"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-line bg-white">
+        <table className="w-full min-w-[46rem] text-left text-sm">
+          <thead className="border-b border-line bg-canvas text-xs uppercase tracking-wide text-muted">
+            <tr>
+              <th className="px-4 py-3">Measurement</th>
+              <th className="px-4 py-3">Sample</th>
+              <th className="px-4 py-3">Product</th>
+              <th className="px-4 py-3 text-right">pH</th>
+              <th className="px-4 py-3">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {shown.map((m) => (
+              <tr key={m.id}>
+                <td className="px-4 py-3">
+                  <a href={`/modules/ph/?measurement=${m.id}`} className="font-semibold text-brand hover:underline">
+                    {m.code}
+                  </a>
+                  <p className="text-xs text-muted">
+                    {m.device.code} · {fmtDate(m.measuredAt)}
+                  </p>
+                </td>
+                <td className="px-4 py-3">
+                  {m.sampleId}
+                  <p className="text-xs text-muted">
+                    {m.batch} · {m.arNumber}
+                  </p>
+                </td>
+                <td className="px-4 py-3">{m.product}</td>
+                <td className="px-4 py-3 text-right font-mono tabular-nums">
+                  {m.ph.toFixed(2)}
+                  <p className="text-xs text-muted">{m.temperatureC.toFixed(1)} °C</p>
+                </td>
+                <td className="space-x-1 px-4 py-3">
+                  {m.workflow && <Badge tone={STATE[m.workflow.state].tone}>{STATE[m.workflow.state].label}</Badge>}
+                  {m.dataSource === "SIMULATED" && <Badge tone="warn">SIMULATED</Badge>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {shown.length === 0 && <p className="px-4 py-6 text-center text-sm text-muted">{filter === "todo" ? "Nothing is waiting for you." : "No measurements yet."}</p>}
+      </div>
+    </div>
+  );
+}
+
+const STEP_UI: Record<Step, { label: string; title: string; meaning?: string; minReason: number; tone: "primary" | "secondary" }> = {
+  SUBMIT: { label: "Submit for review…", title: "Submit for review", meaning: "Authored", minReason: 0, tone: "primary" },
+  WITHDRAW: { label: "Withdraw…", title: "Withdraw to draft", minReason: 10, tone: "secondary" },
+  REVIEW: { label: "Review…", title: "Sign as reviewed", meaning: "Reviewed", minReason: 0, tone: "primary" },
+  APPROVE: { label: "Approve…", title: "Approve the measurement", meaning: "Approved", minReason: 0, tone: "primary" },
+  REJECT: { label: "Reject…", title: "Reject the measurement", meaning: "Rejected", minReason: 10, tone: "secondary" },
+  INVALIDATE: { label: "Invalidate…", title: "Invalidate the approved measurement", meaning: "Invalidated", minReason: 10, tone: "secondary" },
+};
+
+function StepDialog({ step, principal, onClose, onSign }: { step: Step | null; principal: Principal; onClose: () => void; onSign: (comment: string, password: string) => Promise<void> }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [comment, setComment] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const d = ref.current;
+    if (!d) return;
+    if (step && !d.open) {
+      setComment("");
+      setPassword("");
+      setError(null);
+      d.showModal();
+    } else if (!step && d.open) d.close();
+  }, [step]);
+  const ui = step ? STEP_UI[step] : null;
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ui) return;
+    if (comment.trim().length < ui.minReason) return setError(`Enter the reason (at least ${ui.minReason} characters).`);
+    if (ui.meaning && !password) return setError("Enter your password to sign.");
+    setBusy(true);
+    setError(null);
+    try {
+      await onSign(comment.trim(), password);
+    } catch (err) {
+      setPassword("");
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <dialog ref={ref} onClose={onClose} className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-[1.375rem] border border-line p-0 shadow-2xl backdrop:bg-navy/35">
+      <form onSubmit={submit} className="space-y-4 p-6">
+        <h2 className="text-lg font-bold">{ui?.title}</h2>
+        <label className="block text-sm font-semibold">
+          {ui?.minReason ? "Reason" : "Comment (optional)"}
+          <textarea rows={3} value={comment} onChange={(e) => setComment(e.target.value)} className={field} />
+        </label>
+        {ui?.meaning && (
+          <fieldset className="space-y-3 rounded-xl border border-brand/30 bg-brand-50 p-4">
+            <legend className="px-1 text-sm font-semibold text-brand-700">Electronic signature</legend>
+            <p className="text-sm">
+              Meaning: <b>{ui.meaning}</b> · set by this step
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-sm font-semibold">
+                Username
+                <input value={principal.username} readOnly className={`${field} bg-canvas`} />
+              </label>
+              <label className="text-sm font-semibold">
+                Password
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" className={field} />
+              </label>
+            </div>
+            <p className="text-xs text-muted">
+              By signing, I, <b className="text-ink">{principal.fullName}</b>, confirm that this electronic signature is the legally binding equivalent of
+              my handwritten signature.
+            </p>
+          </fieldset>
+        )}
+        {error && <Callout tone="fail">{error}</Callout>}
+        <div className="flex justify-end gap-3">
+          <button type="button" className={secondary} onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className={primary} disabled={busy}>
+            {busy ? "Signing…" : ui?.meaning ? `Sign & ${ui.label.replace("…", "")}` : ui?.label.replace("…", "")}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
+type MeasurementFull = Measurement & { packets: { id: number; receivedAt: string; raw: string; sha256: string; transport: string }[] };
+
+function MeasurementPage({ id, principal, web }: { id: string; principal: Principal; web: string }) {
+  const [m, setM] = useState<MeasurementFull | null>(null);
+  const [wf, setWf] = useState<WorkflowDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [step, setStep] = useState<Step | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<MeasurementDetails>(EMPTY_DETAILS);
+  const [reason, setReason] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [showPackets, setShowPackets] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const x = await mod<MeasurementFull>(`/measurements/${id}`);
+      setM(x);
+      if (x.workflow) setWf(await api<WorkflowDetail>(`/workflow/instances/${x.workflow.id}`));
+    } catch (e) {
+      if ((e as HttpError).status === 401) location.href = `${web}/login/?reason=session`;
+      else setError((e as Error).message);
+    }
+  }, [id, web]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (error) return <Callout tone="fail">{error}</Callout>;
+  if (!m || !wf) return <p className="text-muted">Loading…</p>;
+  const canCorrect = wf.instance.state === "DRAFT" && m.measuredBy.id === principal.userId && principal.permissions.includes("ph.measure");
+
+  async function sign(comment: string, password: string) {
+    const ui = STEP_UI[step!];
+    await api(`/workflow/instances/${wf!.instance.id}/${step!.toLowerCase()}`, send({ reason: comment, signature: ui.meaning ? { username: principal.username, password } : undefined }));
+    const done = step!;
+    await load();
+    setStep(null);
+    setNotice({ SUBMIT: "Submitted for review and locked.", WITHDRAW: "Withdrawn to draft.", REVIEW: "Signed as reviewed.", APPROVE: "Approved.", REJECT: "Rejected.", INVALIDATE: "Invalidated." }[done]);
+  }
+
+  async function saveDetails() {
+    setSaveError(null);
+    if (Object.keys(validateDetails(form)).length) return setSaveError("Correct the highlighted fields.");
+    try {
+      await mod(`/measurements/${id}/details`, send({ ...form, reason }, "PUT"));
+      await load();
+      setEditing(false);
+      setNotice("Sample details corrected. The change and its reason are on the audit trail.");
+    } catch (e) {
+      setSaveError((e as Error).message);
+    }
+  }
+
+  const stages = [
+    { label: "Prepared", who: wf.instance.preparedBy?.name, done: wf.instance.state !== "DRAFT" },
+    { label: "Reviewed", who: wf.instance.reviewedBy?.name, done: ["REVIEWED", "APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
+    { label: "Approved", who: wf.instance.approvedBy?.name, done: ["APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
+  ];
+  const row = (label: string, value: React.ReactNode) => (
+    <div className="grid grid-cols-[9rem_1fr] gap-3 py-2">
+      <dt className="text-muted">{label}</dt>
+      <dd className="min-w-0 break-words">{value}</dd>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-mono text-sm text-muted">
+            {m.code} · {m.device.code} {m.device.name}
+          </p>
+          <h2 className="text-xl font-bold">
+            {m.sampleId} <span className="font-normal text-muted">· batch {m.batch}</span>
+          </h2>
+        </div>
+        <span className="flex flex-wrap gap-2">
+          <Badge tone={STATE[wf.instance.state].tone}>{STATE[wf.instance.state].label}</Badge>
+          {m.dataSource === "SIMULATED" && <Badge tone="warn">SIMULATED DATA</Badge>}
+        </span>
+      </div>
+      {notice && <Callout tone="pass">{notice}</Callout>}
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="rounded-lg border border-line bg-white px-5 py-4">
+          <p className="text-xs font-bold uppercase tracking-wide text-muted">pH</p>
+          <p className="mt-1 text-4xl font-extrabold tabular-nums tracking-tight">{m.ph.toFixed(2)}</p>
+          <p className="text-xs text-muted">Stable · spread {fmt(m.stability.spread, 3)} pH over {(windowSpanMs(m.stability) / 1000).toFixed(1)} s · {m.stability.samples} readings</p>
+        </div>
+        <div className="rounded-lg border border-line bg-white px-5 py-4">
+          <p className="text-xs font-bold uppercase tracking-wide text-muted">Temperature</p>
+          <p className="mt-1 text-4xl font-extrabold tabular-nums tracking-tight">{m.temperatureC.toFixed(1)} °C</p>
+          <p className="text-xs text-muted">ATC {m.atc === "UNKNOWN" ? "not reported" : m.atc.toLowerCase()}</p>
+        </div>
+        <div className="rounded-lg border border-line bg-white px-5 py-4">
+          <p className="text-xs font-bold uppercase tracking-wide text-muted">Calibration in force</p>
+          <p className="mt-1 text-xl font-bold">{m.calibration.code ?? "—"}</p>
+          <p className="text-xs text-muted">
+            {m.calibration.outcome ?? ""} · due {m.calibration.dueAt ? new Date(m.calibration.dueAt).toLocaleDateString() : "—"}
+          </p>
+        </div>
+      </div>
+
+      <ol className="grid gap-2 sm:grid-cols-3" aria-label="Approval progress">
+        {stages.map((s, i) => (
+          <li key={s.label} className={`rounded-xl border px-4 py-2.5 text-sm ${s.done ? "border-pass/30 bg-pass-50" : "border-line bg-white"}`}>
+            <p className="text-xs font-bold uppercase tracking-wide text-muted">
+              {i + 1}. {s.label}
+            </p>
+            <p className="font-semibold">{s.done ? (s.who ?? "—") : "Not yet"}</p>
+          </li>
+        ))}
+      </ol>
+      {wf.allowedSteps.length > 0 && !editing && (
+        <div className="flex flex-wrap gap-3">
+          {wf.allowedSteps.map((s) => (
+            <button key={s} className={STEP_UI[s].tone === "primary" ? primary : secondary} onClick={() => setStep(s)}>
+              {STEP_UI[s].label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <section className={card}>
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="font-bold">Sample details</h3>
+          {canCorrect && !editing && (
+            <button
+              className="text-sm font-semibold text-brand hover:underline"
+              onClick={() => {
+                setForm({ sampleId: m.sampleId, batch: m.batch, arNumber: m.arNumber, product: m.product, remarks: m.remarks });
+                setReason("");
+                setEditing(true);
+              }}
+            >
+              Correct…
+            </button>
+          )}
+        </div>
+        {editing ? (
+          <div className="space-y-4">
+            <DetailFields value={form} onChange={setForm} errors={validateDetails(form)} idPrefix="c" />
+            <label className="block text-sm font-semibold" htmlFor="c-reason">
+              Reason for the correction
+              <input id="c-reason" value={reason} onChange={(e) => setReason(e.target.value)} className={field} placeholder="e.g. AR number mistyped; correct number from the sample label" />
+            </label>
+            <p className="text-xs text-muted">Only the sample details can be corrected. The measured pH and temperature are original data and cannot change.</p>
+            {saveError && <Callout tone="fail">{saveError}</Callout>}
+            <div className="flex gap-3">
+              <button className={secondary} onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+              <button className={primary} onClick={() => void saveDetails()}>
+                Save correction
+              </button>
+            </div>
+          </div>
+        ) : (
+          <dl className="divide-y divide-line text-sm">
+            {row("Sample ID", m.sampleId)}
+            {row("Batch / lot", m.batch)}
+            {row("AR number", m.arNumber)}
+            {row("Product", m.product)}
+            {row("Remarks", m.remarks || "—")}
+            {row("Measured by", `${m.measuredBy.name} · ${fmtDate(m.measuredAt)}`)}
+            {row("Instrument", `${m.device.code} · ${m.device.name}`)}
+          </dl>
+        )}
+      </section>
+
+      <section className={card}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="font-bold">Original instrument data</h3>
+            <p className="text-sm text-muted">
+              {m.packets.length} packets stored unchanged with their SHA-256; the readings in the stability window and the temperature.
+            </p>
+          </div>
+          <button className="text-sm font-semibold text-brand hover:underline" onClick={() => setShowPackets(!showPackets)} aria-expanded={showPackets}>
+            {showPackets ? "Hide packets" : "Show packets"}
+          </button>
+        </div>
+        {showPackets && (
+          <ul className="mt-3 space-y-2 text-xs">
+            {m.packets.map((x) => (
+              <li key={x.id} className="rounded-lg border border-line bg-canvas/60 p-3">
+                <p className="text-muted">
+                  #{x.id} · {fmtDate(x.receivedAt)} · {x.transport === "SIMULATOR" ? "simulator" : "USB dongle"}
+                </p>
+                <p className="break-all font-mono">{x.raw}</p>
+                <p className="break-all font-mono text-muted">SHA-256 {x.sha256}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h3 className="font-bold">History</h3>
+        {[...wf.history].reverse().map((e) => (
+          <div key={e.id} className={card}>
+            <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+              <p className="font-semibold">
+                {e.step.charAt(0) + e.step.slice(1).toLowerCase()} <span className="font-normal text-muted">· {e.actorName}</span>
+              </p>
+              <p className="text-xs text-muted">{fmtDate(e.occurredAt)}</p>
+            </div>
+            {e.comment && <p className="mt-1 text-sm text-muted">“{e.comment}”</p>}
+            {e.signature && (
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-canvas/60 p-3 text-sm">
+                <span>
+                  <b>{e.signature.meaningLabel}</b> — {e.signature.signerFullName} ({e.signature.signerUsername}) · {fmtDate(e.signature.signedAt)}
+                </span>
+                <Badge tone={e.signature.intact ? "pass" : "fail"}>{e.signature.intact ? "SIGNATURE VERIFIED" : "SIGNATURE INVALID"}</Badge>
+              </div>
+            )}
+          </div>
+        ))}
+      </section>
+      <StepDialog step={step} principal={principal} onClose={() => setStep(null)} onSign={sign} />
+    </div>
+  );
+}
+
 function App() {
   const [boot, setBoot] = useState<{ web: string; principal: Principal } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -551,10 +1145,22 @@ function App() {
   }, []);
   if (error) return <div className="p-8"><Callout tone="fail">{error}</Callout></div>;
   if (!boot) return <p className="p-8 text-muted">Loading…</p>;
-  const device = new URLSearchParams(location.search).get("device");
+  const q = new URLSearchParams(location.search);
+  const device = q.get("device");
+  const measurement = q.get("measurement");
+  const list = q.get("measurements");
+  const title = measurement ? "pH measurement" : list ? "Measurements" : device ? "Instrument" : "pH instruments";
   return (
-    <Shell web={boot.web} principal={boot.principal} title={device ? "Instrument" : "pH instruments"}>
-      {device ? <Instrument id={device} web={boot.web} principal={boot.principal} /> : <InstrumentList />}
+    <Shell web={boot.web} principal={boot.principal} title={title} active={measurement || list ? "measurements" : "instruments"}>
+      {measurement ? (
+        <MeasurementPage id={measurement} principal={boot.principal} web={boot.web} />
+      ) : list ? (
+        <MeasurementList principal={boot.principal} />
+      ) : device ? (
+        <Instrument id={device} web={boot.web} principal={boot.principal} />
+      ) : (
+        <InstrumentList />
+      )}
     </Shell>
   );
 }
