@@ -55,6 +55,23 @@ interface PortRuntime {
   queue: Promise<unknown>;
 }
 
+/** One line as the gateway saw it, kept in memory for the live packet monitor. */
+export interface PacketTrace {
+  seq: number;
+  at: string;
+  portPath: string;
+  transport: Transport;
+  raw: string;
+  deviceIdentifier: string | null;
+  accepted: boolean;
+  reason: string | null;
+  kind: string | null;
+}
+/** Lines kept per port for the monitor. */
+const TRACE_PER_PORT = 200;
+/** Longest raw line the monitor shows. */
+const TRACE_MAX_CHARS = 2000;
+
 const sha256 = (s: string) =>
   createHash('sha256').update(s, 'utf8').digest('hex');
 
@@ -89,6 +106,9 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     { firstSeenAt: string; lastSeenAt: string; portPath: string; count: number }
   >();
   private readonly throttle = new Map<string, number>();
+  /** The latest lines from each port, newest last, for the live packet monitor (memory only). */
+  private readonly recent = new Map<string, PacketTrace[]>();
+  private traceSeq = 0;
   /** When each serial port was first seen attached since NxGen started (cleared when it is removed). */
   private readonly attachedSince = new Map<string, string>();
 
@@ -621,6 +641,60 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
 
   /** One line from a dongle (or the development simulator). */
   async ingest(
+    line: string,
+    transport: Transport,
+    portPath: string,
+  ): Promise<{
+    accepted: boolean;
+    reason?: string;
+    kind?: Kind;
+    messageId?: number | null;
+  }> {
+    const result = await this.process(line, transport, portPath);
+    const raw = line.replace(/\r?\n$/, '').trim();
+    if (raw) this.trace(raw, transport, portPath, result);
+    return result;
+  }
+
+  private trace(
+    raw: string,
+    transport: Transport,
+    portPath: string,
+    result: { accepted: boolean; reason?: string; kind?: Kind },
+  ) {
+    const env = parseEnvelope(raw);
+    const list = this.recent.get(portPath) ?? [];
+    list.push({
+      seq: ++this.traceSeq,
+      at: new Date().toISOString(),
+      portPath,
+      transport,
+      raw: raw.length > TRACE_MAX_CHARS ? `${raw.slice(0, TRACE_MAX_CHARS)}…` : raw,
+      deviceIdentifier: env.deviceIdentifier ?? null,
+      accepted: result.accepted,
+      reason: result.reason ?? null,
+      kind: result.kind ?? null,
+    });
+    if (list.length > TRACE_PER_PORT) list.splice(0, list.length - TRACE_PER_PORT);
+    this.recent.set(portPath, list);
+  }
+
+  /**
+   * The latest lines the gateway received, newest last, for the live packet
+   * monitor. Held in memory only; `after` returns just the lines since a
+   * previous call.
+   */
+  recentPackets(portPath?: string, after = 0, limit = TRACE_PER_PORT) {
+    const lists = portPath ? [this.recent.get(portPath) ?? []] : [...this.recent.values()];
+    const packets = lists
+      .flat()
+      .filter((t) => t.seq > after)
+      .sort((a, b) => a.seq - b.seq)
+      .slice(-Math.min(Math.max(limit, 1), TRACE_PER_PORT));
+    return { packets, latestSeq: this.traceSeq };
+  }
+
+  private async process(
     line: string,
     transport: Transport,
     portPath: string,

@@ -34,6 +34,22 @@ export class GatewayController {
     return this.gateway.overview();
   }
 
+  /** Live packet monitor: the latest lines from the dongles, accepted or not. Memory only. */
+  @RequirePermission('devices.view')
+  @PassiveRequest()
+  @Get('packets')
+  packets(
+    @Query('port') port?: string,
+    @Query('after') after?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.gateway.recentPackets(
+      port || undefined,
+      Number(after) || 0,
+      Number(limit) || undefined,
+    );
+  }
+
   @RequirePermission('devices.view')
   @Get('messages/:deviceId')
   messages(

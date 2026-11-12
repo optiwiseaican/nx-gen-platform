@@ -155,3 +155,39 @@ describe('GatewayService.send', () => {
     });
   });
 });
+
+describe('GatewayService live packet monitor', () => {
+  const gateway = () =>
+    new GatewayService(
+      { production: false } as NxGenConfig,
+      {
+        query: jest.fn().mockResolvedValue([{ id: '1' }]),
+      } as unknown as DatabaseService,
+      { record: jest.fn() } as unknown as AuditService,
+      { handlerFor: () => null } as unknown as ModuleRegistry,
+    );
+
+  it('keeps each line with its decision, and returns only newer lines on request', async () => {
+    const g = gateway();
+    jest.spyOn(g as never, 'device' as never).mockResolvedValue(null as never);
+    await g.ingest('{"DEVICE_ID":"PHMETER_a06b","PH_VAL":7.01}', 'SERIAL', '/dev/ttyACM0');
+    await g.ingest('not json', 'SERIAL', '/dev/ttyACM0');
+    await g.ingest('   ', 'SERIAL', '/dev/ttyACM0');
+    const all = g.recentPackets('/dev/ttyACM0');
+    expect(all.packets.map((p) => [p.raw, p.deviceIdentifier, p.accepted, p.reason])).toEqual([
+      ['{"DEVICE_ID":"PHMETER_a06b","PH_VAL":7.01}', 'PHMETER_a06b', false, 'Instrument not registered'],
+      ['not json', null, false, expect.any(String)],
+    ]);
+    expect(g.recentPackets('/dev/ttyACM0', all.packets[0].seq).packets).toHaveLength(1);
+    expect(g.recentPackets('/dev/other').packets).toHaveLength(0);
+  });
+
+  it('keeps only the latest 200 lines of a port', async () => {
+    const g = gateway();
+    jest.spyOn(g as never, 'device' as never).mockResolvedValue(null as never);
+    for (let i = 0; i < 230; i++) await g.ingest(`{"DEVICE_ID":"M1","N":${i}}`, 'SERIAL', '/dev/ttyACM0');
+    const { packets } = g.recentPackets('/dev/ttyACM0');
+    expect(packets).toHaveLength(200);
+    expect(packets[0].raw).toBe('{"DEVICE_ID":"M1","N":30}');
+  });
+});

@@ -4142,6 +4142,135 @@ const PORT_STATUS: Record<GatewayView["configured"][number]["status"], { label: 
   DISABLED: { label: "Disabled", tone: "muted" },
 };
 
+interface PacketTraceRow {
+  seq: number;
+  at: string;
+  portPath: string;
+  transport: string;
+  raw: string;
+  deviceIdentifier: string | null;
+  accepted: boolean;
+  reason: string | null;
+  kind: string | null;
+}
+const MONITOR_KEEP = 200;
+
+/** Pretty-prints a packet when it is JSON; otherwise shows it as received. */
+const prettyPacket = (raw: string) => {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+};
+
+/**
+ * Live packet monitor: every line the dongle sends, as received, with the gateway's verdict.
+ * Reads the gateway's in-memory log (the last 200 lines per port); nothing here is stored.
+ */
+function PacketMonitor({ ports }: { ports: string[] }) {
+  const [rows, setRows] = useState<PacketTraceRow[]>([]);
+  const [port, setPort] = useState("");
+  const [show, setShow] = useState<"ALL" | "ACCEPTED" | "REJECTED">("ALL");
+  const [paused, setPaused] = useState(false);
+  const [open, setOpen] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const after = useRef(0);
+
+  useEffect(() => {
+    after.current = 0;
+    setRows([]);
+  }, [port]);
+  useEffect(() => {
+    if (paused) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const q = new URLSearchParams({ after: String(after.current) });
+        if (port) q.set("port", port);
+        const r = await api<{ packets: PacketTraceRow[]; latestSeq: number }>(`/gateway/packets?${q}`);
+        if (stop) return;
+        if (r.packets.length) {
+          after.current = r.packets[r.packets.length - 1].seq;
+          setRows((prev) => [...prev, ...r.packets].slice(-MONITOR_KEEP));
+        }
+        setError(null);
+      } catch (e) {
+        if (!stop) setError((e as Error).message);
+      }
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 1000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [paused, port]);
+
+  const shown = rows.filter((r) => show === "ALL" || (show === "ACCEPTED" ? r.accepted : !r.accepted)).reverse();
+  const accepted = rows.filter((r) => r.accepted).length;
+
+  return (
+    <section className={`${panel} p-5`} aria-label="Live packets">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-[#101B3D]">Live packets</h2>
+          <p className="text-sm text-[#566176]">Every line the dongle sends, newest first, with what NxGen did with it. Shows the last {MONITOR_KEEP} lines; nothing here is saved.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {ports.length > 1 && (
+            <select value={port} onChange={(e) => setPort(e.target.value)} className="rounded-lg border border-[#E2E8F0] bg-white px-3 py-2 text-sm" aria-label="Port">
+              <option value="">All ports</option>
+              {ports.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          )}
+          <div className="flex rounded-lg border border-[#E2E8F0] bg-white p-0.5 text-sm" role="group" aria-label="Show">
+            {(["ALL", "ACCEPTED", "REJECTED"] as const).map((v) => (
+              <button key={v} onClick={() => setShow(v)} aria-pressed={show === v} className={`rounded-md px-3 py-1.5 font-semibold ${show === v ? "bg-[#5D5FEF] text-white" : "text-[#566176]"}`}>
+                {v === "ALL" ? `All (${rows.length})` : v === "ACCEPTED" ? `Accepted (${accepted})` : `Rejected (${rows.length - accepted})`}
+              </button>
+            ))}
+          </div>
+          <button className={btnGray} onClick={() => setPaused(!paused)}>{paused ? "▶ Resume" : "❚❚ Pause"}</button>
+          <button className={btnGray} onClick={() => { setRows([]); setOpen(null); }}>Clear view</button>
+        </div>
+      </div>
+      {error && <div className="mt-3"><Callout tone="fail">{error}</Callout></div>}
+      {paused && <p className="mt-3 text-xs font-semibold text-[#B45309]">Paused. New lines are still received by NxGen; resume to see them.</p>}
+      <div className="mt-3 max-h-[28rem] overflow-y-auto rounded-xl border border-[#E5EAF2]">
+        {shown.length === 0 ? (
+          <p className="px-4 py-6 text-center text-sm text-[#566176]">{rows.length ? "No lines match this filter." : "Waiting for data from the dongle…"}</p>
+        ) : (
+          <ul className="divide-y divide-[#E5EAF2] font-mono text-xs">
+            {shown.map((r) => (
+              <li key={r.seq} className={r.accepted ? "" : "bg-[#FFFBFB]"}>
+                <button className="flex w-full items-start gap-3 px-3 py-2 text-left hover:bg-[#F8FAFD]" onClick={() => setOpen(open === r.seq ? null : r.seq)} aria-expanded={open === r.seq}>
+                  <span className="shrink-0 text-[#94A3B8] tabular-nums">{new Date(r.at).toLocaleTimeString()}</span>
+                  <span className={`shrink-0 rounded px-1.5 font-sans text-[11px] font-bold ${r.accepted ? "bg-[#ECFDF5] text-[#047857]" : "bg-[#FEF2F2] text-[#DC2626]"}`}>{r.accepted ? (r.kind ?? "ACCEPTED") : "REJECTED"}</span>
+                  <span className="shrink-0 font-semibold text-[#101B3D]">{r.deviceIdentifier ?? "—"}</span>
+                  <span className={`min-w-0 flex-1 text-[#33415C] ${open === r.seq ? "" : "truncate"}`}>{r.raw}</span>
+                </button>
+                {open === r.seq && (
+                  <div className="space-y-2 px-3 pb-3">
+                    <p className="font-sans text-xs text-[#566176]">
+                      {r.portPath} · {r.transport} · {new Date(r.at).toLocaleString()}
+                      {r.reason && <span className="block font-semibold text-[#DC2626]">Rejected: {r.reason}</span>}
+                    </p>
+                    <pre className="overflow-x-auto rounded-lg bg-[#0B1B4A] p-3 text-[11px] leading-relaxed text-[#E2E8F0]">{prettyPacket(r.raw)}</pre>
+                    <button className="font-sans text-xs font-semibold text-[#5D5FEF] hover:underline" onClick={() => void navigator.clipboard?.writeText(r.raw)}>Copy line</button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /**
  * Serial (UART) detection for the pH meters' USB dongle: what is plugged into this computer,
  * which port NxGen reads, and which meters are sending data over it.
@@ -4296,6 +4425,8 @@ function ConnectionsPage({ principal, web }: { principal: Principal; web: string
           {o.configured.filter((c) => c.attached === false && c.enabled).map((c) => c.portPath).join(", ")}. NxGen reopens it automatically when it is connected again.
         </Callout>
       )}
+
+      <PacketMonitor ports={o.configured.map((c) => c.portPath)} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section className={`${panel} p-5`} aria-label="Meters sending data">

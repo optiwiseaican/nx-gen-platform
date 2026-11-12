@@ -57,6 +57,9 @@ const hex = (v: string | undefined) => (v ? v.toLowerCase().replace(/^0x/, '').p
 function kindOf(p: RawPort, vendorId: string | null, platform: NodeJS.Platform): PortKind {
   const pnp = p.pnpId ?? '';
   if (vendorId && CHIPS[vendorId]) return 'USB_UART';
+  // Built-in UARTs: Linux /dev/ttyS* and PCI serial controllers report the chipset's
+  // vendor (Intel 8086, AMD 1022) but are not USB, and never carry dongle data.
+  if (/^\/dev\/ttyS\d+$/.test(p.path) || /^pci-|^ACPI\\|^PCI\\/i.test(pnp)) return 'SYSTEM';
   if (/^BTHENUM/i.test(pnp) || BLUETOOTH_NAME.test(p.path) || BLUETOOTH_NAME.test(p.friendlyName ?? '')) return 'BLUETOOTH';
   if (vendorId || /^USB\\/i.test(pnp) || USB_NAME.test(p.path)) return 'USB_SERIAL';
   if (platform === 'darwin') {

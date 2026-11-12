@@ -1,7 +1,7 @@
 {
   "id": "ph",
   "name": "pH",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "description": "pH meters connected through the AICAN USB dongle: live readings with stability, saved measurements with sample, batch and AR number, signed review and approval, calibration from the instrument.",
   "coreApi": 1,
   "minCoreVersion": "2.0.0",

@@ -59,4 +59,18 @@ describe('serial port detection', () => {
       ['/dev/ttyS0', 'SYSTEM'],
     ]);
   });
+
+  it('treats a motherboard UART that reports Intel PCI IDs as built-in, and an ESP32 USB port as an adapter', () => {
+    const ports = classifyPorts(
+      [
+        { path: '/dev/ttyS4', vendorId: '8086', productId: '51a8', pnpId: 'pci-0000:00:1e.0' },
+        { path: '/dev/ttyACM0', manufacturer: 'Espressif', vendorId: '303a', productId: '1001', serialNumber: '98:A3:16:CD:5F:B8' },
+      ],
+      'linux',
+    );
+    expect(ports.map((p) => [p.path, p.kind, p.chip, p.usable])).toEqual([
+      ['/dev/ttyACM0', 'USB_UART', 'Espressif USB serial/JTAG', true],
+      ['/dev/ttyS4', 'SYSTEM', null, false],
+    ]);
+  });
 });
