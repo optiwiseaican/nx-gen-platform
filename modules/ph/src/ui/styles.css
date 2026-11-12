@@ -30,11 +30,7 @@ html,
 body {
   color: var(--color-ink);
   font-family: var(--font-sans);
-  background-color: var(--color-canvas);
-  background-image:
-    radial-gradient(60rem 30rem at 85% -10%, rgb(37 99 235 / 0.08), transparent 70%),
-    radial-gradient(50rem 28rem at -10% 110%, rgb(37 99 235 / 0.06), transparent 70%);
-  background-attachment: fixed;
+  background-color: #f4f6f9;
 }
 
 @layer components {
@@ -47,4 +43,24 @@ body {
 :focus-visible {
   outline: 3px solid color-mix(in srgb, var(--color-brand) 55%, transparent);
   outline-offset: 2px;
+}
+
+/* "Print or save PDF" on the trends: only that panel goes to paper. */
+@media print {
+  body.print-trends {
+    background: #fff;
+  }
+  body.print-trends * {
+    visibility: hidden;
+  }
+  body.print-trends [data-print-area],
+  body.print-trends [data-print-area] * {
+    visibility: visible;
+  }
+  body.print-trends [data-print-area] {
+    position: absolute;
+    inset: 0 0 auto 0;
+    border: 0;
+    box-shadow: none;
+  }
 }

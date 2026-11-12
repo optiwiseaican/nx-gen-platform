@@ -204,8 +204,11 @@ export class UserAdminService {
       version_no: number;
     }>(
       `SELECT r.code, r.name, r.description, r.is_system, r.version_no,
-              (SELECT array_agg(rp.permission_code ORDER BY rp.permission_code) FROM role_permissions rp
-                WHERE rp.role_code = r.code AND NOT rp.is_deleted) AS permissions,
+              CASE WHEN r.code = 'SUPER_ADMINISTRATOR'
+                   THEN (SELECT array_agg(p.code ORDER BY p.code) FROM permissions p WHERE NOT p.is_deleted)
+                   ELSE (SELECT array_agg(rp.permission_code ORDER BY rp.permission_code) FROM role_permissions rp
+                          WHERE rp.role_code = r.code AND NOT rp.is_deleted)
+              END AS permissions,
               (SELECT count(*) FROM user_roles ur JOIN users u ON u.id = ur.user_id
                 WHERE ur.role_code = r.code AND NOT ur.is_deleted AND u.status = 'ACTIVE' AND NOT u.is_deleted) AS active_users
          FROM roles r WHERE NOT r.is_deleted

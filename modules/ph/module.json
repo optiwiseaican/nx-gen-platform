@@ -1,7 +1,7 @@
 {
   "id": "ph",
   "name": "pH",
-  "version": "1.1.0",
+  "version": "1.8.2",
   "description": "pH meters connected through the AICAN USB dongle: live readings with stability, saved measurements with sample, batch and AR number, signed review and approval, calibration from the instrument.",
   "coreApi": 1,
   "minCoreVersion": "2.0.0",
@@ -46,6 +46,23 @@
       ]
     },
     {
+      "code": "ph.limits",
+      "description": "Prepare new versions of the pH calibration acceptance limits",
+      "defaultRoles": [
+        "QA_REVIEWER",
+        "QA_MANAGER"
+      ]
+    },
+    {
+      "code": "ph.probes",
+      "description": "Manage the pH probe register and which probe is fitted to each instrument",
+      "defaultRoles": [
+        "SUPER_ADMINISTRATOR",
+        "IT_ADMINISTRATOR",
+        "QA_MANAGER"
+      ]
+    },
+    {
       "code": "ph.approve",
       "description": "Approve, reject and invalidate pH measurements (signed)",
       "defaultRoles": [
@@ -70,6 +87,17 @@
       "approvePermission": "ph.approve",
       "requireReview": true,
       "independentReviewer": true,
+      "independentApprover": true
+    },
+    {
+      "code": "PH_ACCEPTANCE_LIMITS_APPROVAL",
+      "name": "pH acceptance limits approval",
+      "recordTable": "ph_acceptance_profiles",
+      "editPermission": "ph.limits",
+      "reviewPermission": "ph.approve",
+      "approvePermission": "ph.approve",
+      "requireReview": false,
+      "independentReviewer": false,
       "independentApprover": true
     }
   ]

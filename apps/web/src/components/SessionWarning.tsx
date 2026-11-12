@@ -8,10 +8,34 @@ import { Button } from "./ui";
 /** Warn this long before the session ends. The shortest allowed inactivity limit is 5 minutes. */
 const WARN_MS = 2 * 60_000;
 
-const mmss = (ms: number) => {
+const countdown = (ms: number) => {
   const s = Math.max(0, Math.ceil(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const seconds = String(s % 60).padStart(2, "0");
+  if (s < 3600) return `${Math.floor(s / 60)}:${seconds}`;
+  return `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${seconds}`;
 };
+
+/**
+ * Always-visible countdown to the end of the overall session; activity does
+ * not reset it. Like the warning below, it only reads the server's timing.
+ */
+export function SessionTimer({ className = "" }: { className?: string }) {
+  const [timing, setTiming] = useState<SessionTiming | null>(sessionClock.get());
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => sessionClock.subscribe(setTiming), []);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (!timing) return null;
+  return (
+    <span role="timer" aria-label="Time until the session ends" className={`text-muted ${className}`}>
+      Session ends in <span className="font-mono font-semibold tabular-nums">{countdown(timing.expiresAt - now)}</span>
+    </span>
+  );
+}
 
 /**
  * Inactivity and maximum-session warning (21 CFR 11.300; Annex 11 §12).
@@ -92,7 +116,7 @@ export function SessionWarning() {
             : "You have been inactive. To protect the records, NxGen signs you out after a period of inactivity."}
         </p>
         <p className="text-center font-mono text-4xl font-semibold tabular-nums text-ink" aria-live="polite">
-          {mmss(left)}
+          {countdown(left)}
         </p>
         {error && <p className="text-sm text-fail">{error}</p>}
         <div className="flex justify-end gap-3">

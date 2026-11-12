@@ -290,6 +290,21 @@ describeDb('Security configuration, session, audit export, recovery', () => {
       expect(future.rows).toBe(0);
     });
 
+    it('exports the same selection as a PDF with a matching SHA-256', async () => {
+      const filters = { category: 'SECURITY' };
+      const out = await audit.exportPdf(filters, {
+        generatedBy: 'Test',
+        generatedById: root.userId,
+        platformInstanceId: null,
+        chain: { valid: true },
+      });
+      expect(out.pdf.subarray(0, 5).toString()).toBe('%PDF-');
+      expect(out.rows).toBe(await audit.countMatching(filters));
+      expect(out.sha256).toBe(
+        createHash('sha256').update(out.pdf).digest('hex'),
+      );
+    });
+
     it('neutralises spreadsheet formulas in exported values', async () => {
       await audit.record({
         category: 'SYSTEM',

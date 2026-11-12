@@ -1,12 +1,21 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { AppShell, useAuthRedirect } from "@/components/AppShell";
 import { Badge, Button, Callout, StatusIcon, Tone } from "@/components/ui";
 import { AuditEntry, AuditFilters, authApi } from "@/lib/api";
 
 const CATEGORIES = ["DATA", "SECURITY", "USER_MANAGEMENT", "LICENSING", "PLATFORM", "SYSTEM"];
 const EMPTY = { action: "", actor: "", category: "", result: "", from: "", to: "" };
+const PAGE_SIZE = 50;
+
+/** First, last and the current page's neighbours, with a gap wherever pages are skipped. */
+function pageList(current: number, last: number): (number | "gap")[] {
+  const pages = [...new Set([1, current - 1, current, current + 1, last])]
+    .filter((p) => p >= 1 && p <= last)
+    .sort((a, b) => a - b);
+  return pages.flatMap((p, i) => (i > 0 && p - pages[i - 1] > 1 ? (["gap", p] as const) : [p]));
+}
 
 /** Local date inputs → ISO bounds (the "to" date is inclusive of that whole day). */
 function toQuery(f: typeof EMPTY): AuditFilters {
@@ -39,37 +48,46 @@ function AuditTrail() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [chain, setChain] = useState<{ valid: boolean; brokenAtSequence?: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [more, setMore] = useState(true);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [open, setOpen] = useState<number | null>(null);
+  const tableRef = useRef<HTMLDivElement>(null);
+  const latestLoad = useRef(0);
 
   const [draft, setDraft] = useState(EMPTY);
   const [applied, setApplied] = useState(EMPTY);
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState<"csv" | "pdf" | null>(null);
   const [exported, setExported] = useState<{ filename: string; sha256: string } | null>(null);
 
-  const load = useCallback(
-    async (before?: number) => {
-      try {
-        const res = await authApi.audit({ ...toQuery(applied), before });
-        setEntries((prev) => (before ? [...prev, ...res.entries] : res.entries));
-        setChain(res.chain);
-        setMore(res.entries.length === 50);
-      } catch (err) {
-        if (!redirect(err)) setError(err instanceof Error ? err.message : "Could not load the audit trail.");
-      }
-    },
-    [redirect, applied],
-  );
+  const load = useCallback(async () => {
+    const id = ++latestLoad.current;
+    try {
+      const res = await authApi.audit({ ...toQuery(applied), limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
+      if (id !== latestLoad.current) return; // a newer page was requested meanwhile
+      setEntries(res.entries);
+      setTotal(res.total);
+      setChain(res.chain);
+      setError(null);
+    } catch (err) {
+      if (!redirect(err)) setError(err instanceof Error ? err.message : "Could not load the audit trail.");
+    }
+  }, [redirect, applied, page]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  async function exportCsv() {
-    setExporting(true);
+  function goToPage(p: number) {
+    setOpen(null);
+    setPage(p);
+    tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function exportTrail(format: "csv" | "pdf") {
+    setExporting(format);
     setError(null);
     try {
-      const { blob, filename, sha256 } = await authApi.auditExport(toQuery(applied));
+      const { blob, filename, sha256 } = await authApi.auditExport(toQuery(applied), format);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -81,7 +99,7 @@ function AuditTrail() {
     } catch (err) {
       if (!redirect(err)) setError(err instanceof Error ? err.message : "The export failed.");
     } finally {
-      setExporting(false);
+      setExporting(null);
     }
   }
 
@@ -93,6 +111,7 @@ function AuditTrail() {
   });
   const label = "mb-1 block text-xs font-semibold uppercase tracking-wide text-muted";
   const filtered = Object.values(applied).some(Boolean);
+  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <div className="space-y-4">
@@ -109,6 +128,7 @@ function AuditTrail() {
         onSubmit={(e) => {
           e.preventDefault();
           setOpen(null);
+          setPage(1);
           setApplied({ ...draft });
         }}
         className="grid gap-3 rounded-lg border border-line bg-white p-4 sm:grid-cols-3 lg:grid-cols-7"
@@ -155,6 +175,8 @@ function AuditTrail() {
               type="button"
               variant="secondary"
               onClick={() => {
+                setOpen(null);
+                setPage(1);
                 setDraft(EMPTY);
                 setApplied(EMPTY);
               }}
@@ -163,9 +185,13 @@ function AuditTrail() {
             </Button>
           )}
           <span className="flex-1" />
-          <Button type="button" variant="secondary" onClick={() => void exportCsv()} disabled={exporting}>
-            {exporting ? "Exporting…" : filtered ? "Export filtered (CSV)" : "Export all (CSV)"}
-          </Button>
+          {(["csv", "pdf"] as const).map((format) => (
+            <Button key={format} type="button" variant="secondary" onClick={() => void exportTrail(format)} disabled={exporting !== null}>
+              {exporting === format
+                ? "Exporting…"
+                : `${filtered ? "Export filtered" : "Export all"} (${format.toUpperCase()})`}
+            </Button>
+          ))}
         </div>
       </form>
       {exported && (
@@ -176,7 +202,7 @@ function AuditTrail() {
         </Callout>
       )}
       {error && <Callout tone="fail">{error}</Callout>}
-      <div className="overflow-x-auto rounded-lg border border-line bg-white">
+      <div ref={tableRef} className="scroll-mt-24 overflow-x-auto rounded-lg border border-line bg-white">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-line bg-canvas text-xs uppercase tracking-wide text-muted">
             <tr>
@@ -238,10 +264,37 @@ function AuditTrail() {
           <p className="px-4 py-6 text-center text-sm text-muted">No entries match these filters.</p>
         )}
       </div>
-      {more && entries.length > 0 && (
-        <Button variant="secondary" onClick={() => void load(entries[entries.length - 1].sequence)}>
-          Load older entries
-        </Button>
+      {entries.length > 0 && (
+        <nav className="flex flex-wrap items-center justify-between gap-3" aria-label="Audit trail pages">
+          <p className="text-sm text-muted">
+            Showing {(page - 1) * PAGE_SIZE + 1}–{(page - 1) * PAGE_SIZE + entries.length} of {total}
+          </p>
+          {lastPage > 1 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="secondary" disabled={page === 1} onClick={() => goToPage(page - 1)}>
+                Previous
+              </Button>
+              {pageList(page, lastPage).map((p, i) =>
+                p === "gap" ? (
+                  <span key={`gap-${i}`} className="px-1 text-muted" aria-hidden="true">…</span>
+                ) : (
+                  <Button
+                    key={p}
+                    variant={p === page ? "primary" : "secondary"}
+                    aria-label={`Page ${p}`}
+                    aria-current={p === page ? "page" : undefined}
+                    onClick={() => goToPage(p)}
+                  >
+                    {p}
+                  </Button>
+                ),
+              )}
+              <Button variant="secondary" disabled={page === lastPage} onClick={() => goToPage(page + 1)}>
+                Next
+              </Button>
+            </div>
+          )}
+        </nav>
       )}
     </div>
   );

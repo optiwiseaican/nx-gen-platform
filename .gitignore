@@ -19,3 +19,6 @@ apps/server/config/database-ca.pem
 modules/*/dist/
 dist-modules/
 *.nxmod
+
+# Packaged desktop apps
+apps/desktop/release/

@@ -186,16 +186,18 @@ export const authApi = {
   changePassword: (currentPassword: string, newPassword: string) =>
     post<Principal>("/auth/change-password", { currentPassword, newPassword }),
   extendSession: () => post<Principal>("/auth/session/extend", {}),
-  audit: (params: AuditFilters & { before?: number } = {}) => {
+  audit: (params: AuditFilters & { limit: number; offset: number }) => {
     const q = auditQuery(params);
-    q.set("limit", "50");
-    if (params.before) q.set("before", String(params.before));
-    return call<{ entries: AuditEntry[]; chain: { valid: boolean; brokenAtSequence?: number } }>(`/audit?${q}`);
+    q.set("limit", String(params.limit));
+    q.set("offset", String(params.offset));
+    return call<{ entries: AuditEntry[]; total: number; chain: { valid: boolean; brokenAtSequence?: number } }>(`/audit?${q}`);
   },
-  /** CSV extract; the export is recorded in the audit trail. */
-  auditExport: async (params: AuditFilters) => {
-    const res = await raw(`/audit/export?${auditQuery(params)}`);
-    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? "nxgen-audit-trail.csv";
+  /** CSV or PDF extract; the export is recorded in the audit trail. */
+  auditExport: async (params: AuditFilters, format: "csv" | "pdf") => {
+    const q = auditQuery(params);
+    q.set("format", format);
+    const res = await raw(`/audit/export?${q}`);
+    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? `nxgen-audit-trail.${format}`;
     return { blob: await res.blob(), filename: name, sha256: res.headers.get("X-NxGen-Export-SHA256") ?? "" };
   },
 };
@@ -720,8 +722,26 @@ export const modulesApi = {
     post<InstalledModule>(`/modules/${id}/${enabled ? "enable" : "disable"}`, { reason, signature }),
 };
 
+/** A serial port on the NxGen workstation, as the gateway recognises it. */
+export interface SerialPortInfo {
+  path: string;
+  aliases: string[];
+  kind: "USB_UART" | "USB_SERIAL" | "BLUETOOTH" | "SYSTEM";
+  chip: string | null;
+  manufacturer: string | null;
+  serialNumber: string | null;
+  vendorId: string | null;
+  productId: string | null;
+  usable: boolean;
+  attachedSince: string | null;
+  configured: boolean;
+}
+
 export interface GatewayOverview {
-  available: { path: string; manufacturer: string | null; serialNumber: string | null; vendorId: string | null; productId: string | null }[];
+  available: SerialPortInfo[];
+  /** True when the operating system could not be asked for its serial ports. */
+  portListError: boolean;
+  platform: string;
   configured: {
     id: string;
     portPath: string;
@@ -733,6 +753,8 @@ export interface GatewayOverview {
     packets: number;
     rejected: number;
     lastPacketAt: string | null;
+    /** Whether the adapter is plugged in now; null when the ports could not be listed. */
+    attached: boolean | null;
   }[];
   simulator: { packets: number; rejected: number; lastPacketAt: string | null } | null;
   connected: { deviceIdentifier: string; deviceId: string; code: string; portPath: string; transport: string; lastSeenAt: string; online: boolean }[];

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import { DatabaseService, Queryable } from '../database/database.service';
+import { AuditPdfContext, renderAuditPdf } from './audit-pdf';
 import {
   AuditEventInput,
   AuditRecord,
@@ -34,6 +35,8 @@ export interface AuditEntry {
 
 export interface AuditQuery {
   limit?: number;
+  /** Matching entries to skip, newest first. */
+  offset?: number;
   beforeSequence?: number;
   action?: string;
   actor?: string;
@@ -50,14 +53,23 @@ export interface AuditQuery {
 /** Response header carrying the SHA-256 of an exported file. */
 export const AUDIT_EXPORT_HASH_HEADER = 'X-NxGen-Export-SHA256';
 export const AUDIT_EXPORT_MAX_ROWS = 100_000;
+/** Above this a PDF stops being readable; such exports are refused, never cut short. */
+export const AUDIT_PDF_MAX_ROWS = 10_000;
 
-export interface AuditExport {
-  csv: string;
+interface AuditExportSummary {
   rows: number;
   sha256: string;
   firstSequence: number | null;
   lastSequence: number | null;
   truncated: boolean;
+}
+
+export interface AuditExport extends AuditExportSummary {
+  csv: string;
+}
+
+export interface AuditPdfExport extends AuditExportSummary {
+  pdf: Buffer;
 }
 
 const CSV_COLUMNS = [
@@ -220,27 +232,44 @@ export class AuditService {
 
   async list(q: AuditQuery = {}): Promise<AuditEntry[]> {
     const limit = Math.min(Math.max(q.limit ?? 100, 1), 500);
+    const offset = q.offset ?? 0;
     if (!this.useDb) {
-      return this.journal
-        .readAll()
-        .map(fromJournal)
-        .filter(
-          (e) =>
-            (!q.action || e.action === q.action) &&
-            (!q.actor || e.actor === q.actor),
-        )
-        .filter((e) => !q.beforeSequence || e.sequence < q.beforeSequence)
-        .filter((e) => !q.recordId || e.recordId === q.recordId)
+      return this.journalMatches(q)
         .reverse()
-        .slice(0, limit);
+        .slice(offset, offset + limit);
     }
     const { where, params } = this.filter(q);
     const rows = await this.db!.query<AuditRow>(
       `SELECT * FROM audit_trail WHERE ${where}
-        ORDER BY sequence DESC LIMIT $${params.length + 1}`,
-      [...params, limit],
+        ORDER BY sequence DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset],
     );
     return rows.map(fromRow);
+  }
+
+  /** How many entries match the filters, ignoring limit and offset. */
+  async countMatching(q: AuditQuery = {}): Promise<number> {
+    if (!this.useDb) return this.journalMatches(q).length;
+    const { where, params } = this.filter(q);
+    const [row] = await this.db!.query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total FROM audit_trail WHERE ${where}`,
+      params,
+    );
+    return row.total;
+  }
+
+  private journalMatches(q: AuditQuery): AuditEntry[] {
+    return this.journal
+      .readAll()
+      .map(fromJournal)
+      .filter(
+        (e) =>
+          (!q.action || e.action === q.action) &&
+          (!q.actor || e.actor === q.actor),
+      )
+      .filter((e) => !q.beforeSequence || e.sequence < q.beforeSequence)
+      .filter((e) => !q.recordId || e.recordId === q.recordId);
   }
 
   private filter(q: AuditQuery): { where: string; params: unknown[] } {
@@ -321,6 +350,32 @@ export class AuditService {
       firstSequence: rows.length ? Number(rows[0].sequence) : null,
       lastSequence: rows.length ? Number(rows[rows.length - 1].sequence) : null,
       truncated,
+    };
+  }
+
+  /**
+   * Printable PDF extract of the same selection as the CSV. The caller checks
+   * the selection against AUDIT_PDF_MAX_ROWS first and records the export.
+   */
+  async exportPdf(
+    q: AuditQuery,
+    context: AuditPdfContext,
+  ): Promise<AuditPdfExport> {
+    if (!this.useDb)
+      throw new Error('Audit export requires the NxGen database.');
+    const { where, params } = this.filter({ ...q, beforeSequence: undefined });
+    const rows = await this.db!.query<AuditRow>(
+      `SELECT * FROM audit_trail WHERE ${where} ORDER BY sequence`,
+      params,
+    );
+    const pdf = await renderAuditPdf(rows.map(fromRow), q, context);
+    return {
+      pdf,
+      rows: rows.length,
+      sha256: createHash('sha256').update(pdf).digest('hex'),
+      firstSequence: rows.length ? Number(rows[0].sequence) : null,
+      lastSequence: rows.length ? Number(rows[rows.length - 1].sequence) : null,
+      truncated: false,
     };
   }
 

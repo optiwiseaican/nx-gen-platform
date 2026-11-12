@@ -9,9 +9,14 @@ import {
   Query,
   Req,
   Res,
+  StreamableFile,
 } from '@nestjs/common';
 import type { Response } from 'express';
-import { AUDIT_EXPORT_HASH_HEADER, AuditService } from '../audit/audit.service';
+import {
+  AUDIT_EXPORT_HASH_HEADER,
+  AUDIT_PDF_MAX_ROWS,
+  AuditService,
+} from '../audit/audit.service';
 import type { AuditQuery } from '../audit/audit.service';
 import { PlatformIdentityService } from '../platform/platform-identity.service';
 import { NXGEN_CONFIG } from '../config/nxgen.config';
@@ -193,32 +198,73 @@ export class AuditController {
   @RequirePermission('audit.view')
   @Get()
   async list(
-    @Query() q: AuditFilterParams & { limit?: string; before?: string },
+    @Query()
+    q: AuditFilterParams & {
+      limit?: string;
+      offset?: string;
+      before?: string;
+    },
   ) {
-    const entries = await this.audit.list({
+    const offset = q.offset ? Number(q.offset) : 0;
+    if (!Number.isSafeInteger(offset) || offset < 0)
+      throw new BadRequestException({
+        message: 'Invalid offset.',
+        field: 'offset',
+      });
+    const filters: AuditQuery = {
       ...auditFilters(q),
-      limit: q.limit ? Number(q.limit) : 100,
       beforeSequence: q.before ? Number(q.before) : undefined,
-    });
-    return { entries, chain: await this.audit.verifyChain() };
+    };
+    const [entries, total, chain] = await Promise.all([
+      this.audit.list({
+        ...filters,
+        limit: q.limit ? Number(q.limit) : 100,
+        offset,
+      }),
+      this.audit.countMatching(filters),
+      this.audit.verifyChain(),
+    ]);
+    return { entries, total, chain };
   }
 
   /**
-   * CSV extract of the (filtered) trail with hash-chain columns. The export
-   * itself is recorded in the trail, with the file's SHA-256 so a copy can
-   * later be proven unaltered.
+   * Extract of the (filtered) trail: CSV with hash-chain columns, or a
+   * printable PDF (?format=pdf). The export itself is recorded in the trail,
+   * with the file's SHA-256 so a copy can later be proven unaltered.
    */
   @RequirePermission('audit.view')
   @Get('export')
   async export(
-    @Query() q: AuditFilterParams,
+    @Query() q: AuditFilterParams & { format?: string },
     @CurrentPrincipal() principal: Principal,
     @Req() req: NxGenRequest,
     @Res({ passthrough: true }) res: Response,
   ) {
+    const format = q.format ?? 'csv';
+    if (format !== 'csv' && format !== 'pdf')
+      throw new BadRequestException({
+        message: 'Invalid export format.',
+        field: 'format',
+      });
     const filters = auditFilters(q);
-    const out = await this.audit.exportCsv(filters);
     const chain = await this.audit.verifyChain();
+    const instanceId = this.platform.getIdentity().identity?.instanceId ?? null;
+    if (format === 'pdf') {
+      const matching = await this.audit.countMatching(filters);
+      if (matching > AUDIT_PDF_MAX_ROWS)
+        throw new BadRequestException({
+          message: `This selection has ${matching} entries, and a PDF can hold ${AUDIT_PDF_MAX_ROWS}. Narrow the filters or export CSV.`,
+        });
+    }
+    const out =
+      format === 'pdf'
+        ? await this.audit.exportPdf(filters, {
+            generatedBy: principal.fullName,
+            generatedById: principal.userId,
+            platformInstanceId: instanceId,
+            chain,
+          })
+        : await this.audit.exportCsv(filters);
     const origin = originOf(req);
     await this.audit.record({
       category: 'SECURITY',
@@ -227,12 +273,11 @@ export class AuditController {
       actor: principal.userId,
       actorName: principal.fullName,
       tableName: 'audit_trail',
-      platformInstanceId:
-        this.platform.getIdentity().identity?.instanceId ?? null,
+      platformInstanceId: instanceId,
       ipAddress: origin.ipAddress,
       machineName: origin.machineName,
       details: {
-        format: 'CSV',
+        format: format.toUpperCase(),
         rows: out.rows,
         sha256: out.sha256,
         firstSequence: out.firstSequence,
@@ -245,12 +290,15 @@ export class AuditController {
       },
     });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Type',
+      format === 'pdf' ? 'application/pdf' : 'text/csv; charset=utf-8',
+    );
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="nxgen-audit-trail-${stamp}.csv"`,
+      `attachment; filename="nxgen-audit-trail-${stamp}.${format}"`,
     );
     res.setHeader(AUDIT_EXPORT_HASH_HEADER, out.sha256);
-    return out.csv;
+    return 'pdf' in out ? new StreamableFile(out.pdf) : out.csv;
   }
 }

@@ -46,7 +46,9 @@ function Connections() {
       </p>
     );
 
-  const unused = o.available.filter((a) => !o.configured.some((c) => c.portPath === a.path));
+  const unused = o.available.filter((a) => a.usable && !a.configured);
+  const adapters = o.available.filter((a) => a.usable);
+  const others = o.available.filter((a) => !a.usable);
   return (
     <div className="space-y-6">
       <p className="max-w-3xl text-sm text-muted">
@@ -54,6 +56,40 @@ function Connections() {
         data only from registered instruments, by the DEVICE_ID in each packet.
       </p>
       {notice && <Callout tone="pass">{notice}</Callout>}
+
+      <section className="rounded-lg border border-line bg-white">
+        <h2 className="border-b border-line px-5 py-3 font-semibold">Detected on this computer</h2>
+        {o.portListError ? (
+          <p className="px-5 py-4 text-sm text-fail">The serial ports of this computer could not be listed.</p>
+        ) : adapters.length === 0 ? (
+          <p className="px-5 py-4 text-sm text-muted">
+            No USB-to-UART adapter is plugged in. Connect the dongle; it appears here within a few seconds.
+          </p>
+        ) : (
+          <ul className="divide-y divide-line text-sm">
+            {adapters.map((a) => (
+              <li key={a.path} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+                <div>
+                  <p className="font-semibold">
+                    {a.chip ?? "USB serial device"} <span className="font-mono text-xs font-normal text-muted">{a.path}</span>
+                  </p>
+                  <p className="text-xs text-muted">
+                    {[a.manufacturer, a.vendorId && a.productId ? `USB ${a.vendorId}:${a.productId}` : null, a.serialNumber ? `serial ${a.serialNumber}` : null, a.attachedSince ? `plugged in ${formatDate(a.attachedSince)}` : null]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </p>
+                </div>
+                {a.configured ? <Badge tone="pass">IN USE</Badge> : <Badge tone="warn">NOT IN USE</Badge>}
+              </li>
+            ))}
+          </ul>
+        )}
+        {others.length > 0 && (
+          <p className="border-t border-line px-5 py-2 text-xs text-muted">
+            Also present, not used for instruments: {others.map((a) => `${a.path} (${a.kind === "BLUETOOTH" ? "Bluetooth" : "built-in"})`).join(", ")}
+          </p>
+        )}
+      </section>
 
       <section className="rounded-lg border border-line bg-white">
         <h2 className="border-b border-line px-5 py-3 font-semibold">USB dongles (serial ports)</h2>
@@ -78,6 +114,7 @@ function Connections() {
                 </td>
                 <td className="px-5 py-2">
                   <Badge tone={STATUS_TONE[c.status]}>{c.status}</Badge>
+                  {c.enabled && c.attached === false && <p className="mt-1 text-xs text-fail">Adapter not plugged in</p>}
                   {c.error && <p className="mt-1 text-xs text-fail">{c.error}</p>}
                 </td>
                 <td className="px-5 py-2 tabular-nums">
@@ -118,11 +155,10 @@ function Connections() {
             <label className="text-sm font-semibold">
               Serial port
               <select value={portPath} onChange={(e) => setPortPath(e.target.value)} className="mt-1 block w-72 rounded-md border border-line bg-white px-3 py-2 font-normal">
-                <option value="">Choose a port…</option>
+                <option value="">{unused.length ? "Choose a USB adapter…" : "No free USB adapter detected"}</option>
                 {unused.map((a) => (
                   <option key={a.path} value={a.path}>
-                    {a.path}
-                    {a.manufacturer ? ` · ${a.manufacturer}` : ""}
+                    {a.path} · {a.chip ?? a.manufacturer ?? "USB serial"}
                   </option>
                 ))}
               </select>

@@ -1,12 +1,19 @@
 import { app, BrowserWindow, dialog } from 'electron';
+import type { ChildProcess } from 'child_process';
+import { writeFileSync } from 'fs';
 import * as path from 'path';
 import { checkLicense, loadShellTrustedKeys, ShellLicenseResult } from './license-check';
+import { readServiceSettings, SERVICE_ENV_FILE, startService } from './service';
 
 // In development the shell loads the Next.js dev server and talks to the API on :4000.
 // In packaged standalone builds the local NestJS service serves both UI and API.
-const WEB_URL = process.env.CRESCENT_WEB_URL ?? 'http://localhost:3000';
-const API_URL = process.env.CRESCENT_API_URL ?? 'http://127.0.0.1:4000';
+const SERVICE_PORT = 47810;
+const PACKAGED_URL = `http://127.0.0.1:${SERVICE_PORT}`;
+const WEB_URL = process.env.CRESCENT_WEB_URL ?? (app.isPackaged ? `${PACKAGED_URL}/` : 'http://localhost:3000');
+const API_URL = process.env.CRESCENT_API_URL ?? (app.isPackaged ? PACKAGED_URL : 'http://127.0.0.1:4000');
 const SMOKE_TEST = process.env.NXGEN_SHELL_SMOKE_TEST === '1';
+/** Set at build time for a build meant only for the machine it was made on. */
+const LOCAL_BUILD = process.env.NXGEN_LOCAL_BUILD === '1';
 
 /** Routes usable without a shell-verified license: activation and system information. */
 const OPEN_ROUTES = new Set(['/', '/system/']);
@@ -15,9 +22,12 @@ const OPEN_ROUTES = new Set(['/', '/system/']);
 const CONFIG_DIR = app.isPackaged
   ? path.join(process.resourcesPath, 'config')
   : path.resolve(__dirname, '..', '..', 'server', 'config');
-const trustedKeys = loadShellTrustedKeys(CONFIG_DIR, app.isPackaged);
+const trustedKeys = loadShellTrustedKeys(CONFIG_DIR, app.isPackaged && !LOCAL_BUILD);
 
 let licenseResult: ShellLicenseResult = { kind: 'SERVICE_UNAVAILABLE' };
+let service: ChildProcess | null = null;
+let serviceLog = '';
+let serviceStopped = false;
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -37,13 +47,13 @@ h1{font-size:22px;margin:0 0 12px;color:${color}}p{color:#4b5563;line-height:1.5
 async function waitForLicenseService(win: BrowserWindow): Promise<ShellLicenseResult> {
   for (let attempt = 0; ; attempt++) {
     const result = await checkLicense(API_URL, trustedKeys);
-    if (result.kind !== 'SERVICE_UNAVAILABLE') return result;
+    if (result.kind !== 'SERVICE_UNAVAILABLE' || serviceStopped) return result;
     if (attempt === 0) {
       await win.loadURL(
         shellPage('Starting NxGen services…', '<p>Waiting for the local NxGen License Service to start.</p>', 'info'),
       );
     }
-    if (SMOKE_TEST && attempt >= 2) return result;
+    if (SMOKE_TEST && attempt >= (app.isPackaged ? 40 : 2)) return result;
     await new Promise((r) => setTimeout(r, 3000));
   }
 }
@@ -77,11 +87,42 @@ function guardNavigation(win: BrowserWindow) {
   });
 }
 
+/** Starts the local service in a packaged app. Returns false, with a page explaining why, if it cannot. */
+async function bootService(win: BrowserWindow): Promise<boolean> {
+  if (!app.isPackaged || service) return true;
+  const userData = app.getPath('userData');
+  const settings = readServiceSettings(userData);
+  if (!settings) {
+    await win.loadURL(
+      shellPage(
+        'NxGen is not set up on this Mac',
+        `<p>The database settings were not found.</p><p>Expected: <code>${escapeHtml(path.join(userData, SERVICE_ENV_FILE))}</code></p>`,
+        'fail',
+      ),
+    );
+    return false;
+  }
+  const started = startService({ resourcesPath: process.resourcesPath, userDataPath: userData, port: SERVICE_PORT, localBuild: LOCAL_BUILD }, settings);
+  service = started.child;
+  serviceLog = started.logFile;
+  service.on('exit', () => {
+    serviceStopped = true;
+    service = null;
+  });
+  return true;
+}
+
+function stopService() {
+  service?.kill();
+  service = null;
+}
+
 async function createWindow(): Promise<void> {
+  const smokeShot = SMOKE_TEST ? process.env.NXGEN_SHELL_SMOKE_SHOT : undefined;
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
-    show: !SMOKE_TEST,
+    show: !SMOKE_TEST || !!smokeShot,
     title: 'NxGen Compliance Platform',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -95,7 +136,18 @@ async function createWindow(): Promise<void> {
     if (isMainFrame) console.error(`[nxgen-shell] failed to load ${url}: ${code} ${description}`);
   });
 
+  if (!(await bootService(win))) {
+    if (SMOKE_TEST) app.quit();
+    return;
+  }
   licenseResult = await waitForLicenseService(win);
+  if (serviceStopped && licenseResult.kind === 'SERVICE_UNAVAILABLE') {
+    await win.loadURL(
+      shellPage('NxGen could not start', `<p>The NxGen service stopped while starting. Check that this Mac can reach the database.</p><p>Details: <code>${escapeHtml(serviceLog)}</code></p>`, 'fail'),
+    );
+    if (SMOKE_TEST) app.quit();
+    return;
+  }
   console.log(`[nxgen-shell] trusted keys: ${trustedKeys.length}, license check: ${JSON.stringify(licenseResult)}`);
 
   if (licenseResult.kind === 'REJECTED') showRejected(win, licenseResult);
@@ -114,10 +166,26 @@ async function createWindow(): Promise<void> {
     }
   }
 
+  if (smokeShot) {
+    await new Promise((r) => setTimeout(r, 4000));
+    writeFileSync(smokeShot, (await win.webContents.capturePage()).toPNG());
+  }
   if (SMOKE_TEST) app.quit();
 }
 
+const onlyInstance = app.requestSingleInstanceLock();
+if (!onlyInstance) app.quit();
+app.on('second-instance', () => {
+  const [win] = BrowserWindow.getAllWindows();
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  }
+});
+app.on('will-quit', stopService);
+
 app.whenReady().then(() => {
+  if (!onlyInstance) return;
   void createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();

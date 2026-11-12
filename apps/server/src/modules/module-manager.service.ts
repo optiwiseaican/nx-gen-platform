@@ -19,6 +19,7 @@ import {
   VerifiedModulePackage,
 } from '@crescent/licensing';
 import type {
+  CalibrationRecord,
   ModuleContext,
   ModulePrincipal,
   ModuleTx,
@@ -33,6 +34,7 @@ import type { NxGenConfig } from '../config/nxgen.config';
 import { DatabaseService } from '../database/database.service';
 import { DevicesService } from '../devices/devices.service';
 import { GatewayService } from '../gateway/gateway.service';
+import { renderReport } from '../reports/report-pdf';
 import { LicensingService } from '../licensing/licensing.service';
 import { SignatureService } from '../signatures/signature.service';
 import type { SignatureInput } from '../signatures/signature.service';
@@ -539,7 +541,17 @@ export class ModuleManagerService implements OnModuleInit {
             origin,
             manifest.id,
           ),
+        forDevice: async (principal: ModulePrincipal, deviceId) => {
+          const d = await this.devices.get(
+            deviceId,
+            principal as Parameters<DevicesService['get']>[1],
+          );
+          if (!types.has(d.instrumentType))
+            throw new Error('Not this module’s instrument');
+          return d.calibrations as unknown as CalibrationRecord[];
+        },
       },
+      reports: { pdf: renderReport },
       gateway: {
         registerHandler: (h) => {
           if (!types.has(h.instrumentType))
@@ -552,6 +564,11 @@ export class ModuleManagerService implements OnModuleInit {
           if (!types.has(device.instrumentType))
             throw new Error('Not this module’s instrument');
           return this.gateway.persist(device, packet, kind, payload);
+        },
+        send: (device, fields, options) => {
+          if (!types.has(device.instrumentType))
+            throw new Error('Not this module’s instrument');
+          return this.gateway.send(device, fields, options);
         },
       },
     };

@@ -421,6 +421,12 @@ describeDb(
         migrations: [
           { name: '001_ph_buffer_sets.sql', applied: false },
           { name: '002_ph_measurements.sql', applied: false },
+          { name: '003_ph_acceptance_profiles.sql', applied: false },
+          { name: '004_ph_guided_calibration.sql', applied: false },
+          { name: '005_ph_logs.sql', applied: false },
+          { name: '006_ph_alarms_alerts.sql', applied: false },
+          { name: '007_ph_probes.sql', applied: false },
+          { name: '008_ph_sample_lists.sql', applied: false },
         ],
       });
       await expect(
@@ -470,6 +476,12 @@ describeDb(
       ).toEqual([
         { filename: '001_ph_buffer_sets.sql' },
         { filename: '002_ph_measurements.sql' },
+        { filename: '003_ph_acceptance_profiles.sql' },
+        { filename: '004_ph_guided_calibration.sql' },
+        { filename: '005_ph_logs.sql' },
+        { filename: '006_ph_alarms_alerts.sql' },
+        { filename: '007_ph_probes.sql' },
+        { filename: '008_ph_sample_lists.sql' },
       ]);
       await relogin('analyst');
       expect(people.analyst.p.permissions).toContain('ph.view');
@@ -717,6 +729,7 @@ describeDb(
         'Offset at pH 7',
         'Fit r²',
         'Temperature',
+        'Acceptance limits',
       ]);
       expect(c.results).toMatchObject({
         temperatureSource: 'INSTRUMENT',
@@ -755,6 +768,62 @@ describeDb(
       expect(
         (await devices.get(deviceId, people.analyst.p)).readiness,
       ).toMatchObject({ state: 'READY', usable: true });
+    });
+
+    it('shows the meter status it reports and switches ATC from NxGen', async () => {
+      // Flags arrive as JSON booleans in the meter's status frame.
+      const [status] = await gateway.simulate([
+        JSON.stringify({
+          DEVICE_ID: 'ph_dev_001',
+          BATTERY_PERCENT: '76',
+          IS_CHARGING: false,
+          PROBE_CONNECTED: false,
+          TEMP_SENSOR_CONNECTED: true,
+          DEVICE_STATUS: 'ONLINE',
+          ATC: 0,
+        }),
+      ]);
+      expect(status).toMatchObject({ accepted: true, kind: 'STATUS' });
+      const view = await call(
+        'analyst',
+        'GET',
+        `/instruments/${deviceId}/live`,
+      );
+      expect(view).toMatchObject({
+        live: {
+          values: { BATTERY: 76, IS_CHARGING: 0, PROBE_CONNECTED: 0, ATC: 0 },
+          text: { DEVICE_STATUS: 'ONLINE' },
+        },
+      });
+
+      await expect(
+        call('analyst', 'POST', `/instruments/${deviceId}/atc`, {
+          enabled: 'yes',
+        }),
+      ).rejects.toMatchObject({ status: 400, field: 'enabled' });
+      await expect(
+        call('manager', 'POST', `/instruments/${deviceId}/atc`, {
+          enabled: true,
+        }),
+      ).rejects.toThrow(/forbidden/);
+      await expect(
+        call('analyst', 'POST', `/instruments/${deviceId}/atc`, {
+          enabled: true,
+        }),
+      ).resolves.toEqual({ sent: true });
+
+      const [sent] = await db.query<{ raw: string; direction: string }>(
+        "SELECT raw, direction FROM device_messages WHERE kind = 'COMMAND' ORDER BY id DESC LIMIT 1",
+      );
+      expect(sent).toEqual({
+        raw: '{"ATC":1,"DEVICE_ID":"ph_dev_001"}',
+        direction: 'OUT',
+      });
+      const [audited] = await audit.list({ action: 'PH_ATC_COMMAND' });
+      expect(audited).toMatchObject({
+        result: 'SUCCESS',
+        actor: people.analyst.p.userId,
+      });
     });
 
     it('pH measurements: only a stable reading from the instrument, kept with its packets, then signed review and approval', async () => {
@@ -963,6 +1032,735 @@ describeDb(
       expect(list.map((x) => x.code)).toContain('PHM-0001');
     });
 
+    it('acceptance limits are edited as approved versions and grade later calibrations', async () => {
+      const readings = [
+        { bufferPh: 4.01, mv: 165.3 },
+        { bufferPh: 7, mv: 0 },
+        { bufferPh: 10.01, mv: -165.3 },
+      ];
+      const calibrate = () =>
+        call('analyst', 'POST', `/instruments/${deviceId}/calibrations`, {
+          source: 'MANUAL',
+          temperatureC: 25,
+          readings,
+        }) as Promise<{ calibrationId: string; outcome: string }>;
+      const limits = {
+        slopePassMin: 90,
+        slopePassMax: 105,
+        slopeWarnMin: 85,
+        slopeWarnMax: 108,
+        offsetPassMaxAbs: 30,
+        offsetWarnMaxAbs: 45,
+        deviationMaxPh: 0.05,
+      };
+      const reason = 'Aligned with SOP QC-114 revision 3';
+      const view = () =>
+        call('analyst', 'GET', '/acceptance-limits') as Promise<{
+          inForce: { version: number | null };
+          versions: {
+            id: string;
+            version: number;
+            workflow: { id: string; state: string };
+          }[];
+        }>;
+      const before = await view();
+      expect(before.inForce.version).toBeNull();
+      expect(
+        await call('analyst', 'GET', `/instruments/${deviceId}/live`),
+      ).toMatchObject({ limitsVersion: null, limits: { slopePassMin: 95 } });
+
+      await expect(
+        call('analyst', 'POST', '/acceptance-limits', { limits, reason }),
+      ).rejects.toThrow(/forbidden/);
+      await expect(
+        call('reviewer', 'POST', '/acceptance-limits', {
+          limits: { ...limits, slopeWarnMin: 40 },
+          reason,
+        }),
+      ).rejects.toMatchObject({ status: 400, field: 'limits' });
+      await expect(
+        call('reviewer', 'POST', '/acceptance-limits', {
+          limits,
+          reason: 'short',
+        }),
+      ).rejects.toMatchObject({ status: 400, field: 'reason' });
+
+      await call('reviewer', 'POST', '/acceptance-limits', { limits, reason });
+      const [draft] = (await view()).versions;
+      expect(draft).toMatchObject({
+        version: 1,
+        workflow: { state: 'DRAFT' },
+      });
+      // Only one version at a time, and a draft changes nothing yet.
+      await expect(
+        call('reviewer', 'POST', '/acceptance-limits', {
+          limits: { ...limits, slopePassMax: 104 },
+          reason,
+        }),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(
+        await call('analyst', 'GET', `/instruments/${deviceId}/live`),
+      ).toMatchObject({ limitsVersion: null, limits: { slopePassMin: 95 } });
+
+      await workflow.act(
+        people.reviewer.p,
+        draft.workflow.id,
+        'SUBMIT',
+        { signature: sign(people.reviewer) },
+        ORIGIN,
+      );
+      // The database refuses changes once submitted.
+      await expect(
+        db.transaction({ actorId: people.reviewer.p.userId }, (q) =>
+          q.query(
+            'UPDATE ph_acceptance_profiles SET slope_pass_min = 50 WHERE id = $1',
+            [draft.id],
+          ),
+        ),
+      ).rejects.toThrow(/NXGEN-WF-/);
+      await workflow.act(
+        people.manager.p,
+        draft.workflow.id,
+        'APPROVE',
+        { signature: sign(people.manager) },
+        ORIGIN,
+      );
+      expect((await view()).inForce.version).toBe(1);
+      const graded = await calibrate();
+      expect(graded.outcome).toBe('PASS');
+      const [stored] = await db.query<{ limits: { version: number } }>(
+        'SELECT limits FROM calibration_records WHERE id = $1',
+        [graded.calibrationId],
+      );
+      expect(stored.limits).toMatchObject({ version: 1, slopePassMin: 90 });
+      // Close it: an instrument can have only one calibration open.
+      const recorded = (
+        await devices.get(deviceId, people.analyst.p)
+      ).calibrations.find((c) => c.id === graded.calibrationId)!;
+      await workflow.act(
+        people.analyst.p,
+        recorded.workflow.id,
+        'SUBMIT',
+        { signature: sign(people.analyst) },
+        ORIGIN,
+      );
+      await workflow.act(
+        people.manager.p,
+        recorded.workflow.id,
+        'APPROVE',
+        { signature: sign(people.manager) },
+        ORIGIN,
+      );
+
+      // The next approved version retires this one.
+      const stricter = { ...limits, slopePassMin: 92 };
+      await call('reviewer', 'POST', '/acceptance-limits', {
+        limits: stricter,
+        reason,
+      });
+      const [second] = (await view()).versions;
+      await workflow.act(
+        people.reviewer.p,
+        second.workflow.id,
+        'SUBMIT',
+        { signature: sign(people.reviewer) },
+        ORIGIN,
+      );
+      await workflow.act(
+        people.manager.p,
+        second.workflow.id,
+        'APPROVE',
+        { signature: sign(people.manager) },
+        ORIGIN,
+      );
+      const after = await view();
+      expect(after.inForce.version).toBe(2);
+      expect(after.versions.map((v) => v.workflow.state)).toEqual([
+        'APPROVED',
+        'SUPERSEDED',
+      ]);
+      await expect(
+        db.transaction({ actorId: people.root.p.userId }, (q) =>
+          q.query('DELETE FROM ph_acceptance_profiles WHERE id = $1', [
+            second.id,
+          ]),
+        ),
+      ).rejects.toThrow(/NXGEN-/);
+    });
+
+    it('runs a guided calibration from NxGen, and keeps the commands and replies', async () => {
+      const path = `/instruments/${deviceId}/guided-calibration`;
+      type Run = {
+        points: { slot: number; status: string }[];
+        saveProblem: string | null;
+      };
+      const telemetry = {
+        PH_VAL: '7.00',
+        TEMP_VAL: '25.0',
+        MV_VAL: '0.00',
+        STABLE: '1',
+        BATTERY: '85',
+      };
+      const settings = {
+        pointCount: 3,
+        timerSeconds: 5,
+        requireStable: false,
+        buffers: { 1: 1.68, 2: 4.01, 3: 7, 4: 10.01, 5: 12.45 },
+      };
+      await expect(
+        call(
+          'analyst',
+          'PUT',
+          `/instruments/${deviceId}/calibration-settings`,
+          { settings, reason: 'Three buffers for routine use' },
+        ),
+      ).rejects.toThrow(/forbidden/);
+      await call(
+        'reviewer',
+        'PUT',
+        `/instruments/${deviceId}/calibration-settings`,
+        { settings, reason: 'Three buffers for routine use' },
+      );
+
+      // A guided calibration needs an active probe assigned.
+      await feed(telemetry);
+      await expect(call('analyst', 'POST', path, {})).rejects.toThrow(
+        /Assign a probe/,
+      );
+      await relogin('itadmin');
+      const reason = 'New probe fitted for QC use';
+      const { id: probeId } = (await call('itadmin', 'POST', '/probes', {
+        code: 'PRB-1',
+        type: 'Glass',
+        reason,
+      })) as { id: string };
+      await call('itadmin', 'PUT', `/instruments/${deviceId}/probe`, {
+        probeId,
+        temperatureSensorId: 'TS-1',
+        reason,
+      });
+
+      // An earlier test left the probe reported as disconnected.
+      await feed(telemetry);
+      await expect(call('analyst', 'POST', path, {})).rejects.toThrow(
+        /pH probe/,
+      );
+      const [blocked] = await audit.list({ action: 'PH_CALIBRATION_BLOCKED' });
+      expect(blocked.result).toBe('FAILURE');
+      await gateway.simulate([
+        JSON.stringify({ DEVICE_ID: 'ph_dev_001', PROBE_CONNECTED: true }),
+      ]);
+      await feed(telemetry);
+
+      const view = async () =>
+        ((await call('analyst', 'GET', path)) as { run: Run }).run;
+      await call('analyst', 'POST', path, {});
+      expect((await view()).points.map((p) => p.slot)).toEqual([2, 3, 4]);
+      await expect(call('analyst', 'POST', path, {})).rejects.toMatchObject({
+        status: 409,
+      });
+      await expect(
+        call('reviewer', 'POST', `${path}/measure`, { slot: 2 }),
+      ).rejects.toThrow(/forbidden|started by/);
+
+      const replies: [number, string, string][] = [
+        [2, '177.30', '4.01'],
+        [3, '0.10', '7.00'],
+        [4, '-177.80', '10.02'],
+      ];
+      for (const [slot, mv, post] of replies) {
+        await call('analyst', 'POST', `${path}/measure`, { slot });
+        for (let i = 0; ; i++) {
+          await feed(telemetry);
+          const p = (await view()).points.find((x) => x.slot === slot)!;
+          if (p.status === 'WAITING') break;
+          if (i > 40) throw new Error(`Point ${slot} is ${p.status}`);
+          await sleep(500);
+        }
+        await feed({
+          ...telemetry,
+          CAL: String(slot * 10 + 1),
+          [`MV_${slot}`]: mv,
+          [`POST_VAL_${slot}`]: post,
+        });
+      }
+      expect((await view()).saveProblem).toBeNull();
+
+      const saved = (await call('analyst', 'POST', `${path}/save`, {
+        remarks: 'Buffer lots B-1, B-2, B-3',
+        bufferLot: 'LOT-77',
+        bufferExpiry: '2020-01-31',
+      })) as { calibrationId: string; outcome: string; dataSource: string };
+      expect(saved).toMatchObject({ outcome: 'PASS', dataSource: 'SIMULATED' });
+      expect(await view()).toBeNull();
+
+      const commands = await db.query<{ raw: string }>(
+        "SELECT raw FROM device_messages WHERE kind = 'COMMAND' ORDER BY id",
+      );
+      const raw = commands.map((c) => c.raw);
+      expect(raw).toContain('{"CAL":20,"DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain('{"B_2":"4.01","DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain('{"CAL":21,"DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain('{"CAL":41,"DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain('{"CAL_SAVE":"1","DEVICE_ID":"ph_dev_001"}');
+      // The per-second keep-alive frames are not stored.
+      expect(raw.filter((r) => r.includes('"B_2"')).length).toBe(1);
+
+      const [record] = await db.query<{
+        limits: { version: number };
+        results: { guided: boolean; deviations: unknown[] };
+        source_messages: string[];
+      }>(
+        'SELECT limits, results, source_messages FROM calibration_records WHERE id = $1',
+        [saved.calibrationId],
+      );
+      expect(record.limits.version).toBe(2);
+      expect(record.results.guided).toBe(true);
+      expect(record.results.deviations).toHaveLength(3);
+      const stored = await db.query<{ raw: string }>(
+        'SELECT raw FROM device_messages WHERE id = ANY($1::bigint[])',
+        [record.source_messages],
+      );
+      expect(stored.some((m) => m.raw.includes('"CAL":"21"'))).toBe(true);
+
+      const recorded = (
+        await devices.get(deviceId, people.analyst.p)
+      ).calibrations.find((c) => c.id === saved.calibrationId)!;
+      await workflow.act(
+        people.analyst.p,
+        recorded.workflow.id,
+        'SUBMIT',
+        { signature: sign(people.analyst) },
+        ORIGIN,
+      );
+      await workflow.act(
+        people.manager.p,
+        recorded.workflow.id,
+        'APPROVE',
+        { signature: sign(people.manager) },
+        ORIGIN,
+      );
+    });
+
+    it('logs readings by hand and from the meter, keeps them, and exports them', async () => {
+      const base = `/instruments/${deviceId}`;
+      const telemetry = {
+        PH_VAL: '7.05',
+        TEMP_VAL: '25.2',
+        MV_VAL: '-2.10',
+        STABLE: '1',
+        BATTERY: '85',
+      };
+      type Page = {
+        rows: {
+          method: string;
+          ph: number;
+          product: string;
+          loggedBy: string;
+        }[];
+        total: number;
+      };
+      const logs = (q = '') =>
+        call('analyst', 'GET', `/logs${q ? `?${q}` : ''}`) as Promise<Page>;
+      const query = async (search: string) =>
+        (await manager.route('ph', 'GET', '/logs')!.route.handler({
+          principal: people.analyst.p,
+          params: {},
+          query: { search, pageSize: '100' },
+          body: undefined,
+          origin: ORIGIN,
+        })) as Page;
+
+      await feed({ ...telemetry, MV_VAL: 'nan' });
+      await expect(call('analyst', 'POST', `${base}/logs`, {})).rejects.toThrow(
+        /millivolt/,
+      );
+      await feed(telemetry);
+      await expect(call('itadmin', 'POST', `${base}/logs`, {})).rejects.toThrow(
+        /forbidden/,
+      );
+      await call('analyst', 'POST', `${base}/logs`, {
+        product: '=Paracetamol',
+        batch: 'B-77',
+      });
+      expect((await query('B-77')).rows[0]).toMatchObject({
+        method: 'MANUAL',
+        ph: 7.05,
+      });
+
+      // Button mode: the meter's LOG frame creates an entry, once.
+      await call('analyst', 'POST', `${base}/logging/start`, {
+        mode: 'BUTTON',
+        batch: 'B-BTN',
+      });
+      await expect(
+        call('analyst', 'POST', `${base}/logs`, {}),
+      ).rejects.toMatchObject({ status: 409 });
+      const press = { ...telemetry, LOG: '1' };
+      await feed(press);
+      await feed(press);
+      expect((await query('B-BTN')).total).toBe(1);
+      await call('analyst', 'POST', `${base}/logging/stop`, {});
+
+      // Stable mode: HOLD logs the reading and re-arms the meter.
+      await call('analyst', 'POST', `${base}/logging/start`, {
+        mode: 'STABLE',
+        batch: 'B-HOLD',
+      });
+      await feed({ ...telemetry, HOLD: '1' });
+      expect((await query('B-HOLD')).rows[0]).toMatchObject({
+        method: 'STABLE',
+      });
+      await call('analyst', 'POST', `${base}/logging/stop`, {});
+
+      // Interval mode: timed here, with the interval told to the meter.
+      await call('analyst', 'POST', `${base}/logging/start`, {
+        mode: 'INTERVAL',
+        intervalSeconds: 1,
+        batch: 'B-INT',
+      });
+      for (let i = 0; i < 8; i++) {
+        await feed(telemetry);
+        await sleep(400);
+      }
+      await call('analyst', 'POST', `${base}/logging/stop`, {});
+      const timed = await query('B-INT');
+      expect(timed.total).toBeGreaterThanOrEqual(2);
+      const after = timed.total;
+      await sleep(1200);
+      expect((await query('B-INT')).total).toBe(after);
+
+      const raw = (
+        await db.query<{ raw: string }>(
+          "SELECT raw FROM device_messages WHERE kind = 'COMMAND' ORDER BY id",
+        )
+      ).map((c) => c.raw);
+      expect(raw).toContain('{"LOG":"3","DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain('{"LOG":"1","DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain('{"HOLD":"0","DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain(
+        '{"LOG_INTERVAL":"0.0167","LOG":"2","DEVICE_ID":"ph_dev_001"}',
+      );
+      expect(raw).toContain('{"LOG":"0","HOLD":"0","DEVICE_ID":"ph_dev_001"}');
+
+      const [started] = await audit.list({ action: 'PH_LOGGING_STOPPED' });
+      expect(started.details).toMatchObject({ mode: 'INTERVAL' });
+
+      // Every entry points to a stored original packet, and cannot be changed.
+      const [entry] = await db.query<{ id: string; raw: string }>(
+        `SELECT e.id, m.raw FROM ph_log_entries e JOIN device_messages m ON m.id = e.source_message ORDER BY e.id LIMIT 1`,
+      );
+      expect(entry.raw).toContain('"PH_VAL":"7.05"');
+      await expect(
+        db.query('UPDATE ph_log_entries SET ph = 1 WHERE id = $1', [entry.id]),
+      ).rejects.toThrow(/NXGEN-PH-005/);
+      await expect(
+        db.query('DELETE FROM ph_log_entries WHERE id = $1', [entry.id]),
+      ).rejects.toThrow(/NXGEN-PH-005/);
+
+      // Filter by method, and export what the filter shows.
+      const exported = (await manager
+        .route('ph', 'GET', '/logs/export')!
+        .route.handler({
+          principal: people.analyst.p,
+          params: {},
+          query: { method: 'MANUAL' },
+          body: undefined,
+          origin: ORIGIN,
+        })) as { kind: string; data: Buffer; fileName: string };
+      expect(exported.kind).toBe('file');
+      const csv = exported.data.toString('utf8');
+      expect(csv.trim().split('\r\n')).toHaveLength(2);
+      expect(csv).toContain(",'=Paracetamol,");
+      expect(csv).toContain(',-2.1,');
+      const [recorded] = await audit.list({ action: 'PH_LOGS_EXPORTED' });
+      expect(recorded.details).toMatchObject({ rows: 1, format: 'CSV' });
+      expect((await logs()).total).toBeGreaterThan(3);
+    });
+
+    it('raises a range alarm once, closes it when the reading returns, and keeps the record', async () => {
+      const base = `/instruments/${deviceId}`;
+      type Alert = {
+        id: number;
+        code: string;
+        status: string;
+        message: string;
+        resolvedBy: string | null;
+      };
+      const reading = (ph: string) =>
+        feed({ PH_VAL: ph, TEMP_VAL: '25.0', MV_VAL: '0.00', BATTERY: '85' });
+      const breaches = async () =>
+        (
+          (await call('analyst', 'GET', '/alerts')) as { rows: Alert[] }
+        ).rows.filter((a) => a.code === 'PH-ALARM-LIMIT-BREACH');
+
+      await expect(
+        call('analyst', 'POST', `${base}/alarm/start`, {
+          minPh: 8,
+          maxPh: 7,
+        }),
+      ).rejects.toMatchObject({ status: 400, field: 'range' });
+      await reading('7.00');
+      await call('analyst', 'POST', `${base}/alarm/start`, {
+        minPh: 6.5,
+        maxPh: 7.5,
+      });
+      expect(await breaches()).toEqual([]);
+
+      await reading('7.80');
+      await reading('7.90');
+      const [raised, ...others] = await breaches();
+      expect(others).toEqual([]);
+      expect(raised).toMatchObject({ status: 'OPEN' });
+      expect(raised.message).toContain('7.80');
+      const shown = (await call(
+        'analyst',
+        'GET',
+        '/alerts/active',
+      )) as unknown as Alert[];
+      expect(shown.map((a) => a.id)).toEqual([raised.id]);
+
+      await call('analyst', 'POST', `/alerts/${raised.id}/acknowledge`, {});
+      expect(await call('analyst', 'GET', '/alerts/active')).toEqual([]);
+      await expect(
+        call('analyst', 'POST', `/alerts/${raised.id}/resolve`, {
+          comment: 'Trying to close it by hand',
+        }),
+      ).rejects.toMatchObject({ status: 409 });
+
+      await reading('7.20');
+      expect((await breaches())[0]).toMatchObject({
+        status: 'RESOLVED',
+        resolvedBy: 'System',
+      });
+
+      // A later excursion is a new alarm; stopping monitoring closes it.
+      await reading('6.00');
+      expect(await breaches()).toHaveLength(2);
+      await call('analyst', 'POST', `${base}/alarm/stop`, {});
+      expect((await breaches())[0].status).toBe('RESOLVED');
+      await reading('1.00');
+      expect(await breaches()).toHaveLength(2);
+
+      // Pre-calibration failures were recorded by the earlier guided test.
+      const all = (await call('analyst', 'GET', '/alerts')) as {
+        rows: Alert[];
+      };
+      const probe = all.rows.find(
+        (a) => a.code === 'PH-PRECAL-PROBE-NOT-CONNECTED',
+      )!;
+      expect(probe.status).toBe('OPEN');
+      await expect(
+        call('analyst', 'POST', `/alerts/${probe.id}/resolve`, {
+          comment: 'short',
+        }),
+      ).rejects.toMatchObject({ status: 400, field: 'comment' });
+      await call('analyst', 'POST', `/alerts/${probe.id}/resolve`, {
+        comment: 'Probe cable reseated and checked',
+      });
+
+      await expect(
+        db.query('DELETE FROM ph_alerts WHERE id = $1', [raised.id]),
+      ).rejects.toThrow(/NXGEN-PH-006/);
+      await expect(
+        db.query("UPDATE ph_alerts SET message = 'x' WHERE id = $1", [
+          probe.id,
+        ]),
+      ).rejects.toThrow(/NXGEN-PH-007/);
+      await expect(
+        db.query("UPDATE ph_alerts SET status = 'OPEN' WHERE id = $1", [
+          probe.id,
+        ]),
+      ).rejects.toThrow(/NXGEN-PH-007/);
+
+      await expect(
+        call('analyst', 'GET', `${base}/trend`),
+      ).resolves.toMatchObject({
+        simulated: true,
+        alarm: null,
+      });
+      const alertsFor = (device: string) => {
+        const h = manager.route('ph', 'GET', '/alerts')!;
+        return h.route.handler({
+          principal: people.analyst.p,
+          params: {},
+          query: { device },
+          body: undefined,
+          origin: ORIGIN,
+        }) as Promise<{ total: number }>;
+      };
+      expect((await alertsFor(deviceId)).total).toBeGreaterThan(1);
+      expect(
+        (await alertsFor('00000000-0000-4000-8000-000000000000')).total,
+      ).toBe(0);
+      const [event] = await audit.list({ action: 'PH_ALERT_RAISED' });
+      expect(event.details).toMatchObject({ code: 'PH-ALARM-LIMIT-BREACH' });
+    });
+
+    it('lists calibrations and prints them, with the export recorded', async () => {
+      const route = (path: string) => manager.route('ph', 'GET', path)!;
+      const list = (await route('/calibrations').route.handler({
+        principal: people.analyst.p,
+        params: {},
+        query: { device: deviceId, pageSize: '100' },
+        body: undefined,
+        origin: ORIGIN,
+      })) as {
+        rows: {
+          id: string;
+          code: string;
+          guided: boolean;
+          state: string;
+          limitsVersion: number | null;
+        }[];
+        total: number;
+      };
+      const guided = list.rows.find((r) => r.guided)!;
+      expect(guided).toMatchObject({ state: 'APPROVED', limitsVersion: 2 });
+
+      const hit = route(
+        `/instruments/${deviceId}/calibrations/${guided.id}/report`,
+      );
+      const file = (await hit.route.handler({
+        principal: people.analyst.p,
+        params: hit.params,
+        query: {},
+        body: undefined,
+        origin: ORIGIN,
+      })) as { kind: string; data: Buffer; contentType: string };
+      expect(file).toMatchObject({
+        kind: 'file',
+        contentType: 'application/pdf',
+      });
+      expect(file.data.subarray(0, 5).toString()).toBe('%PDF-');
+      const [audited] = await audit.list({
+        action: 'PH_CALIBRATION_REPORT_EXPORTED',
+      });
+      expect(audited.details).toMatchObject({
+        code: guided.code,
+        format: 'PDF',
+      });
+
+      const logsPdf = (await route('/logs/export').route.handler({
+        principal: people.analyst.p,
+        params: {},
+        query: { format: 'pdf' },
+        body: undefined,
+        origin: ORIGIN,
+      })) as { data: Buffer; fileName: string };
+      expect(logsPdf.data.subarray(0, 5).toString()).toBe('%PDF-');
+      expect(logsPdf.fileName).toMatch(/\.pdf$/);
+
+      const [recorded] = await db.query<{
+        results: { bufferLot: string; bufferExpiry: string };
+      }>('SELECT results FROM calibration_records WHERE id = $1', [guided.id]);
+      expect(recorded.results).toMatchObject({
+        bufferLot: 'LOT-77',
+        bufferExpiry: '2020-01-31',
+      });
+      const alerts = (await call('analyst', 'GET', '/alerts')) as {
+        rows: { code: string }[];
+      };
+      expect(alerts.rows.map((a) => a.code)).toContain('PH-CAL-BUFFER-EXPIRED');
+
+      await feed({ PH_VAL: '7.00', TEMP_VAL: '25.0', MV_VAL: '0.00' });
+      await expect(
+        call('analyst', 'POST', `/instruments/${deviceId}/meter-settings`, {
+          thermistor: 'PTC',
+        }),
+      ).rejects.toThrow(/forbidden/);
+      await call(
+        'reviewer',
+        'POST',
+        `/instruments/${deviceId}/meter-settings`,
+        { thermistor: 'PTC', atcReferenceC: 25 },
+      );
+      const raw = (
+        await db.query<{ raw: string }>(
+          "SELECT raw FROM device_messages WHERE kind = 'COMMAND'",
+        )
+      ).map((c) => c.raw);
+      expect(raw).toContain('{"THERM_VAL":"1","DEVICE_ID":"ph_dev_001"}');
+      expect(raw).toContain('{"R_C":25,"DEVICE_ID":"ph_dev_001"}');
+    });
+
+    it('keeps a probe register and reports the health of each probe from its own calibrations', async () => {
+      const reason = 'Routine probe management';
+      const health = () =>
+        call(
+          'analyst',
+          'GET',
+          `/instruments/${deviceId}/probe-health`,
+        ) as Promise<{
+          probe: { code: string } | null;
+          health: { status: string; usageCount: number; drift: number | null };
+        }>;
+      const view = await health();
+      expect(view.probe?.code).toBe('PRB-1');
+      expect(view.health.usageCount).toBe(1);
+      expect(view.health.drift).toBeNull();
+
+      await expect(
+        call('analyst', 'POST', '/probes', { code: 'X', reason }),
+      ).rejects.toThrow(/forbidden/);
+      await expect(
+        call('itadmin', 'POST', '/probes', { code: 'PRB-1', reason }),
+      ).rejects.toMatchObject({ status: 409 });
+      await expect(
+        call('itadmin', 'POST', '/probes', { code: 'PRB-2', reason: 'short' }),
+      ).rejects.toMatchObject({ status: 400, field: 'reason' });
+
+      const { id: spare } = (await call('itadmin', 'POST', '/probes', {
+        code: 'PRB-2',
+        reason,
+      })) as { id: string };
+      const probes = (await call('analyst', 'GET', '/probes')) as unknown as {
+        id: string;
+        code: string;
+        deviceCode: string | null;
+      }[];
+      const fitted = probes.find((p) => p.code === 'PRB-1')!;
+      expect(fitted.deviceCode).not.toBeNull();
+
+      const edit = (id: string, status: string) =>
+        call('itadmin', 'PUT', `/probes/${id}`, { status, reason });
+      await expect(edit(fitted.id, 'RETIRED')).rejects.toThrow(/another probe/);
+
+      // A blocked probe stops calibration and shows on the health panel.
+      await edit(fitted.id, 'BLOCKED');
+      expect((await health()).health.status).toBe('UNAUTHORIZED');
+      await feed({
+        PH_VAL: '7.00',
+        TEMP_VAL: '25.0',
+        MV_VAL: '0.00',
+        BATTERY: '85',
+      });
+      await expect(
+        call(
+          'analyst',
+          'POST',
+          `/instruments/${deviceId}/guided-calibration`,
+          {},
+        ),
+      ).rejects.toThrow(/PRB-1 is blocked/);
+      await edit(fitted.id, 'ACTIVE');
+
+      // The spare has no history, and a retired probe cannot return.
+      await call('itadmin', 'PUT', `/instruments/${deviceId}/probe`, {
+        probeId: spare,
+        temperatureSensorId: 'TS-2',
+        reason,
+      });
+      expect((await health()).health.usageCount).toBe(0);
+      await edit(fitted.id, 'RETIRED');
+      await expect(edit(fitted.id, 'ACTIVE')).rejects.toThrow(/cannot return/);
+      await expect(
+        db.transaction({ actorId: people.root.p.userId }, (q) =>
+          q.query('DELETE FROM ph_probes WHERE id = $1', [fitted.id]),
+        ),
+      ).rejects.toThrow(/NXGEN-DB-002/);
+    });
+
     it('a manual pH calibration is validated by the module and marked MANUAL', async () => {
       await expect(
         call('analyst', 'POST', `/instruments/${deviceId}/calibrations`, {
@@ -1043,6 +1841,78 @@ describeDb(
           'ph',
         ),
       ).rejects.toThrow(/module that provides/);
+    });
+
+    it('summarises every instrument for the Dashboard and Devices screens', async () => {
+      const dash = (await call('analyst', 'GET', '/dashboard')) as {
+        devices: Record<string, unknown>[];
+        summary: { total: number; calibration: Record<string, number> };
+        locations: string[];
+      };
+      expect(dash.summary.total).toBe(dash.devices.length);
+      const row = dash.devices.find((d) => d.id === deviceId) as Record<
+        string,
+        unknown
+      >;
+      expect(row).toMatchObject({
+        deviceIdentifier: 'ph_dev_001',
+        calibrationBucket: 'VALID',
+        batteryCondition: expect.any(String),
+        openAlerts: expect.any(Number),
+        criticalAlerts: expect.any(Number),
+      });
+      expect(row.calibration).toMatchObject({
+        code: expect.any(String),
+        performedBy: expect.any(String),
+        state: 'APPROVED',
+      });
+      expect(typeof row.lastActivityAt).toBe('string');
+      expect(dash.summary.calibration.valid).toBeGreaterThanOrEqual(1);
+      await call('analyst', 'POST', '/dashboard/refresh');
+      const [refreshed] = await audit.list({
+        action: 'PH_DASHBOARD_REFRESHED',
+      });
+      expect(refreshed.details).toMatchObject({ devices: dash.devices.length });
+    });
+
+    it('keeps the saved product, batch and AR lists; removing an entry needs a reason', async () => {
+      const { id } = (await call('analyst', 'POST', '/sample-lists', {
+        kind: 'PRODUCT',
+        value: ' Paracetamol oral suspension ',
+      })) as { id: string };
+      await expect(
+        call('analyst', 'POST', '/sample-lists', {
+          kind: 'PRODUCT',
+          value: 'paracetamol ORAL suspension',
+        }),
+      ).rejects.toThrow(/already in the list/);
+      await expect(
+        call('analyst', 'POST', '/sample-lists', { kind: 'BATCH', value: 'NA' }),
+      ).rejects.toThrow(/Enter the batch/);
+      await expect(
+        call('manager', 'POST', '/sample-lists', { kind: 'AR', value: 'AR-1' }),
+      ).rejects.toThrow(/forbidden: ph.measure/);
+      expect(await call('manager', 'GET', '/sample-lists')).toEqual([
+        { id, kind: 'PRODUCT', value: 'Paracetamol oral suspension' },
+      ]);
+      await expect(
+        call('analyst', 'POST', `/sample-lists/${id}/remove`, { reason: 'typo' }),
+      ).rejects.toThrow(/reason/);
+      await call('analyst', 'POST', `/sample-lists/${id}/remove`, {
+        reason: 'Product discontinued in QC Lab 2',
+      });
+      expect(await call('analyst', 'GET', '/sample-lists')).toEqual([]);
+      await expect(
+        call('analyst', 'POST', `/sample-lists/${id}/remove`, {
+          reason: 'Product discontinued in QC Lab 2',
+        }),
+      ).rejects.toThrow(/not found/);
+      // Once removed, the same value can be saved again.
+      await call('analyst', 'POST', '/sample-lists', {
+        kind: 'PRODUCT',
+        value: 'Paracetamol oral suspension',
+      });
+      expect(await call('analyst', 'GET', '/sample-lists')).toHaveLength(1);
     });
 
     it('disabling hides the module and blocks its instruments; data is kept; enabling restores it', async () => {
@@ -1151,7 +2021,7 @@ describeDb(
       // Migrations already applied are not run twice.
       expect(
         await db.query('SELECT filename FROM module_migrations'),
-      ).toHaveLength(2);
+      ).toHaveLength(8);
     });
 
     it('leaves the audit chain intact', async () => {

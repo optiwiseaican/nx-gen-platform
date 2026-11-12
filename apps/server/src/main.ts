@@ -55,6 +55,9 @@ async function bootstrap() {
     },
   );
 
+  // Desktop app: the exported screens are served from the same local address as the API.
+  if (process.env.NXGEN_WEB_DIR) app.useStaticAssets(process.env.NXGEN_WEB_DIR);
+
   // Dev: the Next.js dev server runs on another origin. In packaged builds the
   // UI is served from the same origin (or loaded by Electron), so no CORS.
   if (process.env.NODE_ENV !== 'production') {

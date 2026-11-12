@@ -12,7 +12,7 @@ export interface Principal {
   passwordExpiresAt: string | null;
   sessionId: string;
   /** When this session ends: after inactivity, and at the latest. */
-  session?: { idleExpiresAt: string; expiresAt: string };
+  session?: { idleExpiresAt: string; expiresAt: string; startedAt?: string };
   /** Inactivity sign-out in force for this account (its own setting or the system's). */
   sessionIdleMinutes?: number;
 }

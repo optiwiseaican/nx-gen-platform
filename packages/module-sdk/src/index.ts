@@ -85,6 +85,62 @@ export interface InstrumentPacket {
   receivedAt: string;
 }
 
+/** One column of a report table; widths are shared out by weight. */
+export interface ReportColumn {
+  title: string;
+  weight: number;
+}
+
+export interface ReportSection {
+  heading?: string;
+  columns: ReportColumn[];
+  /** alertCell prints that cell in red; below adds full-width lines under the row. */
+  rows: { cells: string[]; alertCell?: number; below?: string[] }[];
+  /** Shown when there are no rows. */
+  empty?: string;
+}
+
+export interface ReportInput {
+  title: string;
+  layout?: 'landscape' | 'portrait';
+  /** Printed in red at the top of every page, e.g. "DRAFT: NOT APPROVED". */
+  banner?: string | null;
+  summary: { label: string; value: string; alert?: boolean }[];
+  note?: string;
+  sections: ReportSection[];
+}
+
+/** A calibration as a module can read it back, with its approval history. */
+export interface CalibrationRecord {
+  id: string;
+  code: string;
+  deviceId: string;
+  performedAt: string;
+  performedBy: { id: string; name: string };
+  dataSource: 'MANUAL' | 'INSTRUMENT' | 'SIMULATED';
+  temperatureC: number | null;
+  readings: unknown;
+  limits: Record<string, unknown>;
+  results: Record<string, unknown>;
+  display: { label: string; value: string }[];
+  sourceMessages: unknown;
+  outcome: 'PASS' | 'WARNING' | 'FAIL';
+  remarks: string;
+  workflow: { id: string; state: WorkflowState };
+  history: {
+    step: string;
+    toState: string;
+    actorName: string | null;
+    comment: string | null;
+    contentHash: string | null;
+    occurredAt: string;
+    signature: { meaningLabel: string; signerFullName: string; signerUsername: string; signedAt: string; intact: boolean } | null;
+  }[];
+}
+
+/** Whether a command reached the USB dongle (not whether the instrument acted on it). */
+export type CommandResult = { sent: true; messageId: number | null } | { sent: false; reason: string };
+
 export interface PacketDecision {
   /** Reject the packet (stored and audited by the core as rejected). */
   reject?: string;
@@ -166,11 +222,23 @@ export interface ModuleContext {
   calibrations: {
     /** Creates a DRAFT calibration through the core workflow; core checks calibration.perform. */
     record(principal: ModulePrincipal, deviceId: string, input: CalibrationInput, origin: RequestOrigin): Promise<{ calibrationId: string; code: string }>;
+    /** An instrument's calibrations, newest first. */
+    forDevice(principal: ModulePrincipal, deviceId: string): Promise<CalibrationRecord[]>;
+  };
+  reports: {
+    /** A printable report (PDF); the caller records the export and returns it as a file. */
+    pdf(input: ReportInput): Promise<Buffer>;
   };
   gateway: {
     registerHandler(handler: PacketHandler): void;
     /** Store an original packet the module kept in memory (e.g. the measurement a record used). */
     persist(device: DeviceInfo, packet: InstrumentPacket, kind: PacketDecision['kind'], payload?: unknown): Promise<number>;
+    /**
+     * Send a command to an instrument; DEVICE_ID is added by the core. Commands
+     * are stored unless `persist` is false (for repeated keep-alive frames);
+     * ones that could not be written are always stored.
+     */
+    send(device: DeviceInfo, fields: Record<string, string | number>, options?: { persist?: boolean }): Promise<CommandResult>;
   };
 }
 

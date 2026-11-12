@@ -136,6 +136,17 @@ describeDb('Compliance Core on PostgreSQL', () => {
   });
 
   describe('audit trail (master spec §6)', () => {
+    it('pages through matching entries, newest first, and counts them all', async () => {
+      const filter = { action: 'SCHEMA_MIGRATION_APPLIED' };
+      const all = await audit.list(filter);
+      expect(all.length).toBeGreaterThan(2);
+      expect(await audit.countMatching(filter)).toBe(all.length);
+      const page = await audit.list({ ...filter, limit: 2, offset: 1 });
+      expect(page.map((e) => e.sequence)).toEqual(
+        all.slice(1, 3).map((e) => e.sequence),
+      );
+    });
+
     it('is append-only: UPDATE, DELETE and TRUNCATE are rejected by the database', async () => {
       await expect(
         db.query("UPDATE audit_trail SET action = 'X' WHERE sequence = 1"),

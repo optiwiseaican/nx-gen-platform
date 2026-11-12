@@ -14,6 +14,7 @@ class HttpError extends Error {
 }
 
 let idleExpiresAt: number | null = null;
+let maxExpiresAt: number | null = null;
 const idleListeners = new Set<() => void>();
 
 async function request(path: string, init?: RequestInit): Promise<Response> {
@@ -21,7 +22,10 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
   const idle = res.headers.get("X-NxGen-Session-Idle-Expires");
   const now = Date.parse(res.headers.get("X-NxGen-Server-Time") ?? "");
   if (idle) {
-    idleExpiresAt = Date.parse(idle) + (Number.isNaN(now) ? 0 : Date.now() - now);
+    const skew = Number.isNaN(now) ? 0 : Date.now() - now;
+    idleExpiresAt = Date.parse(idle) + skew;
+    const max = res.headers.get("X-NxGen-Session-Expires");
+    if (max) maxExpiresAt = Date.parse(max) + skew;
     idleListeners.forEach((f) => f());
   }
   if (!res.ok) {
@@ -163,6 +167,28 @@ const STATE: Record<Workflow["state"], { label: string; tone: Tone }> = {
 };
 const ILLUMINATION_LABEL: Record<Illumination, string> = { WHITE: "White light", UV254: "UV 254 nm", UV366: "UV 366 nm" };
 
+function SessionTimer({ className = "" }: { className?: string }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const f = () => tick((x) => x + 1);
+    idleListeners.add(f);
+    const t = setInterval(f, 1000);
+    return () => {
+      idleListeners.delete(f);
+      clearInterval(t);
+    };
+  }, []);
+  if (!maxExpiresAt) return null;
+  const s = Math.max(0, Math.ceil((maxExpiresAt - Date.now()) / 1000));
+  const seconds = String(s % 60).padStart(2, "0");
+  const text = s < 3600 ? `${Math.floor(s / 60)}:${seconds}` : `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${seconds}`;
+  return (
+    <span role="timer" aria-label="Time until the session ends" className={`text-muted ${className}`}>
+      Session ends in <span className="font-mono font-semibold tabular-nums">{text}</span>
+    </span>
+  );
+}
+
 function SessionBanner() {
   const [, tick] = useState(0);
   useEffect(() => {
@@ -245,7 +271,8 @@ function Shell({ web, principal, title, children }: { web: string; principal: Pr
           {item(`${web}/tasks/`, "My Tasks", ICON.tasks)}
           {item(`${web}/methods/`, "Methods", ICON.list)}
         </nav>
-        <p className="hidden items-center gap-2.5 border-t border-line px-8 py-5 text-sm text-muted lg:flex">
+        <SessionTimer className="hidden border-t border-line px-8 pt-5 text-sm lg:block" />
+        <p className="hidden items-center gap-2.5 px-8 pt-2 pb-5 text-sm text-muted lg:flex">
           <span className="h-2 w-2 rounded-full bg-pass shadow-[0_0_0_3px_rgb(19_150_90/0.15)]" aria-hidden />
           Connected
         </p>
@@ -267,6 +294,7 @@ function Shell({ web, principal, title, children }: { web: string; principal: Pr
                 <span className="h-1.5 w-1.5 rounded-full bg-pass" aria-hidden />
                 {principal.username}
               </span>
+              <SessionTimer className="block text-xs lg:hidden" />
             </span>
           </div>
         </header>

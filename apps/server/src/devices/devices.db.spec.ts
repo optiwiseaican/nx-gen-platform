@@ -21,6 +21,8 @@ import { SignatureService } from '../signatures/signature.service';
 import { UserAdminService } from '../users/user-admin.service';
 import { WorkflowService } from '../workflow/workflow.service';
 import { ModuleRegistry } from '../modules/module-registry';
+import { GatewayService } from '../gateway/gateway.service';
+import type { DeviceInfo } from '@crescent/module-sdk';
 import { DevicesService } from './devices.service';
 
 loadEnvFile();
@@ -434,6 +436,43 @@ describeDb('Device register and calibration (spec §4 Device Layer, §9)', () =>
       'RETIRED',
       'OUT_OF_SERVICE',
     ]);
+  });
+
+  it('keeps commands sent to an instrument, append-only, beside its packets', async () => {
+    const gateway = new GatewayService(
+      { production: false } as NxGenConfig,
+      db,
+      audit,
+      new ModuleRegistry(),
+    );
+    gateway['seen'].set('CMD-TEST-1', {
+      deviceId,
+      code: 'CMD',
+      portPath: 'SIMULATOR',
+      transport: 'SIMULATOR',
+      lastSeenAt: Date.now(),
+    });
+    const device = {
+      id: deviceId,
+      code: 'CMD',
+      status: 'ACTIVE',
+      deviceIdentifier: 'CMD-TEST-1',
+    } as DeviceInfo;
+
+    const result = await gateway.send(device, { CAL: 20 });
+    expect(result.sent).toBe(true);
+    const [row] = await gateway.messages(deviceId, 1);
+    expect(row).toMatchObject({
+      direction: 'OUT',
+      kind: 'COMMAND',
+      accepted: true,
+      raw: '{"CAL":20,"DEVICE_ID":"CMD-TEST-1"}',
+    });
+    await expect(
+      db.query("UPDATE device_messages SET raw = 'changed' WHERE id = $1", [
+        row.id,
+      ]),
+    ).rejects.toThrow(/NXGEN-GW-001/);
   });
 
   it('leaves the audit chain intact', async () => {

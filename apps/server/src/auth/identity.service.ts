@@ -515,14 +515,23 @@ export class IdentityService {
       `SELECT u.username, u.full_name, u.must_change_password, u.password_changed_at, u.session_idle_minutes,
               (SELECT array_agg(ur.role_code ORDER BY ur.role_code) FROM user_roles ur
                 WHERE ur.user_id = u.id AND NOT ur.is_deleted) AS roles,
-              (SELECT array_agg(DISTINCT rp.permission_code) FROM user_roles ur
-                 JOIN role_permissions rp ON rp.role_code = ur.role_code AND NOT rp.is_deleted
-                WHERE ur.user_id = u.id AND NOT ur.is_deleted) AS permissions
+              -- The Super Administrator holds every permission, including ones modules add later.
+              CASE WHEN EXISTS (SELECT 1 FROM user_roles ur
+                                 WHERE ur.user_id = u.id AND ur.role_code = 'SUPER_ADMINISTRATOR' AND NOT ur.is_deleted)
+                   THEN (SELECT array_agg(p.code ORDER BY p.code) FROM permissions p WHERE NOT p.is_deleted)
+                   ELSE (SELECT array_agg(DISTINCT rp.permission_code) FROM user_roles ur
+                           JOIN role_permissions rp ON rp.role_code = ur.role_code AND NOT rp.is_deleted
+                          WHERE ur.user_id = u.id AND NOT ur.is_deleted)
+              END AS permissions
          FROM users u WHERE u.id = $1`,
       [userId],
     );
-    const [s] = await this.db.query<{ last_seen_at: Date; expires_at: Date }>(
-      'SELECT last_seen_at, expires_at FROM sessions WHERE id = $1',
+    const [s] = await this.db.query<{
+      last_seen_at: Date;
+      expires_at: Date;
+      created_at: Date;
+    }>(
+      'SELECT last_seen_at, expires_at, created_at FROM sessions WHERE id = $1',
       [sessionId],
     );
     const idleMinutes =
@@ -554,6 +563,7 @@ export class IdentityService {
               ),
             ).toISOString(),
             expiresAt: s.expires_at.toISOString(),
+            startedAt: s.created_at.toISOString(),
           }
         : undefined,
       sessionIdleMinutes: idleMinutes,

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { ApiError, authApi, ModuleMenuItem, moduleUrl, modulesApi, Principal, ROLE_NAMES, sessionClock } from "@/lib/api";
-import { SessionWarning } from "./SessionWarning";
+import { SessionTimer, SessionWarning } from "./SessionWarning";
 import { Icon, IconName, LogoTile } from "./icons";
 import { StatusIcon } from "./ui";
 
@@ -169,6 +169,7 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
         })}
       </nav>
       <div className="space-y-1 border-t border-line px-3 py-4 text-sm">
+        <SessionTimer className="block px-3.5 py-1.5" />
         <p className="flex items-center gap-2.5 px-3.5 py-1.5 text-muted">
           <span className="h-2 w-2 rounded-full bg-pass shadow-[0_0_0_3px_rgb(19_150_90/0.15)]" aria-hidden />
           Connected
@@ -220,6 +221,7 @@ export function AppShell({ children, title }: { children: React.ReactNode; title
                   <span className="h-1.5 w-1.5 rounded-full bg-pass" aria-hidden />
                   {roleNames || principal.username}
                 </span>
+                <SessionTimer className="block text-xs lg:hidden" />
               </span>
             </div>
           </header>

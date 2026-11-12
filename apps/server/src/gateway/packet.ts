@@ -16,6 +16,27 @@ export type EnvelopeResult =
     }
   | { ok: false; reason: string; deviceIdentifier?: string };
 
+/** One command line for an instrument, in the same framing as its packets. */
+export function encodeCommand(
+  deviceIdentifier: string,
+  fields: Record<string, string | number>,
+): { ok: true; line: string } | { ok: false; reason: string } {
+  if (!IDENTIFIER.test(deviceIdentifier))
+    return { ok: false, reason: 'Invalid DEVICE_ID' };
+  const entries = Object.entries(fields);
+  if (!entries.length) return { ok: false, reason: 'Command has no fields' };
+  for (const [k, v] of entries) {
+    if (k === 'DEVICE_ID' || !/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(k))
+      return { ok: false, reason: `Invalid field name ${k.slice(0, 40)}` };
+    if (typeof v !== 'string' && !Number.isFinite(v))
+      return { ok: false, reason: `Field ${k} is not a string or number` };
+  }
+  const line = JSON.stringify({ ...fields, DEVICE_ID: deviceIdentifier });
+  if (line.length > MAX_LINE)
+    return { ok: false, reason: 'Command longer than 4096 characters' };
+  return { ok: true, line };
+}
+
 export function parseEnvelope(line: string): EnvelopeResult {
   if (line.length > MAX_LINE)
     return { ok: false, reason: 'Packet longer than 4096 characters' };
@@ -40,13 +61,18 @@ export function parseEnvelope(line: string): EnvelopeResult {
         reason: `Invalid field name ${k.slice(0, 40)}`,
         deviceIdentifier: id,
       };
-    if (typeof v !== 'string' && typeof v !== 'number')
+    if (
+      typeof v !== 'string' &&
+      typeof v !== 'number' &&
+      typeof v !== 'boolean'
+    )
       return {
         ok: false,
-        reason: `Field ${k} is not a string or number`,
+        reason: `Field ${k} is not a string, number or boolean`,
         deviceIdentifier: id,
       };
-    fields[k] = v;
+    // Status packets send flags as JSON booleans; the raw packet keeps the original.
+    fields[k] = typeof v === 'boolean' ? String(v) : v;
   }
   if (!Object.keys(fields).length)
     return {

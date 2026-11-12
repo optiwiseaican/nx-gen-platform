@@ -12,6 +12,7 @@ import {
 import { createHash } from 'crypto';
 import { ReadlineParser, SerialPort } from 'serialport';
 import type {
+  CommandResult,
   DeviceInfo,
   InstrumentPacket,
   PacketDecision,
@@ -23,7 +24,9 @@ import { NXGEN_CONFIG } from '../config/nxgen.config';
 import type { NxGenConfig } from '../config/nxgen.config';
 import { DatabaseService } from '../database/database.service';
 import { ModuleRegistry } from '../modules/module-registry';
-import { parseEnvelope } from './packet';
+import { encodeCommand, parseEnvelope } from './packet';
+import { classifyPorts, matchesPort } from './serial-detect';
+import type { DetectedPort } from './serial-detect';
 
 export const GATEWAY_ACTOR = 'SYSTEM_DEVICE_GATEWAY';
 export const SIMULATOR_PORT = 'SIMULATOR';
@@ -34,6 +37,8 @@ type Kind = PacketDecision['kind'];
 
 /** Silence after which the next packet counts as a reconnection. */
 const CONNECTED_GAP_MS = 60_000;
+/** Commands need a live link: an instrument silent this long counts as offline. */
+const COMMAND_SILENCE_MS = 10_000;
 const REJECT_STORE_EVERY_MS = 60_000;
 const REJECT_AUDIT_EVERY_MS = 10 * 60_000;
 const DEVICE_CACHE_MS = 5_000;
@@ -84,6 +89,8 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     { firstSeenAt: string; lastSeenAt: string; portPath: string; count: number }
   >();
   private readonly throttle = new Map<string, number>();
+  /** When each serial port was first seen attached since NxGen started (cleared when it is removed). */
+  private readonly attachedSince = new Map<string, string>();
 
   constructor(
     @Inject(NXGEN_CONFIG) private readonly config: NxGenConfig,
@@ -163,7 +170,12 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     const rt = this.runtime(path);
     if (rt.retry) clearTimeout(rt.retry);
     rt.retry = null;
-    const port = new SerialPort({ path, baudRate, autoOpen: false });
+    // On macOS the tty device waits for a carrier signal the dongle may never raise; open its cu twin.
+    const devicePath =
+      process.platform === 'darwin' && path.startsWith('/dev/tty.')
+        ? `/dev/cu.${path.slice('/dev/tty.'.length)}`
+        : path;
+    const port = new SerialPort({ path: devicePath, baudRate, autoOpen: false });
     rt.port = port;
     const parser = port.pipe(new ReadlineParser({ delimiter: '\n' }));
     parser.on('data', (line: string) => {
@@ -190,20 +202,31 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     this.setStatus(path, status);
   }
 
-  /** Serial ports on this workstation, for choosing the dongle. */
-  async available() {
+  /**
+   * Serial ports on this workstation, for choosing the dongle: USB-to-UART
+   * adapters first, recognised by their USB IDs, then Bluetooth and built-in
+   * ports, which never carry instrument data. Null when the operating system
+   * could not be asked.
+   */
+  async available(): Promise<(DetectedPort & { attachedSince: string | null })[] | null> {
+    let ports: DetectedPort[];
     try {
-      return (await SerialPort.list()).map((p) => ({
-        path: p.path,
-        manufacturer: p.manufacturer ?? null,
-        serialNumber: p.serialNumber ?? null,
-        vendorId: p.vendorId ?? null,
-        productId: p.productId ?? null,
-      }));
-    } catch {
-      return [];
+      ports = classifyPorts(await SerialPort.list());
+    } catch (e) {
+      this.logger.warn(`Could not list serial ports: ${(e as Error).message}`);
+      return null;
     }
+    const now = new Date().toISOString();
+    for (const path of [...this.attachedSince.keys()])
+      if (!ports.some((p) => p.path === path)) this.attachedSince.delete(path);
+    for (const p of ports)
+      if (!this.attachedSince.has(p.path))
+        // Ports already there when NxGen started have no known plug-in time.
+        this.attachedSince.set(p.path, this.listedOnce ? now : '');
+    this.listedOnce = true;
+    return ports.map((p) => ({ ...p, attachedSince: this.attachedSince.get(p.path) || null }));
   }
+  private listedOnce = false;
 
   async configured() {
     const rows = await this.db.query<{
@@ -234,9 +257,20 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
 
   async overview() {
     const sim = this.ports.get(SIMULATOR_PORT);
+    const available = await this.available();
+    const configured = (await this.configured()).map((c) => ({
+      ...c,
+      // Whether the adapter is plugged in now; null when the ports could not be listed.
+      attached: available ? available.some((p) => matchesPort(c.portPath, p)) : null,
+    }));
     return {
-      available: await this.available(),
-      configured: await this.configured(),
+      available: (available ?? []).map((p) => ({
+        ...p,
+        configured: configured.some((c) => matchesPort(c.portPath, p)),
+      })),
+      portListError: available === null,
+      platform: process.platform,
+      configured,
       simulator: this.simulatorAvailable
         ? {
             packets: sim?.packets ?? 0,
@@ -449,6 +483,80 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
       null,
       packet.receivedAt,
     );
+  }
+
+  /**
+   * For modules: send one command to an instrument, through the dongle it was
+   * last heard on. The core does not know what commands mean; acting on them
+   * and auditing who asked belong to the module.
+   */
+  async send(
+    device: DeviceInfo,
+    fields: Record<string, string | number>,
+    options: { persist?: boolean } = {},
+  ): Promise<CommandResult> {
+    if (!device.deviceIdentifier)
+      return { sent: false, reason: 'The instrument has no DEVICE_ID.' };
+    if (device.status !== 'ACTIVE')
+      return {
+        sent: false,
+        reason: `Instrument ${device.code} is not active.`,
+      };
+    const encoded = encodeCommand(device.deviceIdentifier, fields);
+    if (!encoded.ok) return { sent: false, reason: encoded.reason };
+    const route = this.seen.get(device.deviceIdentifier);
+    if (!route || Date.now() - route.lastSeenAt > COMMAND_SILENCE_MS)
+      return { sent: false, reason: 'The instrument is not connected.' };
+
+    let failure: string | null = null;
+    if (route.transport === 'SERIAL') {
+      const port = this.ports.get(route.portPath)?.port;
+      if (!port?.isOpen)
+        return { sent: false, reason: 'The USB dongle is not connected.' };
+      failure = await this.write(port, encoded.line);
+    }
+    const keep = failure !== null || options.persist !== false;
+    const messageId = keep
+      ? await this.storeCommand(device, route, encoded.line, fields, failure)
+      : null;
+    return failure === null
+      ? { sent: true, messageId }
+      : { sent: false, reason: failure };
+  }
+
+  /** The error message if the line could not be written, else null. */
+  private write(port: SerialPort, line: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      port.write(`${line}\n`, 'utf8', (err) => {
+        if (err) return resolve(err.message);
+        port.drain((e) => resolve(e ? e.message : null));
+      });
+    });
+  }
+
+  private async storeCommand(
+    device: DeviceInfo,
+    route: { portPath: string; transport: Transport },
+    raw: string,
+    fields: Record<string, string | number>,
+    failure: string | null,
+  ): Promise<number> {
+    const [row] = await this.db.query<{ id: string }>(
+      `INSERT INTO device_messages (direction, transport, port_path, raw, raw_sha256, device_identifier, device_id, kind, payload, accepted, rejection_reason)
+       VALUES ('OUT', $1, $2, $3, $4, $5, $6, 'COMMAND', $7, $8, $9) RETURNING id`,
+      [
+        route.transport,
+        route.portPath,
+        raw,
+        sha256(raw),
+        device.deviceIdentifier,
+        device.id,
+        JSON.stringify(fields),
+        failure === null,
+        failure,
+      ],
+    );
+    return Number(row.id);
   }
 
   private async event(
@@ -664,6 +772,7 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.db.query<{
       id: string;
       received_at: Date;
+      direction: 'IN' | 'OUT';
       transport: string;
       port_path: string;
       raw: string;
@@ -672,13 +781,14 @@ export class GatewayService implements OnModuleInit, OnModuleDestroy {
       accepted: boolean;
       rejection_reason: string | null;
     }>(
-      `SELECT id, received_at, transport, port_path, raw, raw_sha256, kind, accepted, rejection_reason
+      `SELECT id, received_at, direction, transport, port_path, raw, raw_sha256, kind, accepted, rejection_reason
          FROM device_messages WHERE device_id = $1 ORDER BY id DESC LIMIT $2`,
       [deviceId, Math.min(Math.max(limit, 1), 200)],
     );
     return rows.map((r) => ({
       id: Number(r.id),
       receivedAt: r.received_at.toISOString(),
+      direction: r.direction,
       transport: r.transport,
       portPath: r.port_path,
       raw: r.raw,
