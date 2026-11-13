@@ -592,5 +592,456 @@ describeDb(
       ]);
       expect(await audit.verifyChain()).toEqual({ valid: true });
     });
+
+    // ---- Image path: a real plate straightened and evaluated by densitometry ----
+
+    const FIXTURES = resolve(
+      __dirname,
+      '../../../../modules/tlc/src/engine/__fixtures__',
+    );
+    const PLATE_PNG = readFileSync(join(FIXTURES, 'five_lanes_5x10_uv254.png'));
+    let analysis2: string;
+    let workflow2: string;
+    let plateId: string;
+    let lanes: number[];
+    let evaluationId: string;
+    const layoutOf = (l: {
+      baselineMm: number;
+      solventFrontMm: number;
+      trackWidthMm: number;
+    }) => ({
+      baselineMm: l.baselineMm,
+      solventFrontMm: l.solventFrontMm,
+      trackWidthMm: l.trackWidthMm,
+      baselineSource: 'DETECTED',
+      frontSource: 'DETECTED',
+    });
+    let layout: {
+      baselineMm: number;
+      solventFrontMm: number;
+      trackWidthMm: number;
+    };
+
+    it('straightens a real plate image into a plate record (the original is kept, the plate is append-only)', async () => {
+      let m = await methods.create(
+        people.analyst.p,
+        {
+          instrumentType: 'TLC',
+          name: 'Identification of compounds A and B',
+          parameters: [
+            { name: 'Compound A', value: '0.40–0.46', unit: 'Rf' },
+            { name: 'Compound B', value: '0.60–0.66', unit: 'Rf' },
+          ],
+        },
+        ORIGIN,
+      );
+      const v = m.versions[0];
+      await act('analyst', v.workflow.id, 'SUBMIT');
+      await act('reviewer', v.workflow.id, 'REVIEW');
+      await act('manager', v.workflow.id, 'APPROVE');
+      m = await methods.get(m.id, people.analyst.p);
+      const a = (await call('analyst', 'POST', '/analyses', {
+        deviceId,
+        methodVersionId: m.versions[0].id,
+        sampleId: 'SMP-2026-1203',
+        plateType: 'Silica gel 60 F254 (aluminium)',
+      })) as { id: string; code: string };
+      analysis2 = a.id;
+      expect(a.code).toBe('TLC-0002');
+      workflow2 = (
+        (await call('analyst', 'GET', `/analyses/${analysis2}`)) as {
+          workflow: { id: string };
+        }
+      ).workflow.id;
+      const img = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/images`,
+        PLATE_PNG,
+        { illumination: 'UV254', name: 'five-lanes.png' },
+      )) as { id: string };
+
+      const outline = (await call(
+        'analyst',
+        'GET',
+        `/analyses/${analysis2}/outline`,
+        undefined,
+        { imageId: img.id },
+      )) as { image: { width: number; height: number } };
+      expect(outline.image).toEqual({
+        id: img.id,
+        width: 626,
+        height: 1251,
+        illumination: 'UV254',
+      });
+
+      const whole = [
+        { x: 0, y: 0 },
+        { x: 625, y: 0 },
+        { x: 625, y: 1250 },
+        { x: 0, y: 1250 },
+      ];
+      await expect(
+        call('analyst2', 'POST', `/analyses/${analysis2}/plate`, {
+          imageId: img.id,
+          corners: whole,
+          widthMm: 50,
+          heightMm: 100,
+        }),
+      ).rejects.toMatchObject({ status: 403 });
+      await expect(
+        call('analyst', 'POST', `/analyses/${analysis2}/plate`, {
+          imageId: img.id,
+          corners: whole.slice(0, 3),
+          widthMm: 50,
+          heightMm: 100,
+        }),
+      ).rejects.toMatchObject({ field: 'corners' });
+      const plate = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/plate`,
+        {
+          imageId: img.id,
+          corners: whole,
+          widthMm: 50,
+          heightMm: 100,
+          outlineSource: 'MANUAL',
+        },
+      )) as {
+        id: string;
+        widthPx: number;
+        heightPx: number;
+        pixelsSha256: string;
+        isCurrent: boolean;
+      };
+      plateId = plate.id;
+      expect(plate).toMatchObject({
+        widthPx: 625,
+        heightPx: 1250,
+        isCurrent: true,
+        channel: 'INTENSITY',
+      });
+      const file = (await call(
+        'reviewer',
+        'GET',
+        `/plates/${plateId}/image`,
+      )) as unknown as { kind: string; contentType: string; data: Buffer };
+      expect(file).toMatchObject({ kind: 'file', contentType: 'image/png' });
+      expect(file.data.subarray(1, 4).toString()).toBe('PNG');
+      const processed = (await call(
+        'reviewer',
+        'GET',
+        `/plates/${plateId}/image`,
+        undefined,
+        { processed: '1' },
+      )) as unknown as { data: Buffer };
+      expect(processed.data.subarray(1, 4).toString()).toBe('PNG');
+
+      await expect(
+        db.query('UPDATE tlc_plates SET width_mm = 60 WHERE id = $1', [
+          plateId,
+        ]),
+      ).rejects.toThrow(/NXGEN-TLC-003/);
+      await expect(db.query('DELETE FROM tlc_plates')).rejects.toThrow(
+        /NXGEN-TLC-003/,
+      );
+    });
+
+    it('finds the baseline, the solvent front and the five lanes automatically', async () => {
+      const l = (await call('analyst', 'GET', `/plates/${plateId}/layout`)) as {
+        baselineMm: number;
+        solventFrontMm: number;
+        trackWidthMm: number;
+        baselineFound: boolean;
+        frontFound: boolean;
+        lanes: { centerMm: number; spots: { rf: number }[] }[];
+      };
+      layout = l;
+      expect([l.baselineFound, l.frontFound]).toEqual([true, true]);
+      expect(Math.abs(l.baselineMm - 11.8)).toBeLessThan(0.5);
+      expect(Math.abs(l.solventFrontMm - 90.7)).toBeLessThan(0.5);
+      expect(l.trackWidthMm).toBe(7);
+      lanes = l.lanes.map((x) => x.centerMm);
+      expect(lanes.map((c) => Math.round(c))).toEqual([7, 16, 25, 34, 43]);
+      expect(l.lanes.map((x) => x.spots.length)).toEqual([3, 2, 2, 2, 2]);
+    });
+
+    it('evaluates the plate by densitometry into immutable snapshots E01, E02…', async () => {
+      const tracks = [
+        {
+          name: 'Std',
+          role: 'STANDARD',
+          centerMm: lanes[0],
+          source: 'DETECTED',
+          sampleVolumeUl: 2,
+          concentration: 1,
+        },
+        { name: 'S5', role: 'SAMPLE', centerMm: lanes[4], source: 'DETECTED' },
+      ];
+      await expect(
+        call('analyst2', 'POST', `/analyses/${analysis2}/evaluations`, {
+          layout: layoutOf(layout),
+          tracks,
+        }),
+      ).rejects.toMatchObject({ status: 403 });
+      const e1 = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/evaluations`,
+        { layout: layoutOf(layout), tracks },
+      )) as {
+        id: string;
+        code: string;
+        conclusion: string;
+        contentSha256: string;
+        results: {
+          tracks: {
+            name: string;
+            spots: { rf: number; compound: string; source: string }[];
+            profile: { hRf: number[]; processed: number[] };
+          }[];
+          rf: { suitability: { pass: boolean }[] };
+        };
+      };
+      expect(e1).toMatchObject({ code: 'E01', conclusion: 'CONFORMS' });
+      // The straightened plate is the fixture resampled by one pixel, so Rf
+      // values agree with the tablet's to ±0.002.
+      const expected = [
+        [
+          [0.34, ''],
+          [0.425, 'Compound A'],
+          [0.62, 'Compound B'],
+        ],
+        [
+          [0.437, 'Compound A'],
+          [0.635, 'Compound B'],
+        ],
+      ];
+      expect(
+        e1.results.tracks.map((t) => t.spots.map((s) => s.compound)),
+      ).toEqual(expected.map((t) => t.map((s) => s[1])));
+      e1.results.tracks.forEach((t, i) =>
+        t.spots.forEach((s, k) =>
+          expect(Math.abs(s.rf - (expected[i][k][0] as number))).toBeLessThan(
+            0.0025,
+          ),
+        ),
+      );
+      expect(e1.results.tracks[0].profile.hRf.length).toBeGreaterThan(900);
+      expect(e1.results.rf.suitability.every((s) => s.pass)).toBe(true);
+
+      const e2 = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/evaluations`,
+        {
+          layout: layoutOf(layout),
+          tracks: [
+            ...tracks,
+            {
+              name: 'S2',
+              role: 'SAMPLE',
+              centerMm: lanes[1],
+              source: 'DETECTED',
+            },
+          ],
+          manualSpots: { '3': [{ startHrf: 30, endHrf: 38 }] },
+        },
+      )) as {
+        id: string;
+        code: string;
+        conclusion: string;
+        reasons: string[];
+        results: { tracks: { name: string; spots: { source: string }[] }[] };
+      };
+      evaluationId = e2.id;
+      expect(e2).toMatchObject({ code: 'E02', conclusion: 'DOES_NOT_CONFORM' });
+      expect(e2.reasons).toEqual([
+        'Sample S2: Compound A not found outside 0.4–0.46.',
+        'Sample S2: Compound B not found outside 0.6–0.66.',
+      ]);
+      expect(e2.results.tracks[2].spots.map((s) => s.source)).toEqual([
+        'MANUAL',
+      ]);
+
+      const view = (await call('analyst', 'GET', `/analyses/${analysis2}`)) as {
+        conclusion: string;
+        currentEvaluationId: string;
+        evaluations: { code: string; conclusion: string }[];
+        results: { conclusion: string };
+      };
+      expect(view).toMatchObject({
+        conclusion: 'DOES_NOT_CONFORM',
+        currentEvaluationId: e2.id,
+      });
+      expect(view.evaluations.map((e) => e.code)).toEqual(['E02', 'E01']);
+
+      await expect(
+        db.query("UPDATE tlc_evaluations SET conclusion = 'CONFORMS'"),
+      ).rejects.toThrow(/NXGEN-TLC-004/);
+      await expect(db.query('DELETE FROM tlc_evaluations')).rejects.toThrow(
+        /NXGEN-TLC-004/,
+      );
+    });
+
+    it('recomputes a snapshot from the original image and finds it intact', async () => {
+      const v = (await call(
+        'reviewer',
+        'GET',
+        `/evaluations/${evaluationId}/verify`,
+      )) as {
+        ok: boolean;
+        code: string;
+        checks: Record<
+          string,
+          { ok: boolean; stored?: string; recomputed?: string }
+        >;
+      };
+      expect(v).toMatchObject({
+        ok: true,
+        code: 'E02',
+        checks: {
+          storedPlate: { ok: true },
+          plateFromOriginal: { ok: true },
+          evaluation: { ok: true },
+        },
+      });
+      expect(v.checks.evaluation.stored).toBe(v.checks.evaluation.recomputed);
+    });
+
+    it('straightening the plate again retires the old plate and requires a new evaluation before submission', async () => {
+      const img = (
+        (await call('analyst', 'GET', `/analyses/${analysis2}`)) as {
+          images: { id: string }[];
+        }
+      ).images[0];
+      const plate2 = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/plate`,
+        {
+          imageId: img.id,
+          corners: [
+            { x: 2, y: 2 },
+            { x: 623, y: 2 },
+            { x: 623, y: 1248 },
+            { x: 2, y: 1248 },
+          ],
+          widthMm: 50,
+          heightMm: 100,
+        },
+      )) as { id: string };
+      const rows = await db.query<{ id: string; is_current: boolean }>(
+        'SELECT id, is_current FROM tlc_plates WHERE analysis_id = $1 ORDER BY created_at',
+        [analysis2],
+      );
+      expect(rows.map((r) => [r.id, r.is_current])).toEqual([
+        [plateId, false],
+        [plate2.id, true],
+      ]);
+      await expect(act('analyst', workflow2, 'SUBMIT')).rejects.toMatchObject({
+        response: {
+          message: expect.stringMatching(/evaluate it again/) as unknown,
+        },
+      });
+      const e3 = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/evaluations`,
+        {
+          layout: layoutOf(layout),
+          tracks: [
+            {
+              name: 'Std',
+              role: 'STANDARD',
+              centerMm: lanes[0] - 0.16,
+              source: 'MANUAL',
+              sampleVolumeUl: 2,
+              concentration: 1,
+            },
+            {
+              name: 'S5',
+              role: 'SAMPLE',
+              centerMm: lanes[4] - 0.16,
+              source: 'MANUAL',
+            },
+          ],
+        },
+      )) as {
+        id: string;
+        code: string;
+        conclusion: string;
+        contentSha256: string;
+      };
+      expect(e3).toMatchObject({ code: 'E03', conclusion: 'CONFORMS' });
+      evaluationId = e3.id;
+    });
+
+    it('is reviewed and approved with signatures over the plate and evaluation hashes; nothing can be added afterwards', async () => {
+      await act('analyst', workflow2, 'SUBMIT', 'Ready for QA review');
+      await act('reviewer', workflow2, 'REVIEW', 'Densitograms checked');
+      await act('manager', workflow2, 'APPROVE', 'Identification conforms');
+      const sigs = await signatures.list({
+        tableName: 'tlc_analyses',
+        recordId: analysis2,
+      });
+      expect(sigs.map((s) => s.meaningCode).reverse()).toEqual([
+        'AUTHORED',
+        'REVIEWED',
+        'APPROVED',
+      ]);
+      expect(sigs.every((s) => s.intact)).toBe(true);
+      const e = (await call(
+        'reviewer',
+        'GET',
+        `/evaluations/${evaluationId}`,
+      )) as {
+        contentSha256: string;
+        plateId: string;
+      };
+      const plate = (await call(
+        'reviewer',
+        'GET',
+        `/analyses/${analysis2}`,
+      )) as {
+        plate: { pixelsSha256: string };
+      };
+      expect(sigs[0].signedContent).toMatchObject({
+        record: {
+          code: 'TLC-0002',
+          conclusion: 'CONFORMS',
+          evaluation: { code: 'E03', contentSha256: e.contentSha256 },
+          straightenedPlate: { pixelsSha256: plate.plate.pixelsSha256 },
+        },
+      });
+      await expect(
+        call('analyst', 'POST', `/analyses/${analysis2}/evaluations`, {
+          layout: layoutOf(layout),
+          tracks: [{ name: 'X', role: 'SAMPLE', centerMm: 10 }],
+        }),
+      ).rejects.toMatchObject({ response: { code: 'NX-WF-LOCKED' } });
+      await expect(
+        db.transaction({ actorId: people.analyst.p.userId }, (c) =>
+          c.query(
+            `INSERT INTO tlc_evaluations (analysis_id, plate_id, number, code, input, results, conclusion, engine_version, content_sha256, created_by)
+             VALUES ($1, $2, 9, 'E09', '{}', '{}', 'CONFORMS', 'x', 'y', $3)`,
+            [analysis2, e.plateId, people.analyst.p.userId],
+          ),
+        ),
+      ).rejects.toThrow(/NXGEN-TLC-002/);
+      expect(
+        (
+          (await call(
+            'reviewer',
+            'GET',
+            `/evaluations/${evaluationId}/verify`,
+          )) as {
+            ok: boolean;
+          }
+        ).ok,
+      ).toBe(true);
+      expect(await audit.verifyChain()).toEqual({ valid: true });
+    });
   },
 );

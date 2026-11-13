@@ -1,43 +1,9 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { evaluate, Evaluation, ILLUMINATIONS, Illumination, RfWindow, TrackInput, validatePlate } from "../shared/tlc";
+import { Badge, CONCLUSION, Callout, HttpError, ILLUMINATION_LABEL, Tone, api, card, field, fmtDate, mod, primary, request, secondary, send, session } from "./lib";
+import { CropStage, EvaluationFull, EvaluationSnapshot, EvaluationSummary, ImageMeta, PlateMeta, PlateWorkbench, RfTable } from "./plate";
 import "./styles.css";
-
-// ---------------------------------------------------------------------------
-// API (same origin: the core serves this page and the API)
-// ---------------------------------------------------------------------------
-
-class HttpError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message);
-  }
-}
-
-let idleExpiresAt: number | null = null;
-let maxExpiresAt: number | null = null;
-const idleListeners = new Set<() => void>();
-
-async function request(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`/api${path}`, { ...init, credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", ...init?.headers } });
-  const idle = res.headers.get("X-NxGen-Session-Idle-Expires");
-  const now = Date.parse(res.headers.get("X-NxGen-Server-Time") ?? "");
-  if (idle) {
-    const skew = Number.isNaN(now) ? 0 : Date.now() - now;
-    idleExpiresAt = Date.parse(idle) + skew;
-    const max = res.headers.get("X-NxGen-Session-Expires");
-    if (max) maxExpiresAt = Date.parse(max) + skew;
-    idleListeners.forEach((f) => f());
-  }
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { message?: string | string[] } | null;
-    const m = body?.message;
-    throw new HttpError(res.status, Array.isArray(m) ? m.join(" ") : (m ?? `Request failed (${res.status})`));
-  }
-  return res;
-}
-const api = async <T,>(path: string, init?: RequestInit) => (await (await request(path, init)).json()) as T;
-const mod = <T,>(path: string, init?: RequestInit) => api<T>(`/modules/tlc/api${path}`, init);
-const send = (body: unknown, method = "POST"): RequestInit => ({ method, body: JSON.stringify(body) });
 
 interface Principal {
   userId: string;
@@ -94,17 +60,16 @@ interface Analysis {
   conclusion: string;
   remarks: string;
   analyzedBy: { id: string; name: string };
+  currentPlateId: string | null;
+  currentEvaluationId: string | null;
   createdAt: string;
   workflow: Workflow | null;
 }
-interface ImageMeta {
-  id: string;
-  illumination: Illumination;
-  fileName: string;
-  sizeBytes: number;
-  sha256: string;
-  uploadedBy: string | null;
-  uploadedAt: string;
+interface AnalysisDetail extends Analysis {
+  images: ImageMeta[];
+  device: Device | null;
+  plate: PlateMeta | null;
+  evaluations: EvaluationSummary[];
 }
 interface Signature {
   meaningLabel: string;
@@ -123,40 +88,9 @@ interface WorkflowDetail {
 type Step = "SUBMIT" | "WITHDRAW" | "REVIEW" | "APPROVE" | "REJECT" | "INVALIDATE";
 
 // ---------------------------------------------------------------------------
-// UI pieces
+// Shell
 // ---------------------------------------------------------------------------
 
-const toneClass = {
-  pass: "border-pass/30 bg-pass-50 text-pass",
-  warn: "border-warn/30 bg-warn-50 text-warn",
-  fail: "border-fail/30 bg-fail-50 text-fail",
-  info: "border-brand/30 bg-brand-50 text-brand-700",
-  muted: "border-line bg-canvas text-muted",
-};
-type Tone = keyof typeof toneClass;
-function Badge({ tone, children }: { tone: Tone; children: React.ReactNode }) {
-  return <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-bold tracking-wide ${toneClass[tone]}`}>{children}</span>;
-}
-function Callout({ tone, title, children }: { tone: Exclude<Tone, "muted">; title?: string; children: React.ReactNode }) {
-  return (
-    <div className={`rounded-xl border px-4 py-3 text-sm ${toneClass[tone]}`} role={tone === "fail" ? "alert" : "status"}>
-      {title && <p className="font-semibold">{title}</p>}
-      <div className="text-ink">{children}</div>
-    </div>
-  );
-}
-const primary = "inline-flex min-h-11 items-center justify-center rounded-xl bg-brand px-5 font-semibold text-white shadow-[var(--shadow-brand)] hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-brand/40 disabled:shadow-none";
-const secondary = "inline-flex min-h-11 items-center justify-center rounded-xl border border-line bg-white px-5 font-semibold text-ink hover:border-brand/30 disabled:text-muted";
-const field = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 font-normal";
-const card = "rounded-lg border border-line bg-white p-5";
-const fmtDate = (v: string | null | undefined) => (v ? new Date(v).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—");
-
-const CONCLUSION: Record<string, { label: string; tone: Tone }> = {
-  CONFORMS: { label: "CONFORMS", tone: "pass" },
-  DOES_NOT_CONFORM: { label: "DOES NOT CONFORM", tone: "fail" },
-  SST_FAILED: { label: "SUITABILITY FAILED", tone: "fail" },
-  INCOMPLETE: { label: "NOT EVALUATED", tone: "muted" },
-};
 const STATE: Record<Workflow["state"], { label: string; tone: Tone }> = {
   DRAFT: { label: "DRAFT", tone: "muted" },
   IN_REVIEW: { label: "IN REVIEW", tone: "warn" },
@@ -165,21 +99,24 @@ const STATE: Record<Workflow["state"], { label: string; tone: Tone }> = {
   INVALIDATED: { label: "INVALIDATED", tone: "fail" },
   SUPERSEDED: { label: "SUPERSEDED", tone: "muted" },
 };
-const ILLUMINATION_LABEL: Record<Illumination, string> = { WHITE: "White light", UV254: "UV 254 nm", UV366: "UV 366 nm" };
 
-function SessionTimer({ className = "" }: { className?: string }) {
+function useSessionTick() {
   const [, tick] = useState(0);
   useEffect(() => {
     const f = () => tick((x) => x + 1);
-    idleListeners.add(f);
+    session.listeners.add(f);
     const t = setInterval(f, 1000);
     return () => {
-      idleListeners.delete(f);
+      session.listeners.delete(f);
       clearInterval(t);
     };
   }, []);
-  if (!maxExpiresAt) return null;
-  const s = Math.max(0, Math.ceil((maxExpiresAt - Date.now()) / 1000));
+}
+
+function SessionTimer({ className = "" }: { className?: string }) {
+  useSessionTick();
+  if (!session.maxExpiresAt) return null;
+  const s = Math.max(0, Math.ceil((session.maxExpiresAt - Date.now()) / 1000));
   const seconds = String(s % 60).padStart(2, "0");
   const text = s < 3600 ? `${Math.floor(s / 60)}:${seconds}` : `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${seconds}`;
   return (
@@ -190,18 +127,9 @@ function SessionTimer({ className = "" }: { className?: string }) {
 }
 
 function SessionBanner() {
-  const [, tick] = useState(0);
-  useEffect(() => {
-    const f = () => tick((x) => x + 1);
-    idleListeners.add(f);
-    const t = setInterval(f, 1000);
-    return () => {
-      idleListeners.delete(f);
-      clearInterval(t);
-    };
-  }, []);
-  if (!idleExpiresAt) return null;
-  const left = idleExpiresAt - Date.now();
+  useSessionTick();
+  if (!session.idleExpiresAt) return null;
+  const left = session.idleExpiresAt - Date.now();
   if (left > 120_000 || left <= 0) return null;
   const s = Math.ceil(left / 1000);
   return (
@@ -323,8 +251,8 @@ function Home({ principal }: { principal: Principal }) {
     <>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-3xl text-sm text-muted">
-          Each plate analysis uses an approved TLC method and a usable instrument. Plate images are kept as original records with their SHA-256;
-          Rf values are calculated by NxGen and the analysis is reviewed and approved with electronic signatures.
+          Each plate analysis uses an approved TLC method and a usable instrument. Plate images are kept as original records with their SHA-256; the plate
+          is straightened and scanned by densitometry, Rf values are calculated by NxGen, and the analysis is reviewed and approved with electronic signatures.
         </p>
         {canAnalyze && (
           <a href="/modules/tlc/?new=1" className={primary}>
@@ -590,32 +518,134 @@ function StepDialog({ step, principal, onClose, onSign }: { step: Step | null; p
   );
 }
 
-function AnalysisPage({ id, principal, web }: { id: string; principal: Principal; web: string }) {
-  const [a, setA] = useState<(Analysis & { images: ImageMeta[]; device: Device | null }) | null>(null);
-  const [wf, setWf] = useState<WorkflowDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [front, setFront] = useState("");
-  const [tracks, setTracks] = useState<TrackInput[]>([]);
+/** The manual path: spot distances typed in, for a plate without a usable image. */
+function ManualEvaluation({ a, editable, onSaved }: { a: AnalysisDetail; editable: boolean; onSaved: (message: string) => Promise<void> }) {
+  const [front, setFront] = useState(a.solventFrontMm === null ? "" : String(a.solventFrontMm));
+  const [tracks, setTracks] = useState<TrackInput[]>(
+    a.tracks.length
+      ? a.tracks
+      : [
+          { label: "S1", role: "STANDARD", spots: [] },
+          { label: "T1", role: "SAMPLE", spots: [] },
+        ],
+  );
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const frontMm = front.trim() ? Number(front) : null;
+  const problems = validatePlate(frontMm, tracks);
+  const preview: Evaluation | null = !problems.length && frontMm ? evaluate(frontMm, tracks, a.method.rfWindows) : null;
+  const compounds = a.method.rfWindows.map((w) => w.compound);
+  const setTrack = (i: number, t: Partial<TrackInput>) => setTracks(tracks.map((x, j) => (j === i ? { ...x, ...t } : x)));
+
+  async function save() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await mod(`/analyses/${a.id}/evaluation`, send({ solventFrontMm: frontMm, tracks }, "PUT"));
+      await onSaved("Manual evaluation saved. NxGen recalculated the Rf values and the conclusion.");
+    } catch (e) {
+      setSaveError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!editable) {
+    const shown = a.results as Evaluation;
+    return shown?.tracks ? <RfTable evaluation={shown} title="Result (distances entered by hand)" /> : <p className="text-sm text-muted">Not evaluated.</p>;
+  }
+  return (
+    <div className="space-y-4">
+      <label className="block max-w-xs text-sm font-semibold">
+        Solvent front from origin (mm)
+        <input inputMode="decimal" value={front} onChange={(e) => setFront(e.target.value)} className={`${field} font-mono`} />
+      </label>
+      <div className="space-y-3">
+        {tracks.map((t, i) => (
+          <div key={i} className="rounded-xl border border-line p-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="text-sm font-semibold">
+                Track
+                <input aria-label={`Manual track ${i + 1} label`} value={t.label} onChange={(e) => setTrack(i, { label: e.target.value })} className={`${field} w-24`} />
+              </label>
+              <label className="text-sm font-semibold">
+                Applied
+                <select aria-label={`Manual track ${i + 1} role`} value={t.role} onChange={(e) => setTrack(i, { role: e.target.value as TrackInput["role"] })} className={field}>
+                  <option value="STANDARD">Reference standard</option>
+                  <option value="SAMPLE">Sample</option>
+                </select>
+              </label>
+              <button type="button" className="pb-2 text-sm font-semibold text-fail hover:underline" onClick={() => setTracks(tracks.filter((_, j) => j !== i))}>
+                Remove track
+              </button>
+            </div>
+            <div className="mt-2 space-y-2">
+              {t.spots.map((s, k) => (
+                <div key={k} className="flex flex-wrap items-center gap-2 text-sm">
+                  <input
+                    aria-label={`Manual track ${i + 1} spot ${k + 1} distance`}
+                    inputMode="decimal"
+                    placeholder="mm"
+                    value={Number.isNaN(s.distanceMm) ? "" : s.distanceMm || ""}
+                    onChange={(e) => setTrack(i, { spots: t.spots.map((x, m) => (m === k ? { ...x, distanceMm: e.target.value === "" ? NaN : Number(e.target.value) } : x)) })}
+                    className="w-24 rounded-xl border border-line px-3 py-1.5 font-mono"
+                  />
+                  <select
+                    aria-label={`Manual track ${i + 1} spot ${k + 1} compound`}
+                    value={s.compound}
+                    onChange={(e) => setTrack(i, { spots: t.spots.map((x, m) => (m === k ? { ...x, compound: e.target.value } : x)) })}
+                    className="rounded-xl border border-line bg-white px-3 py-1.5"
+                  >
+                    <option value="">Unassigned spot</option>
+                    {compounds.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                  {frontMm && Number.isFinite(s.distanceMm) && s.distanceMm > 0 && <span className="font-mono text-muted">Rf {(s.distanceMm / frontMm).toFixed(3)}</span>}
+                  <button type="button" className="text-fail hover:underline" onClick={() => setTrack(i, { spots: t.spots.filter((_, m) => m !== k) })}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button type="button" className="text-sm font-semibold text-brand hover:underline" onClick={() => setTrack(i, { spots: [...t.spots, { distanceMm: NaN, compound: "" }] })}>
+                + Add spot
+              </button>
+            </div>
+          </div>
+        ))}
+        <button type="button" className="text-sm font-semibold text-brand hover:underline" onClick={() => setTracks([...tracks, { label: `T${tracks.length}`, role: "SAMPLE", spots: [] }])}>
+          + Add track
+        </button>
+      </div>
+      {problems.length > 0 && <p className="text-sm text-muted">{problems.join(" ")}</p>}
+      {preview && <RfTable evaluation={preview} title="Preview" />}
+      {saveError && <Callout tone="fail">{saveError}</Callout>}
+      <button className={primary} onClick={() => void save()} disabled={saving || problems.length > 0}>
+        {saving ? "Saving…" : "Save manual evaluation"}
+      </button>
+    </div>
+  );
+}
+
+function AnalysisPage({ id, principal, web }: { id: string; principal: Principal; web: string }) {
+  const [a, setA] = useState<AnalysisDetail | null>(null);
+  const [wf, setWf] = useState<WorkflowDetail | null>(null);
+  const [current, setCurrent] = useState<EvaluationFull | null>(null);
+  const [snapshot, setSnapshot] = useState<EvaluationFull | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [step, setStep] = useState<Step | null>(null);
   const [illumination, setIllumination] = useState<Illumination>("UV254");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
-      const x = await mod<Analysis & { images: ImageMeta[]; device: Device | null }>(`/analyses/${id}`);
+      const x = await mod<AnalysisDetail>(`/analyses/${id}`);
       setA(x);
-      setFront(x.solventFrontMm === null ? "" : String(x.solventFrontMm));
-      setTracks(
-        x.tracks.length
-          ? x.tracks
-          : [
-              { label: "S1", role: "STANDARD", spots: [] },
-              { label: "T1", role: "SAMPLE", spots: [] },
-            ],
-      );
+      setCurrent(x.currentEvaluationId ? await mod<EvaluationFull>(`/evaluations/${x.currentEvaluationId}`) : null);
       if (x.workflow) setWf(await api<WorkflowDetail>(`/workflow/instances/${x.workflow.id}`));
     } catch (e) {
       if ((e as HttpError).status === 401) location.href = `${web}/login/?reason=session`;
@@ -630,11 +660,11 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
   if (!a || !wf) return <p className="text-muted">Loading…</p>;
 
   const editable = wf.instance.state === "DRAFT" && a.analyzedBy.id === principal.userId && principal.permissions.includes("tlc.analyze");
-  const frontMm = front.trim() ? Number(front) : null;
-  const problems = validatePlate(frontMm, tracks);
-  const preview: Evaluation | null = !problems.length && frontMm ? evaluate(frontMm, tracks, a.method.rfWindows) : null;
-  const shown = (editable ? preview : (a.results as Evaluation)) ?? null;
-  const compounds = a.method.rfWindows.map((w) => w.compound);
+  const saved = async (message: string) => {
+    await load();
+    setNotice(message);
+    setSaveError(null);
+  };
 
   async function upload(file: File) {
     setNotice(null);
@@ -655,20 +685,6 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
     }
   }
 
-  async function save() {
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await mod(`/analyses/${id}/evaluation`, send({ solventFrontMm: frontMm, tracks }, "PUT"));
-      await load();
-      setNotice("Evaluation saved. NxGen recalculated the Rf values and the conclusion.");
-    } catch (e) {
-      setSaveError((e as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function sign(comment: string, password: string) {
     const ui = STEP_UI[step!];
     await api(`/workflow/instances/${wf!.instance.id}/${step!.toLowerCase()}`, send({ reason: comment, signature: ui.meaning ? { username: principal.username, password } : undefined }));
@@ -680,12 +696,21 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
     );
   }
 
-  const setTrack = (i: number, t: Partial<TrackInput>) => setTracks(tracks.map((x, j) => (j === i ? { ...x, ...t } : x)));
+  async function openSnapshot(e: EvaluationSummary) {
+    try {
+      setSnapshot(await mod<EvaluationFull>(`/evaluations/${e.id}`));
+    } catch (err) {
+      setSaveError((err as Error).message);
+    }
+  }
+
   const stages = [
     { label: "Prepared", who: wf.instance.preparedBy?.name, done: wf.instance.state !== "DRAFT" },
     { label: "Reviewed", who: wf.instance.reviewedBy?.name, done: ["REVIEWED", "APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
     { label: "Approved", who: wf.instance.approvedBy?.name, done: ["APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
   ];
+  const currentOnPlate = current && a.plate && current.plateId === a.plate.id ? current : null;
+  const usesImages = !!a.plate || (!a.tracks.length && a.images.length > 0);
 
   return (
     <>
@@ -705,6 +730,7 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
         </span>
       </div>
       {notice && <Callout tone="pass">{notice}</Callout>}
+      {saveError && <Callout tone="fail">{saveError}</Callout>}
 
       <ol className="grid gap-2 sm:grid-cols-3" aria-label="Approval progress">
         {stages.map((s, i) => (
@@ -746,7 +772,7 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
 
       <section className={`${card} space-y-4`}>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="font-bold">Plate images</h3>
+          <h3 className="font-bold">1. Plate images</h3>
           {editable && (
             <div className="flex flex-wrap items-center gap-2">
               <select aria-label="Illumination" value={illumination} onChange={(e) => setIllumination(e.target.value as Illumination)} className="rounded-xl border border-line bg-white px-3 py-2 text-sm">
@@ -782,131 +808,67 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
         </div>
       </section>
 
-      <section className={`${card} space-y-4`}>
-        <h3 className="font-bold">Evaluation</h3>
-        {editable ? (
-          <>
-            <label className="block max-w-xs text-sm font-semibold">
-              Solvent front from origin (mm)
-              <input inputMode="decimal" value={front} onChange={(e) => setFront(e.target.value)} className={`${field} font-mono`} />
-            </label>
-            <div className="space-y-3">
-              {tracks.map((t, i) => (
-                <div key={i} className="rounded-xl border border-line p-3">
-                  <div className="flex flex-wrap items-end gap-3">
-                    <label className="text-sm font-semibold">
-                      Track
-                      <input aria-label={`Track ${i + 1} label`} value={t.label} onChange={(e) => setTrack(i, { label: e.target.value })} className={`${field} w-24`} />
-                    </label>
-                    <label className="text-sm font-semibold">
-                      Applied
-                      <select aria-label={`Track ${i + 1} role`} value={t.role} onChange={(e) => setTrack(i, { role: e.target.value as TrackInput["role"] })} className={field}>
-                        <option value="STANDARD">Reference standard</option>
-                        <option value="SAMPLE">Sample</option>
-                      </select>
-                    </label>
-                    <button type="button" className="pb-2 text-sm font-semibold text-fail hover:underline" onClick={() => setTracks(tracks.filter((_, j) => j !== i))}>
-                      Remove track
-                    </button>
-                  </div>
-                  <div className="mt-2 space-y-2">
-                    {t.spots.map((s, k) => (
-                      <div key={k} className="flex flex-wrap items-center gap-2 text-sm">
-                        <input
-                          aria-label={`Track ${i + 1} spot ${k + 1} distance`}
-                          inputMode="decimal"
-                          placeholder="mm"
-                          value={Number.isNaN(s.distanceMm) ? "" : s.distanceMm || ""}
-                          onChange={(e) => setTrack(i, { spots: t.spots.map((x, m) => (m === k ? { ...x, distanceMm: e.target.value === "" ? NaN : Number(e.target.value) } : x)) })}
-                          className="w-24 rounded-xl border border-line px-3 py-1.5 font-mono"
-                        />
-                        <select
-                          aria-label={`Track ${i + 1} spot ${k + 1} compound`}
-                          value={s.compound}
-                          onChange={(e) => setTrack(i, { spots: t.spots.map((x, m) => (m === k ? { ...x, compound: e.target.value } : x)) })}
-                          className="rounded-xl border border-line bg-white px-3 py-1.5"
-                        >
-                          <option value="">Unassigned spot</option>
-                          {compounds.map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))}
-                        </select>
-                        {frontMm && Number.isFinite(s.distanceMm) && s.distanceMm > 0 && <span className="font-mono text-muted">Rf {(s.distanceMm / frontMm).toFixed(3)}</span>}
-                        <button type="button" className="text-fail hover:underline" onClick={() => setTrack(i, { spots: t.spots.filter((_, m) => m !== k) })}>
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                    <button type="button" className="text-sm font-semibold text-brand hover:underline" onClick={() => setTrack(i, { spots: [...t.spots, { distanceMm: NaN, compound: "" }] })}>
-                      + Add spot
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <button type="button" className="text-sm font-semibold text-brand hover:underline" onClick={() => setTracks([...tracks, { label: `T${tracks.length}`, role: "SAMPLE", spots: [] }])}>
-                + Add track
-              </button>
-            </div>
-            {problems.length > 0 && <p className="text-sm text-muted">{problems.join(" ")}</p>}
-          </>
-        ) : (
-          !a.tracks.length && <p className="text-sm text-muted">Not evaluated.</p>
-        )}
+      {a.images.length > 0 && (editable || a.plate) && <CropStage analysisId={a.id} images={a.images} plate={a.plate} editable={editable} onSaved={saved} />}
 
-        {shown?.tracks && (
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-semibold">{editable ? "Preview" : "Result"}</span>
-              <Badge tone={CONCLUSION[shown.conclusion].tone}>{CONCLUSION[shown.conclusion].label}</Badge>
+      {a.plate && (editable || currentOnPlate) && (
+        <PlateWorkbench key={a.plate.id} analysisId={a.id} plate={a.plate} windows={a.method.rfWindows} current={currentOnPlate} editable={editable} onSaved={saved} />
+      )}
+      {a.plate && current && !currentOnPlate && editable && (
+        <Callout tone="warn" title="The plate was straightened again">
+          The last evaluation ({current.code}) belongs to the earlier plate. Evaluate the current plate before submitting.
+        </Callout>
+      )}
+
+      {a.evaluations.length > 0 && (
+        <section className={`${card} space-y-3`}>
+          <h3 className="font-bold">Evaluation snapshots</h3>
+          <p className="text-sm text-muted">Every evaluation is kept unchanged with a hash over its inputs and results. The latest one on the current plate is the analysis result.</p>
+          <ul className="divide-y divide-line text-sm">
+            {a.evaluations.map((e) => (
+              <li key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                <span>
+                  <b>{e.code}</b> · {e.createdBy} · {fmtDate(e.createdAt)} · {e.tracks} track{e.tracks === 1 ? "" : "s"}, {e.spots} spot{e.spots === 1 ? "" : "s"}
+                  {a.plate && e.plateId !== a.plate.id && <span className="text-muted"> · earlier plate</span>}
+                </span>
+                <span className="flex items-center gap-3">
+                  <Badge tone={CONCLUSION[e.conclusion].tone}>{CONCLUSION[e.conclusion].label}</Badge>
+                  {e.id === a.currentEvaluationId && <Badge tone="info">CURRENT</Badge>}
+                  <button className="font-semibold text-brand hover:underline" onClick={() => void openSnapshot(e)}>
+                    {snapshot?.id === e.id ? "Shown below" : "Show"}
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+          {snapshot && (
+            <div className="rounded-xl border border-line p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <h4 className="font-semibold">Snapshot {snapshot.code}</h4>
+                <button className="text-sm font-semibold text-brand hover:underline" onClick={() => setSnapshot(null)}>
+                  Hide
+                </button>
+              </div>
+              <EvaluationSnapshot evaluation={snapshot} plate={a.plate} />
             </div>
-            {shown.reasons.length > 0 && (
-              <ul className="list-disc pl-5 text-sm text-muted">
-                {shown.reasons.map((r) => (
-                  <li key={r}>{r}</li>
-                ))}
-              </ul>
-            )}
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-left text-xs uppercase tracking-wide text-muted">
-                  <tr>
-                    <th className="pb-1">Check</th>
-                    <th className="pb-1">Track</th>
-                    <th className="pb-1">Compound</th>
-                    <th className="pb-1">Rf</th>
-                    <th className="pb-1">Window</th>
-                    <th className="pb-1">Result</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-line">
-                  {[...shown.suitability.map((s) => ({ ...s, kind: "Suitability" })), ...shown.identification.map((s) => ({ ...s, kind: "Identification" }))].map((s, i) => (
-                    <tr key={i}>
-                      <td className="py-1.5">{s.kind}</td>
-                      <td>{s.track}</td>
-                      <td>{s.compound}</td>
-                      <td className="font-mono">{s.rf === null ? "not found" : s.rf.toFixed(3)}</td>
-                      <td className="font-mono">
-                        {s.window.min}–{s.window.max}
-                      </td>
-                      <td>{s.pass ? <Badge tone="pass">PASS</Badge> : <Badge tone="fail">FAIL</Badge>}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-        {editable && (
-          <>
-            {saveError && <Callout tone="fail">{saveError}</Callout>}
-            <button className={primary} onClick={() => void save()} disabled={saving || problems.length > 0}>
-              {saving ? "Saving…" : "Save evaluation"}
-            </button>
-          </>
-        )}
-      </section>
+          )}
+        </section>
+      )}
+
+      {!usesImages && !editable && (
+        <section className={`${card} space-y-4`}>
+          <h3 className="font-bold">Evaluation</h3>
+          <ManualEvaluation a={a} editable={false} onSaved={saved} />
+        </section>
+      )}
+      {editable && (
+        <section className={`${card} space-y-4`}>
+          <details open={!a.plate && a.tracks.length > 0}>
+            <summary className="cursor-pointer font-bold">Enter spot distances by hand instead</summary>
+            <p className="mt-1 mb-3 text-sm text-muted">For a plate read with a ruler. A manual evaluation replaces the densitometry result as the analysis conclusion.</p>
+            <ManualEvaluation a={a} editable onSaved={saved} />
+          </details>
+        </section>
+      )}
 
       <section className="space-y-3">
         <h3 className="font-bold">History</h3>

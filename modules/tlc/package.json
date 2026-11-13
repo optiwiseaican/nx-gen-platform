@@ -1,6 +1,6 @@
 {
   "name": "@crescent/module-tlc",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "NxGen TLC module: TLC scanners, plate analyses with original images, Rf evaluation and signed approval",
   "scripts": {
@@ -22,6 +22,7 @@
     "@types/pngjs": "^6.0.5",
     "@vitejs/plugin-react": "4.7.0",
     "esbuild": "0.25.12",
+    "jpeg-js": "^0.4.4",
     "pngjs": "^7.0.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",

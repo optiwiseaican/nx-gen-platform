@@ -55,6 +55,12 @@ licensing) is used rather than copied.
 
 ## 4. Phases
 
+**Status (13 Nov 2026):** phase 1 done (commit `a748da2`: `modules/tlc/src/engine`, 56 golden cases
+reproduced bit for bit). Phase 2 done as tlc 1.1.0 (migration 002, plates and evaluation snapshots,
+crop/layout/densitogram screens, recompute check; DB tests and a browser walkthrough pass). The
+spot-detection and QC maths in §6 are now in the engine; the acceptance-profile limits (decision 4)
+are still to come in phase 4.
+
 Effort is in working sessions of the kind used for pH (one session ≈ one focused day). Each phase ends
 with a signed `.nxmod`, module-manager DB tests and a browser walkthrough, like pH.
 

@@ -31,6 +31,19 @@ export interface TrackInput {
   spots: SpotInput[];
 }
 
+/** A spot whose Rf is already known (from a densitogram peak), for evaluateRf. */
+export interface RfSpotInput {
+  rf: number;
+  compound: string;
+  distanceMm: number | null;
+}
+
+export interface RfTrackInput {
+  label: string;
+  role: TrackRole;
+  spots: RfSpotInput[];
+}
+
 const round3 = (v: number) => Math.round(v * 1000) / 1000;
 
 /** Rf = distance travelled by the spot ÷ distance travelled by the solvent front. */
@@ -86,11 +99,20 @@ export function validatePlate(frontMm: number | null, tracks: TrackInput[]): str
 
 export interface Evaluation {
   frontMm: number;
-  tracks: { label: string; role: TrackRole; spots: { distanceMm: number; rf: number; compound: string; window: RfWindow | null; inWindow: boolean | null }[] }[];
+  tracks: { label: string; role: TrackRole; spots: { distanceMm: number | null; rf: number; compound: string; window: RfWindow | null; inWindow: boolean | null }[] }[];
   suitability: { compound: string; track: string; rf: number | null; window: RfWindow; pass: boolean }[];
   identification: { compound: string; track: string; rf: number | null; window: RfWindow; pass: boolean }[];
   conclusion: Conclusion;
   reasons: string[];
+}
+
+/** Evaluation of spots entered as distances from the origin (the manual path). */
+export function evaluate(frontMm: number, tracks: TrackInput[], windows: RfWindow[]): Evaluation {
+  return evaluateRf(
+    frontMm,
+    tracks.map((t) => ({ label: t.label, role: t.role, spots: t.spots.map((s) => ({ rf: rf(s.distanceMm, frontMm), compound: s.compound, distanceMm: s.distanceMm })) })),
+    windows,
+  );
 }
 
 /**
@@ -98,13 +120,13 @@ export interface Evaluation {
  * window must fall inside that window. Identification: every sample track
  * must show a spot for each compound, inside its window.
  */
-export function evaluate(frontMm: number, tracks: TrackInput[], windows: RfWindow[]): Evaluation {
+export function evaluateRf(frontMm: number, tracks: RfTrackInput[], windows: RfWindow[]): Evaluation {
   const byCompound = new Map(windows.map((w) => [w.compound.toLowerCase(), w]));
   const out: Evaluation['tracks'] = tracks.map((t) => ({
     label: t.label.trim(),
     role: t.role,
     spots: t.spots.map((s) => {
-      const value = rf(s.distanceMm, frontMm);
+      const value = round3(s.rf);
       const window = s.compound ? (byCompound.get(s.compound.trim().toLowerCase()) ?? null) : null;
       return { distanceMm: s.distanceMm, rf: value, compound: s.compound.trim(), window, inWindow: window ? value >= window.min && value <= window.max : null };
     }),
