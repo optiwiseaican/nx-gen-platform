@@ -358,12 +358,23 @@ const TlcModule: NxGenModule = {
       path: '/analyses',
       permission: 'tlc.view',
       async handler() {
-        const rows = await ctx.db.query<AnalysisRow & { device_code: string }>(
-          `SELECT a.*, u.full_name AS analyzed_by_name, d.code AS device_code FROM tlc_analyses a
+        const rows = await ctx.db.query<AnalysisRow & { device_code: string; thumbnail: string | null; image_count: string }>(
+          `SELECT a.*, u.full_name AS analyzed_by_name, d.code AS device_code,
+                  (SELECT i.id FROM tlc_images i WHERE i.analysis_id = a.id ORDER BY i.uploaded_at LIMIT 1) AS thumbnail,
+                  (SELECT count(*) FROM tlc_images i WHERE i.analysis_id = a.id) AS image_count
+             FROM tlc_analyses a
              LEFT JOIN users u ON u.id = a.analyzed_by JOIN devices d ON d.id = a.device_id
             WHERE NOT a.is_deleted ORDER BY a.created_at DESC LIMIT 200`,
         );
-        return Promise.all(rows.map(async (r) => ({ ...view(r), deviceCode: r.device_code, workflow: await ctx.workflow.forRecord(TABLE, r.id) })));
+        return Promise.all(
+          rows.map(async (r) => ({
+            ...view(r),
+            deviceCode: r.device_code,
+            thumbnail: r.thumbnail ? (r.current_plate_id ? { kind: 'plate', id: r.current_plate_id } : { kind: 'image', id: r.thumbnail }) : null,
+            imageCount: Number(r.image_count),
+            workflow: await ctx.workflow.forRecord(TABLE, r.id),
+          })),
+        );
       },
     });
 

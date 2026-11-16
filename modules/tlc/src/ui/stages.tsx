@@ -34,7 +34,7 @@ import {
 import type { Channel, QcCheck } from "../engine";
 import type { EvaluationInput, ImageQc } from "../api/pipeline";
 import { Evaluation, ILLUMINATIONS, Illumination, RfWindow, TrackRole, evaluateRf } from "../shared/tlc";
-import { Badge, CONCLUSION, Callout, ILLUMINATION_LABEL, Tone, card, field, fmtDate, mod, primary, request, secondary, send, small } from "./lib";
+import { Badge, CONCLUSION, Callout, ILLUMINATION_LABEL, Tone, card, field, fmtDate, mod, optionBox, panelLabel, panelTitle, primary, request, secondary, send, small, strong, toolToggle } from "./lib";
 import { EvaluationFull, ImageMeta, PlateMeta, RfTable, clamp, fmt, loadPixels, svgPoint } from "./plate";
 
 export type Stage = "PICTURE" | "CROP" | "PLATE" | "EVALUATION" | "SIGNOFF";
@@ -58,29 +58,24 @@ const STATUS_MARK: Record<string, { mark: string; color: string }> = {
   NOT_ASSESSED: { mark: "–", color: "#9aa3b5" },
 };
 
-const optionBox = (active: boolean, disabled = false) =>
-  `rounded-lg border px-2.5 py-1.5 text-sm font-semibold ${active ? "border-brand bg-brand-50 text-brand" : "border-line bg-white text-ink hover:border-brand/30"} ${disabled ? "cursor-not-allowed opacity-50" : ""}`;
-
-/** The tablet's stage bar: numbered circles joined by lines; unreachable stages are dimmed. */
+/**
+ * The tablet's step bar on the dark header: a numbered circle and label per stage, joined by
+ * short lines; the current step is amber, reachable steps white, the rest dimmed.
+ */
 export function StageBar({ stage, reachable, onStage }: { stage: Stage; reachable: (s: Stage) => boolean; onStage: (s: Stage) => void }) {
   return (
-    <ol className="flex flex-wrap items-center gap-1" aria-label="Analysis stages">
+    <ol className="flex flex-wrap items-center" aria-label="Analysis stages">
       {STAGES.map((s, i) => {
         const current = s.key === stage;
         const can = reachable(s.key);
+        const fg = current ? "text-accent" : can ? "text-white" : "text-white/40";
         return (
           <li key={s.key} className="flex items-center">
-            <button
-              type="button"
-              disabled={!can}
-              aria-current={current ? "step" : undefined}
-              onClick={() => onStage(s.key)}
-              className={`flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-sm font-semibold ${current ? "bg-brand text-white" : can ? "text-ink hover:bg-canvas" : "text-muted/50"}`}
-            >
-              <span className={`grid h-6 w-6 place-items-center rounded-full text-xs ${current ? "bg-white text-brand" : can ? "bg-navy text-white" : "bg-line text-muted"}`}>{i + 1}</span>
+            <button type="button" disabled={!can} aria-current={current ? "step" : undefined} onClick={() => onStage(s.key)} className={`flex items-center gap-2 rounded-lg px-2 py-1 text-sm font-semibold ${fg} ${can && !current ? "hover:bg-white/10" : ""}`}>
+              <span className={`grid h-6 w-6 place-items-center rounded-full text-xs font-bold text-navy ${current ? "bg-accent" : can ? "bg-white" : "bg-white/40"}`}>{i + 1}</span>
               {s.label}
             </button>
-            {i < STAGES.length - 1 && <span className="mx-1 h-0.5 w-5 bg-line" aria-hidden />}
+            {i < STAGES.length - 1 && <span className="mx-0.5 h-0.5 w-5 bg-white/50" aria-hidden />}
           </li>
         );
       })}
@@ -142,7 +137,7 @@ export function PictureStage({
   const blocked = qc?.verdict === "RECAPTURE_REQUIRED";
   return (
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
-      <div className="relative min-h-[18rem] overflow-hidden rounded-2xl bg-[#0f1b33]">
+      <div className="relative min-h-[18rem] overflow-hidden rounded-2xl bg-black">
         {image ? (
           <>
             <img src={`/api/modules/tlc/api/images/${image.id}`} alt={`${ILLUMINATION_LABEL[image.illumination]} plate image`} className="max-h-[42rem] w-full object-contain" />
@@ -162,7 +157,7 @@ export function PictureStage({
 
       <aside className={`${card} space-y-4`}>
         <div>
-          <h3 className="font-bold">Plate image</h3>
+          <h3 className={panelTitle}>Plate image</h3>
           <p className="text-sm text-muted">Images are stored unchanged, with their SHA-256, and checked by the capture quality gate.</p>
         </div>
         <div className="rounded-xl border border-line p-3 text-sm">
@@ -209,7 +204,7 @@ export function PictureStage({
               </select>
             </label>
             <input ref={fileRef} id="plate-image" type="file" accept="image/png,image/jpeg" className="sr-only" onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])} />
-            <button className={`${secondary} w-full`} onClick={() => fileRef.current?.click()} disabled={busy}>
+            <button className={`${strong} w-full`} onClick={() => fileRef.current?.click()} disabled={busy}>
               {busy ? "Checking the image…" : "Upload plate image"}
             </button>
             <p className="text-xs text-muted">Camera capture through the instrument link comes with the hardware phase; until then, upload the photo.</p>
@@ -220,7 +215,7 @@ export function PictureStage({
         {image && (
           <div className="space-y-3 border-t border-line pt-4">
             <div>
-              <h4 className="font-semibold">Capture review</h4>
+              <h4 className={panelTitle}>Capture review</h4>
               <p className="text-sm text-muted">{editable ? "Uploaded image checked. Use it or choose another." : "How the image passed the capture quality gate."}</p>
             </div>
             <p className="text-sm font-semibold">Quality checks</p>
@@ -382,7 +377,7 @@ export function CropStage({
 
   return (
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
-      <div className="relative overflow-hidden rounded-2xl bg-[#0f1b33]">
+      <div className="relative overflow-hidden rounded-2xl border border-line bg-backdrop">
         <img src={`/api/modules/tlc/api/images/${image.id}`} alt="" className="max-h-[42rem] w-full object-contain" draggable={false} />
         {size && corners && (
           <svg ref={svgRef} viewBox={`0 0 ${size.w} ${size.h}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 h-full w-full touch-none" onPointerMove={onPointerMove} onPointerUp={() => (drag.current = null)} aria-label="Plate outline; drag the corners">
@@ -400,22 +395,22 @@ export function CropStage({
 
       <aside className={`${card} space-y-4`}>
         <div>
-          <h3 className="font-bold">Plate outline</h3>
+          <h3 className={panelTitle}>Plate outline</h3>
           <p className="text-sm text-muted">{source === "AUTO" ? "Plate found automatically. Drag a corner to adjust." : "Drag the four corners onto the plate corners."} The red edge is the bottom, where the samples were applied.</p>
         </div>
         {editable && (
           <>
             <div className="grid grid-cols-2 gap-2">
-              <button type="button" className={small} onClick={() => rotate(-1)} disabled={!corners}>
+              <button type="button" className={secondary} onClick={() => rotate(-1)} disabled={!corners}>
                 Rotate left
               </button>
-              <button type="button" className={small} onClick={() => rotate(1)} disabled={!corners}>
+              <button type="button" className={secondary} onClick={() => rotate(1)} disabled={!corners}>
                 Rotate right
               </button>
-              <button type="button" className={small} onClick={() => void autoDetect()} disabled={!!busy}>
+              <button type="button" className={secondary} onClick={() => void autoDetect()} disabled={!!busy}>
                 Auto-detect
               </button>
-              <button type="button" className={small} onClick={() => size && (setCorners(whole(size.w, size.h)), setSource("MANUAL"))} disabled={!size}>
+              <button type="button" className={secondary} onClick={() => size && (setCorners(whole(size.w, size.h)), setSource("MANUAL"))} disabled={!size}>
                 Whole image
               </button>
             </div>
@@ -659,11 +654,12 @@ export function useWorkbench(plate: PlateMeta, windows: RfWindow[], current: Eva
 
 type PlateTool = "SELECT" | "ADD_TRACK" | "ADD_SPOT";
 
+/** The tablet's CardSection: bold teal title with a chevron, a divider under the header while open. */
 function Section({ title, open: initial = true, children }: { title: string; open?: boolean; children: React.ReactNode }) {
   return (
-    <details open={initial} className="rounded-xl border border-line">
-      <summary className="cursor-pointer px-3 py-2 text-sm font-bold">{title}</summary>
-      <div className="space-y-3 border-t border-line p-3">{children}</div>
+    <details open={initial} className="section border-t border-line first:border-t-0">
+      <summary className="cursor-pointer py-3 text-[18px] font-semibold text-navy">{title}</summary>
+      <div className="space-y-3 border-t border-line pt-3 pb-3.5">{children}</div>
     </details>
   );
 }
@@ -777,7 +773,7 @@ export function PlateStage({ wb, analysis, editable, onContinue }: { wb: Workben
                   ["ADD_SPOT", "Add Spot"],
                 ] as [PlateTool, string][]
               ).map(([k, label]) => (
-                <button key={k} type="button" className={optionBox(tool === k)} onClick={() => setTool(k)}>
+                <button key={k} type="button" className={toolToggle(tool === k)} onClick={() => setTool(k)}>
                   {label}
                 </button>
               ))}
@@ -851,7 +847,7 @@ export function PlateStage({ wb, analysis, editable, onContinue }: { wb: Workben
         {!wb.rgb && <p className="text-sm text-muted">Processing image…</p>}
       </div>
 
-      <aside className="space-y-3">
+      <aside className={`${card} space-y-0 py-1`}>
         <Section title="Image">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-muted">View</p>
@@ -911,7 +907,7 @@ export function PlateStage({ wb, analysis, editable, onContinue }: { wb: Workben
         </Section>
         <Section title="Development">
           {editable && (
-            <button type="button" className={`${small} w-full`} onClick={wb.detectLines} disabled={!wb.gray}>
+            <button type="button" className={`${secondary} w-full`} onClick={wb.detectLines} disabled={!wb.gray}>
               Detect baseline & front
             </button>
           )}
@@ -960,10 +956,10 @@ export function PlateStage({ wb, analysis, editable, onContinue }: { wb: Workben
         <Section title={`Tracks (${tracks.length})`}>
           {editable && (
             <div className="grid grid-cols-2 gap-2">
-              <button type="button" className={small} onClick={wb.detectTracks} disabled={!wb.gray}>
+              <button type="button" className={secondary} onClick={wb.detectTracks} disabled={!wb.gray}>
                 Auto-detect
               </button>
-              <button type="button" className={small} onClick={() => setTool("ADD_TRACK")}>
+              <button type="button" className={secondary} onClick={() => setTool("ADD_TRACK")}>
                 Add track
               </button>
             </div>
@@ -1026,9 +1022,11 @@ export function PlateStage({ wb, analysis, editable, onContinue }: { wb: Workben
             })}
           </div>
         </Section>
-        <button className={`${primary} w-full`} disabled={tracks.length === 0 || !wb.layoutOk} onClick={onContinue}>
-          Continue to evaluation →
-        </button>
+        <div className="border-t border-line pt-3 pb-2">
+          <button className={`${primary} w-full`} disabled={tracks.length === 0 || !wb.layoutOk} onClick={onContinue}>
+            Continue to evaluation →
+          </button>
+        </div>
       </aside>
     </div>
   );
@@ -1179,7 +1177,7 @@ export function EvaluationStage({
               </button>
             </span>
             {editable && (
-              <button type="button" className={optionBox(addSpot)} onClick={() => setAddSpot(!addSpot)}>
+              <button type="button" className={toolToggle(addSpot)} onClick={() => setAddSpot(!addSpot)}>
                 Add spot
               </button>
             )}
@@ -1320,7 +1318,7 @@ export function EvaluationStage({
 
         <div className={`${card} space-y-3`}>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="font-bold">Peaks in {track ? `Track ${track.id}: ${track.name}` : "—"}</h3>
+            <h3 className={panelLabel}>Peaks in {track ? `Track ${track.id}: ${track.name}` : "—"}</h3>
             {editable && pv?.manual && (
               <button type="button" className={small} onClick={resetAuto}>
                 Reset to detected peaks
@@ -1408,7 +1406,7 @@ export function EvaluationStage({
       </div>
 
       <aside className={`${card} space-y-3 self-start`}>
-        <h3 className="font-bold">Peak Inspector</h3>
+        <h3 className={panelTitle}>Peak Inspector</h3>
         {selectedSpot && pv ? (
           <>
             <p className="text-sm">
@@ -1455,7 +1453,7 @@ export function EvaluationStage({
       {settingsOpen && (
         <div className="fixed inset-0 z-20 grid place-items-center bg-navy/35 p-4" role="dialog" aria-label="Densitogram settings">
           <div className="w-full max-w-md space-y-4 rounded-2xl bg-white p-6">
-            <h3 className="text-lg font-bold">Densitogram settings</h3>
+            <h3 className={panelTitle}>Densitogram settings</h3>
             <div>
               <p className="text-sm font-semibold">Across track width</p>
               <div className="mt-1 grid grid-cols-2 gap-2">

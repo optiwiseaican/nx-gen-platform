@@ -63,6 +63,8 @@ are still to come in phase 4. 16 Nov 2026: the screens were reworked to the tabl
 (Picture → Crop → Plate → Evaluation → Sign-off, stage bar, image left / side panel right, the
 tablet's labels), the capture quality gate now runs on every uploaded image and is stored with it,
 and a failed gate can only be overridden with a reason (the tablet's "Expert mode"); migration 003.
+The module also took the tablet's look (Brand.kt palette: deep teal, slate neutrals, amber accent; dark
+header with the step bar; white hairline panels; teal option boxes; the tablet's logo and sidebar).
 
 Effort is in working sessions of the kind used for pH (one session ≈ one focused day). Each phase ends
 with a signed `.nxmod`, module-manager DB tests and a browser walkthrough, like pH.
