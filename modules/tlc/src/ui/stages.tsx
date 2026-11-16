@@ -683,7 +683,78 @@ function Stepper({ label, value, step, min, max, unit, onChange, disabled }: { l
   );
 }
 
-export function PlateStage({ wb, analysis, editable, onContinue }: { wb: Workbench; analysis: { plateType: string; plateLot: string; mobilePhase: string; remarks: string }; editable: boolean; onContinue: () => void }) {
+export interface PlateInfo {
+  plateType: string;
+  plateLot: string;
+  stationaryPhase: string;
+  mobilePhase: string;
+  staining: string;
+  remarks: string;
+}
+
+/** The tablet's "Plate info" section: plate type, stationary phase, mobile phase, staining, notes. */
+function PlateInfoSection({ info, editable, onSave }: { info: PlateInfo; editable: boolean; onSave: (patch: Record<string, string>) => Promise<void> }) {
+  const [f, setF] = useState<PlateInfo>(info);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => setF(info), [info]);
+  const dirty = (Object.keys(f) as (keyof PlateInfo)[]).some((k) => f[k] !== info[k]);
+  const fieldClass = "mt-0.5 w-full rounded-[10px] border border-outline bg-white px-2.5 py-1.5 text-sm disabled:bg-canvas disabled:text-muted";
+  const rows: [keyof PlateInfo, string, string][] = [
+    ["plateType", "Plate type", "e.g. Silica gel 60 F254 (glass)"],
+    ["plateLot", "Plate lot", "e.g. HX38412"],
+    ["stationaryPhase", "Stationary phase", "e.g. Silica gel 60"],
+    ["mobilePhase", "Mobile phase / solvent", "e.g. Toluene : ethyl acetate (9:1)"],
+    ["staining", "Staining / derivatization", "e.g. Anisaldehyde, 105 °C"],
+  ];
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const patch: Record<string, string> = {};
+      for (const k of Object.keys(f) as (keyof PlateInfo)[]) if (f[k] !== info[k]) patch[k] = f[k];
+      await onSave(patch);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Section title="Plate info" open={false}>
+      {rows.map(([k, label, placeholder]) => (
+        <label key={k} className="block text-xs font-semibold">
+          {label}
+          <input value={f[k]} disabled={!editable} placeholder={placeholder} onChange={(e) => setF({ ...f, [k]: e.target.value })} className={fieldClass} />
+        </label>
+      ))}
+      <label className="block text-xs font-semibold">
+        Notes
+        <textarea rows={2} value={f.remarks} disabled={!editable} onChange={(e) => setF({ ...f, remarks: e.target.value })} className={fieldClass} />
+      </label>
+      {error && <Callout tone="fail">{error}</Callout>}
+      {editable && (
+        <button type="button" className={`${secondary} w-full`} disabled={!dirty || busy} onClick={() => void save()}>
+          {busy ? "Saving…" : dirty ? "Save plate info" : "Saved"}
+        </button>
+      )}
+    </Section>
+  );
+}
+
+export function PlateStage({
+  wb,
+  analysis,
+  editable,
+  onContinue,
+  onDetails,
+}: {
+  wb: Workbench;
+  analysis: PlateInfo;
+  editable: boolean;
+  onContinue: () => void;
+  onDetails: (patch: Record<string, string>) => Promise<void>;
+}) {
   const { plate, geometry, layout, tracks, image, settings, selected, previews } = wb;
   const [view, setView] = useState<"RAW" | "ANALYTICAL">("ANALYTICAL");
   const [showTracks, setShowTracks] = useState(true);
@@ -893,18 +964,11 @@ export function PlateStage({ wb, analysis, editable, onContinue }: { wb: Workben
           </div>
           <p className="text-xs text-muted">Analytical processing changes the measurements and is listed in the snapshot. See it with View → Analytical.</p>
         </Section>
-        <Section title="Plate info" open={false}>
-          <dl className="grid grid-cols-[7rem_1fr] gap-y-1 text-sm">
-            <dt className="text-muted">Plate type</dt>
-            <dd>{analysis.plateType}</dd>
-            <dt className="text-muted">Plate lot</dt>
-            <dd>{analysis.plateLot || "—"}</dd>
-            <dt className="text-muted">Mobile phase</dt>
-            <dd>{analysis.mobilePhase || "—"}</dd>
-            <dt className="text-muted">Notes</dt>
-            <dd>{analysis.remarks || "—"}</dd>
-          </dl>
-        </Section>
+        <PlateInfoSection
+          info={{ plateType: analysis.plateType, plateLot: analysis.plateLot, stationaryPhase: analysis.stationaryPhase, mobilePhase: analysis.mobilePhase, staining: analysis.staining, remarks: analysis.remarks }}
+          editable={editable}
+          onSave={onDetails}
+        />
         <Section title="Development">
           {editable && (
             <button type="button" className={`${secondary} w-full`} onClick={wb.detectLines} disabled={!wb.gray}>

@@ -53,11 +53,16 @@ interface Analysis {
   thumbnail?: { kind: "plate" | "image"; id: string } | null;
   imageCount?: number;
   method: { code: string; version: number; name: string; rfWindows: RfWindow[] };
+  name: string;
+  department: string;
+  projectStatus: "ACTIVE" | "ON_HOLD" | "COMPLETED";
   sampleId: string;
   batch: string;
   plateType: string;
   plateLot: string;
+  stationaryPhase: string;
   mobilePhase: string;
+  staining: string;
   solventFrontMm: number | null;
   tracks: TrackInput[];
   results: Partial<Evaluation>;
@@ -254,8 +259,9 @@ function WorkflowHeader({ a, state, stage, reachable, onStage }: { a: AnalysisDe
         <span className="min-w-0 leading-tight">
           <span className="block text-[19px] font-bold">NxGen TLC</span>
           <span className="block truncate text-[13px] text-white/80">
-            {a.code} · {a.sampleId}
-            {a.batch ? ` · ${a.batch}` : ""}
+            {a.name || a.sampleId || a.code}
+            {a.name ? ` · ${a.code}` : ""}
+            {a.sampleId && a.name ? ` · ${a.sampleId}` : ""}
           </span>
         </span>
         <span className={`ml-3 inline-flex items-center gap-1 whitespace-nowrap rounded-[14px] bg-white px-2.5 py-1 text-[13px] font-semibold ${st.tone === "pass" ? "text-pass" : st.tone === "warn" ? "text-warn" : st.tone === "fail" ? "text-fail" : "text-muted"}`}>
@@ -315,7 +321,8 @@ function Home({ principal, newOpen }: { principal: Principal; newOpen: boolean }
   const canAnalyze = principal.permissions.includes("tlc.analyze");
   const canCalibrate = principal.permissions.includes("calibration.perform");
   const q = query.trim().toLowerCase();
-  const shown = (rows ?? []).filter((a) => !q || [a.code, a.sampleId, a.batch, a.method.code, a.method.name].some((v) => v.toLowerCase().includes(q)));
+  const shown = (rows ?? []).filter((a) => !q || [a.name, a.code, a.sampleId, a.batch, a.department, a.method.code, a.method.name].some((v) => (v ?? "").toLowerCase().includes(q)));
+  const STATUS_LABEL = { ACTIVE: "Active", ON_HOLD: "On hold", COMPLETED: "Completed" } as const;
   return (
     <>
       <div className="flex flex-wrap items-center gap-4">
@@ -330,7 +337,7 @@ function Home({ principal, newOpen }: { principal: Principal; newOpen: boolean }
           </button>
         )}
       </div>
-      {canAnalyze && <NewAnalysisDialog open={creating} onClose={closeNew} />}
+      {canAnalyze && <NewAnalysisDialog open={creating} principal={principal} onClose={closeNew} />}
       {!rows && <p className="text-muted">Loading…</p>}
       {rows && shown.length === 0 && (
         <div className={`${card} py-10 text-center`}>
@@ -354,9 +361,13 @@ function Home({ principal, newOpen }: { principal: Principal; newOpen: boolean }
                 )}
               </span>
               <span className="min-w-0 flex-1 leading-snug">
-                <span className="block truncate text-[18px] font-bold">{a.sampleId}</span>
+                <span className="block truncate text-[18px] font-bold">{a.name || a.sampleId || a.code}</span>
                 <span className="block text-sm text-muted">
-                  {a.workflow ? STATE[a.workflow.state].label : "—"} · {a.code}
+                  {STATUS_LABEL[a.projectStatus] ?? "Active"} · Routine Analysis · {a.workflow ? STATE[a.workflow.state].label.toLowerCase() : "—"}
+                </span>
+                <span className="block truncate text-sm text-muted">
+                  {a.code}
+                  {a.sampleId ? ` · ${a.sampleId}` : ""}
                   {a.batch ? ` · ${a.batch}` : ""}
                 </span>
                 <span className="block truncate text-sm text-muted">
@@ -407,14 +418,19 @@ function FieldLabel({ text, required, optional }: { text: string; required?: boo
   );
 }
 
-const SAMPLE_MAX = 80;
+const NAME_MAX = 100;
 const compact = "mt-1 h-[42px] w-full rounded-[10px] border border-outline bg-white px-3 text-[14px] text-ink placeholder:text-muted/70";
+const STATUS_OPTIONS: { value: Analysis["projectStatus"]; label: string; color: string }[] = [
+  { value: "ACTIVE", label: "Active", color: "#2ead5b" },
+  { value: "ON_HOLD", label: "On hold", color: "#d9962b" },
+  { value: "COMPLETED", label: "Completed", color: "#5d6b68" },
+];
 
 /** The tablet's "Create New Project" dialog, opened over the analyses list. */
-function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+function NewAnalysisDialog({ open, principal, onClose }: { open: boolean; principal: Principal; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
-  const [setup, setSetup] = useState<{ devices: Device[]; methods: Method[] } | null>(null);
-  const [f, setF] = useState({ deviceId: "", methodVersionId: "", sampleId: "", batch: "", plateType: "Silica gel 60 F254 (glass)", plateLot: "", mobilePhase: "", remarks: "" });
+  const [setup, setSetup] = useState<{ devices: Device[]; methods: Method[]; nextCode: string } | null>(null);
+  const [f, setF] = useState({ name: "", type: "ROUTINE_ANALYSIS", sampleId: "", deviceId: "", methodVersionId: "", remarks: "", department: "", projectStatus: "ACTIVE" as Analysis["projectStatus"] });
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -425,7 +441,7 @@ function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => vo
       setTouched(false);
       setError(null);
       d.showModal();
-      mod<{ devices: Device[]; methods: Method[] }>("/setup")
+      mod<{ devices: Device[]; methods: Method[]; nextCode: string }>("/setup")
         .then((s) => {
           setSetup(s);
           setF((x) => ({ ...x, deviceId: x.deviceId || (s.devices.find((d) => d.readiness.usable)?.id ?? ""), methodVersionId: x.methodVersionId || (s.methods.find((m) => m.windows.length)?.versionId ?? "") }));
@@ -435,7 +451,7 @@ function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => vo
   }, [open]);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
   const method = setup?.methods.find((m) => m.versionId === f.methodVersionId);
-  const missing = { sampleId: !f.sampleId.trim(), deviceId: !f.deviceId, methodVersionId: !f.methodVersionId, plateType: f.plateType.trim().length < 2 };
+  const missing = { name: !f.name.trim(), deviceId: !f.deviceId, methodVersionId: !f.methodVersionId };
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -444,7 +460,7 @@ function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => vo
     setBusy(true);
     setError(null);
     try {
-      const a = await mod<Analysis>("/analyses", send({ ...f, sampleId: f.sampleId.trim() }));
+      const a = await mod<Analysis>("/analyses", send({ ...f, name: f.name.trim(), sampleId: f.sampleId.trim() }));
       location.href = `/modules/tlc/?analysis=${a.id}`;
     } catch (err) {
       setError((err as Error).message);
@@ -452,13 +468,26 @@ function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => vo
     }
   }
 
+  const typeCard = (value: string, label: string, description: string, enabled: boolean) => (
+    <button
+      type="button"
+      disabled={!enabled}
+      aria-pressed={f.type === value}
+      onClick={() => setF({ ...f, type: value })}
+      className={`flex-1 rounded-[10px] border px-3 py-2.5 text-left ${f.type === value ? "border-brand-border bg-brand-50" : "border-line bg-white"} disabled:cursor-not-allowed disabled:opacity-50`}
+    >
+      <span className={`block text-[14px] font-semibold ${f.type === value ? "text-brand-text" : "text-ink"}`}>{label}</span>
+      <span className="block text-[12px] text-muted">{description}</span>
+    </button>
+  );
+
   return (
     <dialog ref={ref} onClose={onClose} className="m-auto w-[min(85vw,1040px)] rounded-[14px] border-0 bg-white p-0 shadow-2xl backdrop:bg-black/40">
       <form onSubmit={create} className="flex max-h-[85vh] flex-col">
         <div className="flex items-start px-[22px] pt-3.5 pr-2">
           <div className="flex-1">
-            <h2 className="text-[20px] font-bold text-ink">Create New Analysis</h2>
-            <p className="text-[13px] text-muted">Start a new TLC analysis with minimal information. The plate is photographed in the next step.</p>
+            <h2 className="text-[20px] font-bold text-ink">Create New Project</h2>
+            <p className="text-[13px] text-muted">Start a new TLC analysis project with minimal information.</p>
           </div>
           <button type="button" aria-label="Close" className="grid h-9 w-9 place-items-center rounded-full text-muted hover:bg-canvas" onClick={onClose}>
             ✕
@@ -472,16 +501,34 @@ function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => vo
             </Callout>
           )}
           <label className="block">
-            <FieldLabel text="Sample ID" required />
-            <input value={f.sampleId} onChange={(e) => setF({ ...f, sampleId: e.target.value.slice(0, SAMPLE_MAX) })} className={`${compact} ${touched && missing.sampleId ? "border-fail" : ""}`} placeholder="Enter the sample ID, e.g. SMP-2026-1187" autoFocus />
+            <FieldLabel text="Project Name" required />
+            <input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value.slice(0, NAME_MAX) })} className={`${compact} ${touched && missing.name ? "border-fail" : ""}`} placeholder="Enter project name" autoFocus />
             <span className="mt-0.5 flex px-0.5 text-[11px]">
-              <span className="flex-1 text-fail">{touched && missing.sampleId ? "Enter the sample ID" : ""}</span>
+              <span className="flex-1 text-fail">{touched && missing.name ? "Enter a project name" : ""}</span>
               <span className="text-muted">
-                {f.sampleId.length}/{SAMPLE_MAX}
+                {f.name.length}/{NAME_MAX}
               </span>
             </span>
           </label>
+          <div>
+            <FieldLabel text="Project Start Type" required />
+            <div className="mt-1 flex gap-2.5">
+              {typeCard("ROUTINE_ANALYSIS", "Routine Analysis", "One plate, samples against standards", true)}
+              {typeCard("REACTION_MONITORING", "Reaction Monitoring", "Several plates and sampling times, one reaction (coming later)", false)}
+            </div>
+          </div>
           <div className="grid gap-3.5 sm:grid-cols-2">
+            <label className="block">
+              <FieldLabel text="Sample / Batch ID" />
+              <input value={f.sampleId} onChange={set("sampleId")} className={compact} placeholder="Optional, e.g. B-102" />
+            </label>
+            <div>
+              <FieldLabel text="Project ID" />
+              <div className={`${compact} flex items-center justify-between bg-canvas text-muted`}>
+                <span>{setup?.nextCode ?? "…"}</span>
+                <span className="text-[11px]">Auto-generated</span>
+              </div>
+            </div>
             <label className="block">
               <FieldLabel text="Instrument" required />
               <select value={f.deviceId} onChange={set("deviceId")} className={`${compact} ${touched && missing.deviceId ? "border-fail" : ""}`}>
@@ -510,27 +557,39 @@ function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => vo
                 </span>
               )}
             </label>
-            <label className="block">
-              <FieldLabel text="Batch" optional />
-              <input value={f.batch} onChange={set("batch")} className={compact} placeholder="Optional, e.g. B-24-0311" />
-            </label>
-            <label className="block">
-              <FieldLabel text="Plate lot" optional />
-              <input value={f.plateLot} onChange={set("plateLot")} className={compact} placeholder="e.g. HX38412" />
-            </label>
-            <label className="block">
-              <FieldLabel text="Plate type" required />
-              <input value={f.plateType} onChange={set("plateType")} className={`${compact} ${touched && missing.plateType ? "border-fail" : ""}`} placeholder="e.g. Silica gel 60 F254 (glass)" />
-            </label>
-            <label className="block">
-              <FieldLabel text="Mobile phase / solvent" optional />
-              <input value={f.mobilePhase} onChange={set("mobilePhase")} className={compact} placeholder="e.g. Toluene : ethyl acetate : formic acid (5:4:1)" />
-            </label>
           </div>
           <label className="block">
-            <FieldLabel text="Notes" optional />
-            <textarea rows={2} value={f.remarks} onChange={set("remarks")} className={`${compact} h-auto py-2`} />
+            <FieldLabel text="Description" optional />
+            <textarea rows={2} value={f.remarks} onChange={set("remarks")} className={`${compact} h-auto py-2`} placeholder="Purpose of the analysis, references, remarks" />
           </label>
+          <div className="grid gap-3.5 sm:grid-cols-3">
+            <div>
+              <FieldLabel text="Owner" />
+              <div className={`${compact} flex items-center bg-canvas text-ink`}>{principal.fullName}</div>
+            </div>
+            <label className="block">
+              <FieldLabel text="Department" />
+              <input value={f.department} onChange={set("department")} className={compact} placeholder="e.g. R&D Lab" list="tlc-departments" />
+              <datalist id="tlc-departments">
+                <option value="QC" />
+                <option value="R&D Lab" />
+                <option value="Production" />
+              </datalist>
+            </label>
+            <label className="block">
+              <FieldLabel text="Status" />
+              <span className="relative block">
+                <span className="pointer-events-none absolute top-1/2 left-3 h-2.5 w-2.5 -translate-y-1/2 rounded-full" style={{ background: STATUS_OPTIONS.find((s) => s.value === f.projectStatus)?.color }} aria-hidden />
+                <select value={f.projectStatus} onChange={set("projectStatus")} className={`${compact} pl-7`}>
+                  {STATUS_OPTIONS.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            </label>
+          </div>
           {error && <Callout tone="fail">{error}</Callout>}
         </div>
         <div className="flex items-center justify-end gap-3 border-t border-line px-[22px] py-3">
@@ -751,6 +810,7 @@ function WorkbenchStages({
   editable,
   onContinue,
   onSaved,
+  onDetails,
 }: {
   stage: Stage;
   a: AnalysisDetail;
@@ -758,9 +818,10 @@ function WorkbenchStages({
   editable: boolean;
   onContinue: () => void;
   onSaved: (message: string) => Promise<void>;
+  onDetails: (patch: Record<string, string>) => Promise<void>;
 }) {
   const wb = useWorkbench(a.plate!, a.method.rfWindows, current, editable);
-  if (stage === "PLATE") return <PlateStage wb={wb} analysis={a} editable={editable} onContinue={onContinue} />;
+  if (stage === "PLATE") return <PlateStage wb={wb} analysis={a} editable={editable} onContinue={onContinue} onDetails={onDetails} />;
   return <EvaluationStage wb={wb} windows={a.method.rfWindows} analysisId={a.id} current={current} editable={editable} onSaved={onSaved} />;
 }
 
@@ -883,7 +944,19 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
           ))}
         {(shown === "PLATE" || shown === "EVALUATION") &&
           (a.plate ? (
-            <WorkbenchStages key={a.plate.id} stage={shown} a={a} current={currentOnPlate} editable={editable} onContinue={() => (setStage("EVALUATION"), setNotice(null))} onSaved={saved} />
+            <WorkbenchStages
+              key={a.plate.id}
+              stage={shown}
+              a={a}
+              current={currentOnPlate}
+              editable={editable}
+              onContinue={() => (setStage("EVALUATION"), setNotice(null))}
+              onSaved={saved}
+              onDetails={async (patch) => {
+                await mod(`/analyses/${a.id}/details`, send(patch, "PUT"));
+                await load();
+              }}
+            />
           ) : (
             <Callout tone="warn">Straighten the plate first (Picture → Crop).</Callout>
           ))}
@@ -895,11 +968,15 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
                 <h3 className={panelTitle}>Analysis</h3>
                 <dl className="mt-3 grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
                   {[
+                    ["Project", `${a.name || "—"} · ${a.code}`],
+                    ["Status", `${{ ACTIVE: "Active", ON_HOLD: "On hold", COMPLETED: "Completed" }[a.projectStatus] ?? "Active"} · Routine Analysis`],
+                    ["Sample / batch", `${a.sampleId || "—"}${a.batch ? ` · ${a.batch}` : ""}`],
+                    ["Owner", `${a.analyzedBy.name}${a.department ? ` · ${a.department}` : ""}`],
                     ["Method", `${a.method.code} v${a.method.version} · ${a.method.name}`],
                     ["Rf windows", a.method.rfWindows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ") || "—"],
-                    ["Plate", `${a.plateType}${a.plateLot ? ` · lot ${a.plateLot}` : ""}`],
+                    ["Plate", `${a.plateType}${a.plateLot ? ` · lot ${a.plateLot}` : ""}${a.stationaryPhase ? ` · ${a.stationaryPhase}` : ""}`],
                     ["Mobile phase", a.mobilePhase || "—"],
-                    ["Analyst", a.analyzedBy.name],
+                    ["Staining", a.staining || "—"],
                     ["Created", fmtDate(a.createdAt)],
                     ["Images", a.images.map((i) => `${ILLUMINATION_LABEL[i.illumination]} (${i.qc ? i.qc.verdict.replace(/_/g, " ").toLowerCase() : "not judged"})`).join(", ") || "none"],
                     ["Straightened plate", a.plate ? `${a.plate.widthMm} × ${a.plate.heightMm} mm · SHA-256 ${a.plate.pixelsSha256.slice(0, 16)}…${a.plate.qcOverrideReason ? " · quality gate overridden" : ""}` : "—"],

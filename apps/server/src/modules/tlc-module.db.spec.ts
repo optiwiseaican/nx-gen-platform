@@ -366,13 +366,23 @@ describeDb(
         call('analyst', 'POST', '/analyses', {
           deviceId,
           methodVersionId: 'nope',
+          name: 'Nope',
           sampleId: 'S',
           plateType: 'Silica',
         }),
       ).rejects.toMatchObject({ status: 400 });
+      await expect(
+        call('analyst', 'POST', '/analyses', {
+          deviceId,
+          methodVersionId,
+          sampleId: 'SMP-2026-1187',
+        }),
+      ).rejects.toMatchObject({ status: 400, field: 'name' });
       const a = (await call('analyst', 'POST', '/analyses', {
         deviceId,
         methodVersionId,
+        name: 'Paracetamol & caffeine identification',
+        department: 'QC',
         sampleId: 'SMP-2026-1187',
         batch: 'B-24-0311',
         plateType: 'Silica gel 60 F254 (glass)',
@@ -534,7 +544,7 @@ describeDb(
       const tasks = await workflow.tasks(people.reviewer.p);
       expect(tasks.map((t) => [t.title, t.link])).toEqual([
         [
-          'TLC-0001 · SMP-2026-1187 (B-24-0311)',
+          'TLC-0001 · Paracetamol & caffeine identification (B-24-0311)',
           `/modules/tlc/?analysis=${analysisId}`,
         ],
       ]);
@@ -645,11 +655,33 @@ describeDb(
       const a = (await call('analyst', 'POST', '/analyses', {
         deviceId,
         methodVersionId: m.versions[0].id,
+        name: 'Compounds A and B, five-lane plate',
         sampleId: 'SMP-2026-1203',
         plateType: 'Silica gel 60 F254 (aluminium)',
-      })) as { id: string; code: string };
+      })) as { id: string; code: string; name: string; projectStatus: string };
       analysis2 = a.id;
-      expect(a.code).toBe('TLC-0002');
+      expect(a).toMatchObject({
+        code: 'TLC-0002',
+        name: 'Compounds A and B, five-lane plate',
+        projectStatus: 'ACTIVE',
+      });
+      // Plate info and project fields can be changed while it is a draft.
+      const d = (await call('analyst', 'PUT', `/analyses/${analysis2}/details`, {
+        stationaryPhase: 'Silica gel 60',
+        mobilePhase: 'Toluene : ethyl acetate (9:1)',
+        staining: 'None (UV 254 nm)',
+        projectStatus: 'ON_HOLD',
+      })) as { stationaryPhase: string; mobilePhase: string; staining: string; projectStatus: string; name: string };
+      expect(d).toMatchObject({
+        stationaryPhase: 'Silica gel 60',
+        mobilePhase: 'Toluene : ethyl acetate (9:1)',
+        staining: 'None (UV 254 nm)',
+        projectStatus: 'ON_HOLD',
+        name: 'Compounds A and B, five-lane plate',
+      });
+      await expect(
+        call('analyst2', 'PUT', `/analyses/${analysis2}/details`, { name: 'X' }),
+      ).rejects.toMatchObject({ status: 403 });
       workflow2 = (
         (await call('analyst', 'GET', `/analyses/${analysis2}`)) as {
           workflow: { id: string };

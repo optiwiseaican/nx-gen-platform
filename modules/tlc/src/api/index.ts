@@ -40,11 +40,16 @@ interface AnalysisRow {
   method_version: number;
   method_name: string;
   rf_windows: RfWindow[];
+  name: string;
+  department: string;
+  project_status: 'ACTIVE' | 'ON_HOLD' | 'COMPLETED';
   sample_id: string;
   batch: string;
   plate_type: string;
   plate_lot: string;
+  stationary_phase: string;
   mobile_phase: string;
+  staining: string;
   solvent_front_mm: string | null;
   tracks: TrackInput[];
   results: Record<string, unknown>;
@@ -110,6 +115,12 @@ interface EvaluationRow {
 }
 
 let ctx: ModuleContext;
+
+const projectStatus = (v: unknown): 'ACTIVE' | 'ON_HOLD' | 'COMPLETED' => {
+  if (v === undefined || v === null || v === '') return 'ACTIVE';
+  if (v === 'ACTIVE' || v === 'ON_HOLD' || v === 'COMPLETED') return v;
+  throw new ModuleError(400, 'Status must be Active, On hold or Completed.', 'projectStatus');
+};
 
 const text = (v: unknown, field: string, label: string, min: number, max: number) => {
   const s = typeof v === 'string' ? v.trim() : '';
@@ -223,14 +234,24 @@ async function content(tx: Pick<ModuleTx, 'query'>, id: string) {
   const evaluation = await loadEvaluation(tx, a.current_evaluation_id);
   const [device] = await tx.query<{ code: string; name: string; serial_number: string }>('SELECT code, name, serial_number FROM devices WHERE id = $1', [a.device_id]);
   return {
-    title: `${a.code} · ${a.sample_id}${a.batch ? ` (${a.batch})` : ''}`,
+    title: `${a.code} · ${a.name || a.sample_id}${a.batch ? ` (${a.batch})` : ''}`,
     content: {
       code: a.code,
+      name: a.name,
+      department: a.department,
+      projectStatus: a.project_status,
       instrument: device,
       method: { code: a.method_code, version: a.method_version, name: a.method_name, rfWindows: a.rf_windows },
       sampleId: a.sample_id,
       batch: a.batch,
-      plate: { type: a.plate_type, lot: a.plate_lot, mobilePhase: a.mobile_phase, solventFrontMm: a.solvent_front_mm === null ? null : Number(a.solvent_front_mm) },
+      plate: {
+        type: a.plate_type,
+        lot: a.plate_lot,
+        stationaryPhase: a.stationary_phase,
+        mobilePhase: a.mobile_phase,
+        staining: a.staining,
+        solventFrontMm: a.solvent_front_mm === null ? null : Number(a.solvent_front_mm),
+      },
       tracks: a.tracks,
       results: a.results,
       conclusion: a.conclusion,
@@ -259,11 +280,16 @@ function view(a: AnalysisRow) {
     code: a.code,
     deviceId: a.device_id,
     method: { id: a.method_id, versionId: a.method_version_id, code: a.method_code, version: a.method_version, name: a.method_name, rfWindows: a.rf_windows },
+    name: a.name,
+    department: a.department,
+    projectStatus: a.project_status,
     sampleId: a.sample_id,
     batch: a.batch,
     plateType: a.plate_type,
     plateLot: a.plate_lot,
+    stationaryPhase: a.stationary_phase,
     mobilePhase: a.mobile_phase,
+    staining: a.staining,
     solventFrontMm: a.solvent_front_mm === null ? null : Number(a.solvent_front_mm),
     tracks: a.tracks,
     results: a.results,
@@ -349,7 +375,10 @@ const TlcModule: NxGenModule = {
       async handler() {
         const devices = await ctx.devices.list('TLC');
         const methods = (await ctx.methods.effective('TLC')).map((m) => ({ ...m, ...parseRfWindows(m.parameters) }));
-        return { devices, methods, engineVersion: ENGINE_VERSION };
+        // The code the next analysis will get (as the tablet shows the project ID before creation).
+        const [seq] = await ctx.db.query<{ last_value: string; is_called: boolean }>('SELECT last_value, is_called FROM tlc_analysis_code_seq');
+        const next = seq.is_called ? Number(seq.last_value) + 1 : Number(seq.last_value);
+        return { devices, methods, engineVersion: ENGINE_VERSION, nextCode: `TLC-${String(next).padStart(4, '0')}` };
       },
     });
 
@@ -389,29 +418,78 @@ const TlcModule: NxGenModule = {
         if (!method) throw new ModuleError(400, 'Choose an approved TLC method.', 'methodVersionId');
         const { windows, problems } = parseRfWindows(method.parameters);
         if (problems.length) throw new ModuleError(409, `The method's Rf windows cannot be used: ${problems.join(' ')}`, 'methodVersionId');
+        if (b.type !== undefined && b.type !== 'ROUTINE_ANALYSIS') throw new ModuleError(400, 'Only routine analyses are available; reaction monitoring comes later.', 'type');
         const f = {
-          sampleId: text(b.sampleId, 'sampleId', 'sample ID', 1, 80),
+          name: text(b.name, 'name', 'project name', 1, 100),
+          department: text(b.department ?? '', 'department', 'Department', 0, 80),
+          projectStatus: projectStatus(b.projectStatus),
+          sampleId: text(b.sampleId ?? '', 'sampleId', 'Sample / batch ID', 0, 80),
           batch: text(b.batch ?? '', 'batch', 'Batch', 0, 80),
-          plateType: text(b.plateType, 'plateType', 'plate type', 2, 120),
+          plateType: text(b.plateType ?? 'Silica gel 60 F254', 'plateType', 'plate type', 2, 120),
           plateLot: text(b.plateLot ?? '', 'plateLot', 'Plate lot', 0, 80),
+          stationaryPhase: text(b.stationaryPhase ?? '', 'stationaryPhase', 'Stationary phase', 0, 120),
           mobilePhase: text(b.mobilePhase ?? '', 'mobilePhase', 'Mobile phase', 0, 300),
-          remarks: text(b.remarks ?? '', 'remarks', 'Remarks', 0, 2000),
+          staining: text(b.staining ?? '', 'staining', 'Staining / derivatization', 0, 120),
+          remarks: text(b.remarks ?? '', 'remarks', 'Description', 0, 2000),
         };
         const id = await ctx.db.transaction(req.principal, 'TLC analysis created', req.origin, async (tx) => {
           const [seq] = await tx.query<{ n: string }>("SELECT nextval('tlc_analysis_code_seq') AS n");
           const code = `TLC-${String(seq.n).padStart(4, '0')}`;
           const [row] = await tx.query<{ id: string }>(
             `INSERT INTO tlc_analyses (code, device_id, method_id, method_version_id, method_code, method_version, method_name, rf_windows,
-                                       sample_id, batch, plate_type, plate_lot, mobile_phase, remarks, analyzed_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+                                       sample_id, batch, plate_type, plate_lot, mobile_phase, remarks, analyzed_by,
+                                       name, department, project_status, stationary_phase, staining)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id`,
             [code, device.id, method.methodId, method.versionId, method.code, method.versionNumber, method.name, JSON.stringify(windows),
-             f.sampleId, f.batch, f.plateType, f.plateLot, f.mobilePhase, f.remarks, req.principal.userId],
+             f.sampleId, f.batch, f.plateType, f.plateLot, f.mobilePhase, f.remarks, req.principal.userId,
+             f.name, f.department, f.projectStatus, f.stationaryPhase, f.staining],
           );
           await ctx.workflow.start(tx, req.principal, { definitionCode: WORKFLOW, tableName: TABLE, recordId: row.id, seriesId: row.id, seriesVersion: 1 });
           return row.id;
         });
-        await ctx.audit.record({ action: 'TLC_ANALYSIS_CREATED', result: 'SUCCESS', principal: req.principal, recordId: id, details: { device: device.code, method: `${method.code} v${method.versionNumber}`, sampleId: f.sampleId } });
+        await ctx.audit.record({
+          action: 'TLC_ANALYSIS_CREATED',
+          result: 'SUCCESS',
+          principal: req.principal,
+          recordId: id,
+          details: { device: device.code, method: `${method.code} v${method.versionNumber}`, name: f.name, sampleId: f.sampleId },
+        });
         return view(await load(ctx.db, id));
+      },
+    });
+
+    /** Project and plate details (the tablet's Plate info and project fields); draft only, by the analyst. */
+    ctx.http.route({
+      method: 'PUT',
+      path: '/analyses/:id/details',
+      permission: 'tlc.analyze',
+      async handler(req) {
+        const b = (req.body ?? {}) as Record<string, unknown>;
+        const changed = await ctx.db.transaction(req.principal, 'TLC analysis details changed', req.origin, async (tx) => {
+          const a = await editable(tx, req, req.params.id, 'change its details');
+          const f = {
+            name: text(b.name ?? a.name, 'name', 'project name', 1, 100),
+            department: text(b.department ?? a.department, 'department', 'Department', 0, 80),
+            projectStatus: projectStatus(b.projectStatus ?? a.project_status),
+            sampleId: text(b.sampleId ?? a.sample_id, 'sampleId', 'Sample / batch ID', 0, 80),
+            batch: text(b.batch ?? a.batch, 'batch', 'Batch', 0, 80),
+            plateType: text(b.plateType ?? a.plate_type, 'plateType', 'plate type', 2, 120),
+            plateLot: text(b.plateLot ?? a.plate_lot, 'plateLot', 'Plate lot', 0, 80),
+            stationaryPhase: text(b.stationaryPhase ?? a.stationary_phase, 'stationaryPhase', 'Stationary phase', 0, 120),
+            mobilePhase: text(b.mobilePhase ?? a.mobile_phase, 'mobilePhase', 'Mobile phase', 0, 300),
+            staining: text(b.staining ?? a.staining, 'staining', 'Staining / derivatization', 0, 120),
+            remarks: text(b.remarks ?? a.remarks, 'remarks', 'Notes', 0, 2000),
+          };
+          await tx.query(
+            `UPDATE tlc_analyses SET name = $2, department = $3, project_status = $4, sample_id = $5, batch = $6, plate_type = $7, plate_lot = $8,
+                    stationary_phase = $9, mobile_phase = $10, staining = $11, remarks = $12 WHERE id = $1`,
+            [a.id, f.name, f.department, f.projectStatus, f.sampleId, f.batch, f.plateType, f.plateLot, f.stationaryPhase, f.mobilePhase, f.staining, f.remarks],
+          );
+          return Object.keys(f).filter((k) => (b as Record<string, unknown>)[k] !== undefined);
+        });
+        const a = await load(ctx.db, req.params.id);
+        await ctx.audit.record({ action: 'TLC_ANALYSIS_DETAILS_CHANGED', result: 'SUCCESS', principal: req.principal, recordId: a.id, details: { code: a.code, fields: changed.join(',') } });
+        return view(a);
       },
     });
 
