@@ -1130,10 +1130,18 @@ function InstrumentCheck({ deviceId, web }: { deviceId: string; web: string }) {
   const [remarks, setRemarks] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ calibrationId: string; code: string } | null>(null);
+  const [open, setOpen] = useState<{ id: string; code: string; state: string } | null>(null);
   useEffect(() => {
     mod<{ devices: Device[] }>("/setup")
       .then((s) => setDevice(s.devices.find((d) => d.id === deviceId) ?? null))
       .catch((e: Error) => setError(e.message));
+    // An instrument has one calibration in progress at a time: point at it instead of a form that cannot be saved.
+    api<{ calibrations: { id: string; code: string; workflow: { state: string } }[] }>(`/devices/${deviceId}`)
+      .then((d) => {
+        const c = d.calibrations.find((x) => ["DRAFT", "IN_REVIEW", "REVIEWED"].includes(x.workflow.state));
+        setOpen(c ? { id: c.id, code: c.code, state: c.workflow.state } : null);
+      })
+      .catch(() => undefined);
   }, [deviceId]);
   async function record(e: React.FormEvent) {
     e.preventDefault();
@@ -1157,6 +1165,14 @@ function InstrumentCheck({ deviceId, web }: { deviceId: string; web: string }) {
             Open it to submit for approval
           </a>
           .
+        </Callout>
+      ) : open ? (
+        <Callout tone="warn" title={`${open.code} is already in progress (${open.state.replace(/_/g, " ").toLowerCase()})`}>
+          An instrument has one check in progress at a time.{" "}
+          <a className="font-semibold text-brand underline" href={`${web}/devices/view/?calibration=${open.id}`}>
+            Open {open.code}
+          </a>{" "}
+          to submit it for approval, or discard it there and record a new check.
         </Callout>
       ) : (
         <>
