@@ -30,6 +30,60 @@ const WORKFLOW = 'TLC_ANALYSIS_APPROVAL';
 const MAX_IMAGE = 15 * 1024 * 1024;
 const UUID = /^[0-9a-f-]{36}$/i;
 
+/**
+ * In-memory cache of image bytes that never change once stored: raw images, straightened plates
+ * (both append-only and SHA-256-checked when first read) and the analytical views rendered from
+ * them. Saves a multi-megabyte database read (seconds on a hosted database) for every view of a
+ * plate. Least recently used entries go first above 256 MB; entries are re-read and re-checked
+ * against their SHA-256 after 15 minutes.
+ */
+interface CachedFile {
+  contentType: string;
+  data: Buffer;
+  fileName: string;
+  meta?: unknown;
+}
+const imageCache = (() => {
+  const LIMIT_BYTES = 256 * 1024 * 1024;
+  const MAX_AGE_MS = 15 * 60 * 1000;
+  const entries = new Map<string, { file: CachedFile; at: number }>();
+  let bytes = 0;
+  const drop = (key: string) => {
+    const e = entries.get(key);
+    if (e) {
+      bytes -= e.file.data.length;
+      entries.delete(key);
+    }
+  };
+  return {
+    get(key: string): CachedFile | undefined {
+      const e = entries.get(key);
+      if (!e) return undefined;
+      if (Date.now() - e.at > MAX_AGE_MS) {
+        drop(key);
+        return undefined;
+      }
+      entries.delete(key);
+      entries.set(key, e);
+      return e.file;
+    },
+    set(key: string, file: CachedFile): void {
+      if (file.data.length > LIMIT_BYTES / 4) return;
+      drop(key);
+      entries.set(key, { file, at: Date.now() });
+      bytes += file.data.length;
+      for (const k of entries.keys()) {
+        if (bytes <= LIMIT_BYTES) break;
+        drop(k);
+      }
+    },
+    clear(): void {
+      entries.clear();
+      bytes = 0;
+    },
+  };
+})();
+
 interface AnalysisRow {
   id: string;
   code: string;
@@ -590,13 +644,18 @@ const TlcModule: NxGenModule = {
       permission: 'tlc.view',
       async handler(req): Promise<ModuleFileResponse> {
         if (!UUID.test(req.params.imageId)) throw new ModuleError(404, 'Image not found.');
+        const key = `image:${req.params.imageId}`;
+        const hit = imageCache.get(key);
+        if (hit) return { kind: 'file', contentType: hit.contentType, data: hit.data, fileName: hit.fileName, immutable: true };
         const [img] = await ctx.db.query<{ data: Buffer; content_type: string; file_name: string; sha256: string }>(
           'SELECT data, content_type, file_name, sha256 FROM tlc_images WHERE id = $1',
           [req.params.imageId],
         );
         if (!img) throw new ModuleError(404, 'Image not found.');
         if (createHash('sha256').update(img.data).digest('hex') !== img.sha256) throw new ModuleError(409, 'The stored image no longer matches its SHA-256.');
-        return { kind: 'file', contentType: img.content_type, data: img.data, fileName: img.file_name };
+        imageCache.set(key, { contentType: img.content_type, data: img.data, fileName: img.file_name });
+        // Raw images are append-only and addressed by id, so the browser may keep them.
+        return { kind: 'file', contentType: img.content_type, data: img.data, fileName: img.file_name, immutable: true };
       },
     });
 
@@ -685,21 +744,37 @@ const TlcModule: NxGenModule = {
       path: '/plates/:plateId/image',
       permission: 'tlc.view',
       async handler(req): Promise<ModuleFileResponse> {
-        const p = await loadPlate(ctx.db, req.params.plateId, true);
-        if (!p?.rectified) throw new ModuleError(404, 'Plate not found.');
-        if (sha256(p.rectified) !== p.rectified_sha256) throw new ModuleError(409, 'The stored plate no longer matches its SHA-256.');
+        if (!UUID.test(req.params.plateId)) throw new ModuleError(404, 'Plate not found.');
+        // Straightened plates are append-only (NXGEN-TLC-003), so their pixels never change: after
+        // one checked database read they are served from memory, and the browser may keep them.
+        const plateKey = `plate:${req.params.plateId}`;
+        let cached = imageCache.get(plateKey);
+        if (!cached) {
+          const p = await loadPlate(ctx.db, req.params.plateId, true);
+          if (!p?.rectified) throw new ModuleError(404, 'Plate not found.');
+          if (sha256(p.rectified) !== p.rectified_sha256) throw new ModuleError(409, 'The stored plate no longer matches its SHA-256.');
+          cached = { contentType: 'image/png', data: p.rectified, fileName: 'plate.png', meta: { channel: p.channel, postProcessing: p.post_processing } };
+          imageCache.set(plateKey, cached);
+        }
         if (req.query.view === 'analytical') {
-          const channel = (['INTENSITY', 'RED', 'GREEN', 'BLUE'].includes(req.query.channel ?? '') ? req.query.channel : p.channel) as Channel;
+          const meta = cached.meta as { channel: Channel; postProcessing: PostProcessing };
+          const channel = (['INTENSITY', 'RED', 'GREEN', 'BLUE'].includes(req.query.channel ?? '') ? req.query.channel : meta.channel) as Channel;
           const pp: PostProcessing = {
-            blackPoint: Number(req.query.black ?? p.post_processing.blackPoint),
-            whitePoint: Number(req.query.white ?? p.post_processing.whitePoint),
-            denoise: req.query.denoise === undefined ? p.post_processing.denoise : req.query.denoise === '1',
+            blackPoint: Number(req.query.black ?? meta.postProcessing.blackPoint),
+            whitePoint: Number(req.query.white ?? meta.postProcessing.whitePoint),
+            denoise: req.query.denoise === undefined ? meta.postProcessing.denoise : req.query.denoise === '1',
           };
           if (validatePostProcessing(pp).length) throw new ModuleError(400, 'Levels must be 0–255 with black below white.');
-          const gray = analyticalGray(decodeImage(p.rectified), { channel, postProcessing: pp });
-          return { kind: 'file', contentType: 'image/png', data: encodePng(new RgbImage(gray.width, gray.height, gray.toArgb())), fileName: 'plate-analytical.png' };
+          const key = `analytical:${req.params.plateId}:${channel}:${pp.blackPoint}:${pp.whitePoint}:${pp.denoise ? 1 : 0}`;
+          let view = imageCache.get(key);
+          if (!view) {
+            const gray = analyticalGray(decodeImage(cached.data), { channel, postProcessing: pp });
+            view = { contentType: 'image/png', data: encodePng(new RgbImage(gray.width, gray.height, gray.toArgb())), fileName: 'plate-analytical.png' };
+            imageCache.set(key, view);
+          }
+          return { kind: 'file', contentType: 'image/png', data: view.data, fileName: view.fileName, immutable: true };
         }
-        return { kind: 'file', contentType: 'image/png', data: p.rectified, fileName: 'plate.png' };
+        return { kind: 'file', contentType: 'image/png', data: cached.data, fileName: 'plate.png', immutable: true };
       },
     });
 
@@ -853,6 +928,9 @@ const TlcModule: NxGenModule = {
         );
       },
     });
+  },
+  unload() {
+    imageCache.clear();
   },
 };
 

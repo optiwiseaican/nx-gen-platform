@@ -31,11 +31,12 @@ import {
   quadAspect,
   quadFrom,
 } from "../engine";
-import type { Channel, QcCheck } from "../engine";
+import type { Channel, GrayImage, QcCheck } from "../engine";
 import type { EvaluationInput, ImageQc } from "../api/pipeline";
 import { Evaluation, ILLUMINATIONS, Illumination, RfWindow, TrackRole, evaluateRf } from "../shared/tlc";
 import { Badge, CONCLUSION, Callout, ILLUMINATION_LABEL, Tone, card, field, fmtDate, mod, optionBox, panelLabel, panelTitle, primary, request, secondary, send, small, strong, toolToggle } from "./lib";
 import { EvaluationFull, FitBox, ImageMeta, PlateMeta, RfTable, clamp, fmt, loadPixels, svgPoint } from "./plate";
+import { CHART_MODES, ChartMode, ChartTool, DensitogramPlot, FULL_VIEW, PlotBand, PlotColors, PlotTrack, TRACK_PALETTE, Viewport, normalizeToMax } from "./densitogram";
 
 export type Stage = "PICTURE" | "CROP" | "PLATE" | "EVALUATION" | "SIGNOFF";
 export const STAGES: { key: Stage; label: string }[] = [
@@ -632,22 +633,44 @@ export function useWorkbench(plate: PlateMeta, windows: RfWindow[], current: Eva
     }
   }, [gray, current, tracks.length, editable, autoDetect]);
 
+  // The profiles of a track (≈0.4 s each on a full-size plate) depend only on the image, the
+  // track's position, the development and the settings, so they are kept per track and reused:
+  // editing one track's peaks, renaming a track or selecting one no longer recomputes all of them.
+  const profileCache = useRef<{ gray: GrayImage | null; entries: Map<string, { dp: ReturnType<typeof SpotDetector.detectionProfile>; processed: Profile; raw: Profile }> }>({ gray: null, entries: new Map() });
   const previews: TrackPreview[] = useMemo(() => {
     if (!gray || !layoutOk) return [];
-    return tracks.map((t) => {
+    const cache = profileCache.current;
+    if (cache.gray !== gray) {
+      cache.gray = gray;
+      cache.entries.clear();
+    }
+    const used = new Set<string>();
+    const result = tracks.map((t) => {
       const track = { id: t.id, name: t.name, centerMm: t.centerMm };
       try {
-        const dp = SpotDetector.detectionProfile(gray, geometry, track, dev, polarity, settings.densitometry.aggregation, settings.spotDetector);
+        const key = JSON.stringify([t.id, t.centerMm, dev, polarity, settings.densitometry, settings.spotDetector]);
+        used.add(key);
+        let base = cache.entries.get(key);
+        if (!base) {
+          base = {
+            dp: SpotDetector.detectionProfile(gray, geometry, track, dev, polarity, settings.densitometry.aggregation, settings.spotDetector),
+            processed: Densitometry.profile(gray, geometry, track, dev, polarity, settings.densitometry),
+            raw: Densitometry.profile(gray, geometry, track, dev, polarity, { ...settings.densitometry, smoothing: false, subtractBackground: false }),
+          };
+          cache.entries.set(key, base);
+        }
+        const { dp, processed, raw } = base;
         const manual = manualSpots[String(t.id)];
         const spots = manual ? SpotDetector.measure(dp, t.id, manual) : SpotDetector.detectOn(dp, t.id, settings.spotDetector);
-        const processed = Densitometry.profile(gray, geometry, track, dev, polarity, settings.densitometry);
-        const raw = Densitometry.profile(gray, geometry, track, dev, polarity, { ...settings.densitometry, smoothing: false, subtractBackground: false });
         return { track: t, raw, processed, spots, noise: dp.noise, manual: !!manual };
       } catch {
         const empty = new Profile([0, 100], [0, 0], 1);
         return { track: t, raw: empty, processed: empty, spots: [], noise: 0, manual: false };
       }
     });
+    // Forget tracks that are gone or have moved (keeps memory bounded while dragging).
+    for (const k of [...cache.entries.keys()]) if (!used.has(k)) cache.entries.delete(k);
+    return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gray, geometry, layout, tracks, settings, manualSpots, polarity]);
 
@@ -783,7 +806,8 @@ export function PlateStage({
   onDetails: (patch: Record<string, string>) => Promise<void>;
 }) {
   const { plate, geometry, layout, tracks, image, settings, selected, previews } = wb;
-  const [view, setView] = useState<"RAW" | "ANALYTICAL">("ANALYTICAL");
+  // The colour photo by default; Analytical shows the grey image the calculations use.
+  const [view, setView] = useState<"RAW" | "ANALYTICAL">("RAW");
   const [showTracks, setShowTracks] = useState(true);
   const [showScale, setShowScale] = useState(false);
   const [showSpots, setShowSpots] = useState(true);
@@ -1154,8 +1178,19 @@ export function EvaluationStage({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const svgRef = useRef<SVGSVGElement>(null);
-  const drag = useRef<"start" | "end" | null>(null);
+  // The tablet's chart controls.
+  const [mode, setMode] = useState<ChartMode>("SINGLE");
+  const [tool, setTool] = useState<ChartTool>("NONE");
+  const [viewport, setViewport] = useState<Viewport>(FULL_VIEW);
+  const [showBaseline, setShowBaseline] = useState(true);
+  const [showArea, setShowArea] = useState(true);
+  const [showLegend, setShowLegend] = useState(true);
+  const [showGrid, setShowGrid] = useState(true);
+  const [showTracks, setShowTracks] = useState(true);
+  const [normalized, setNormalized] = useState(false);
+  const [referenceId, setReferenceId] = useState<number | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const toggleTool = (t: ChartTool) => setTool(tool === t ? "NONE" : t);
 
   const index = Math.max(0, tracks.findIndex((t) => t.id === selected));
   const track = tracks[index] ?? null;
@@ -1166,28 +1201,35 @@ export function EvaluationStage({
   useEffect(() => setPeak(null), [selected]);
   const cycle = (d: 1 | -1) => tracks.length && wb.setSelected(tracks[(index + d + tracks.length) % tracks.length].id);
 
-  const W = 760;
-  const H = 260;
-  const padL = 44;
-  const padR = 12;
-  const padB = 26;
-  const padT = 14;
-  const profile = pv ? (signalView === "RAW" ? pv.raw : pv.processed) : null;
-  const min = profile ? Math.min(...profile.signal, ...(showRaw && pv ? pv.raw.signal : [])) : 0;
-  const max = profile ? Math.max(...profile.signal, ...(showRaw && pv ? pv.raw.signal : [])) : 1;
-  const span = max - min || 1;
-  const x = (h: number) => padL + (h / 100) * (W - padL - padR);
-  const y = (v: number) => padT + (1 - (v - min) / span) * (H - padT - padB);
-  const hOf = (px: number) => ((px - padL) / (W - padL - padR)) * 100;
-  const path = (p: Profile) => p.hRf.map((h, i) => `${i ? "L" : "M"}${x(h).toFixed(1)},${y(p.signal[i]).toFixed(1)}`).join(" ");
-
+  const processedView = signalView === "PROCESSED";
   const deriv = useMemo(() => {
     if (!pv || !derivative) return null;
     const samplesPerHrf = pv.processed.size / 100;
     const sg = SavitzkyGolay.forRegion(3, samplesPerHrf, 3);
-    const d = sg.derivative(pv.processed.signal, derivative, 1 / samplesPerHrf);
-    return { hRf: pv.processed.hRf, d };
+    return pv.processed.withSignal(sg.derivative(pv.processed.signal, derivative, 1 / samplesPerHrf));
   }, [pv, derivative]);
+  const plotTracks: PlotTrack[] = useMemo(
+    () =>
+      previews.map((p, i) => {
+        const prof = processedView ? p.processed : p.raw;
+        return { id: p.track.id, label: `${p.track.id}: ${p.track.name}`, profile: normalized ? normalizeToMax(prof) : prof, color: TRACK_PALETTE[i % TRACK_PALETTE.length], reference: p.track.id === referenceId };
+      }),
+    [previews, processedView, normalized, referenceId],
+  );
+  const bands: PlotBand[] = windows.map((w) => ({ startHrf: w.min * 100, endHrf: w.max * 100, label: w.compound, color: "#0F9BA8" }));
+  const onBoundary = (n: number, start: boolean, h: number) => {
+    if (!pv) return;
+    const list = windowsOf(pv);
+    const i = pv.spots.findIndex((sp) => sp.number === n);
+    if (i < 0) return;
+    const w = list[i];
+    const v = Math.round(h * 10) / 10;
+    list[i] = start ? { startHrf: Math.min(v, w.endHrf - 0.5), endHrf: w.endHrf } : { startHrf: w.startHrf, endHrf: Math.max(v, w.startHrf + 0.5) };
+    setWindows(list);
+  };
+  const baselineLabel = settings.densitometry.subtractBackground && settings.densitometry.subtractPeakBaseline ? "AUTO" : settings.densitometry.subtractPeakBaseline ? "CHORD" : settings.densitometry.subtractBackground ? "BACKGROUND" : "NONE";
+  const setBaseline = (v: string) =>
+    wb.setSettings({ ...settings, densitometry: { ...settings.densitometry, subtractBackground: v === "AUTO", subtractPeakBaseline: v === "AUTO" || v === "CHORD" } });
 
   const windowsOf = (p: TrackPreview) => p.spots.map((s) => ({ startHrf: Math.round(s.window.startHrf * 10) / 10, endHrf: Math.round(s.window.endHrf * 10) / 10 }));
   const setWindows = (list: PeakWindow[]) => track && wb.setManualSpots({ ...wb.manualSpots, [String(track.id)]: list });
@@ -1200,41 +1242,12 @@ export function EvaluationStage({
     setPeak(null);
   };
 
-  const onPlotClick = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!svgRef.current || !pv) return;
-    const h = hOf(svgPoint(svgRef.current, e).x);
-    if (h < 0 || h > 100) return;
-    const hit = pv.spots.find((s) => h >= s.window.startHrf - 0.5 && h <= s.window.endHrf + 0.5);
-    if (hit) {
-      setPeak(hit.number);
-      return;
-    }
-    if (addSpot && editable) {
-      const w = PeakLocator.windowAround(pv.processed, h);
-      if (!pv.manual) wb.setManualSpots({ ...wb.manualSpots, [String(pv.track.id)]: [...windowsOf(pv), { startHrf: Math.round(w.startHrf * 10) / 10, endHrf: Math.round(w.endHrf * 10) / 10 }] });
-      else setWindows([...windowsOf(pv), { startHrf: Math.round(w.startHrf * 10) / 10, endHrf: Math.round(w.endHrf * 10) / 10 }]);
-      setAddSpot(false);
-    }
-  };
-  const onPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (!editing || !editable || !svgRef.current || !pv || peak === null) return;
-    const s = pv.spots.find((sp) => sp.number === peak);
-    if (!s) return;
-    const px = svgPoint(svgRef.current, e).x;
-    const tol = 40 * (W / svgRef.current.getBoundingClientRect().width);
-    if (Math.abs(px - x(s.window.startHrf)) <= tol) drag.current = "start";
-    else if (Math.abs(px - x(s.window.endHrf)) <= tol) drag.current = "end";
-    if (drag.current) (e.target as Element).setPointerCapture(e.pointerId);
-  };
-  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (!drag.current || !svgRef.current || !pv || peak === null) return;
-    const h = clamp(Math.round(hOf(svgPoint(svgRef.current, e).x) * 10) / 10, 0, 100);
-    const list = windowsOf(pv);
-    const i = pv.spots.findIndex((sp) => sp.number === peak);
-    if (i < 0) return;
-    const w = list[i];
-    list[i] = drag.current === "start" ? { startHrf: Math.min(h, w.endHrf - 0.5), endHrf: w.endHrf } : { startHrf: w.startHrf, endHrf: Math.max(h, w.startHrf + 0.5) };
-    setWindows(list);
+  /** A tap on the curve away from any peak: with Add spot, mark a peak there. */
+  const onTapHrf = (h: number) => {
+    if (!addSpot || !editable || !pv) return;
+    const w = PeakLocator.windowAround(pv.processed, h);
+    setWindows([...windowsOf(pv), { startHrf: Math.round(w.startHrf * 10) / 10, endHrf: Math.round(w.endHrf * 10) / 10 }]);
+    setAddSpot(false);
   };
 
   async function save() {
@@ -1255,162 +1268,268 @@ export function EvaluationStage({
   const nextCode = `E${String((current?.number ?? 0) + 1).padStart(2, "0")}`;
 
   return (
-    // The densitogram stays in view; the peak table, preview and save scroll beneath it, and the
-    // Peak Inspector scrolls on its own (the tablet's evaluation screen).
+    // Below the fixed header, the densitogram, peak table, preview and save scroll together as one
+    // column; the Peak Inspector stays beside them.
     <div className="grid gap-5 lg:min-h-0 lg:flex-1 lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(0,1fr)_20rem]">
-      <div className="flex flex-col gap-4 lg:min-h-0">
-        <div className={`${card} space-y-3 lg:max-h-[70%] lg:shrink-0 lg:overflow-y-auto`}>
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span className="flex items-center gap-1">
-              <button type="button" className={small} aria-label="Previous track" onClick={() => cycle(-1)} disabled={tracks.length < 2}>
-                ◀
-              </button>
-              <span className="min-w-[7rem] text-center font-semibold">{track ? `Track ${track.id}` : "No track"}</span>
-              <button type="button" className={small} aria-label="Next track" onClick={() => cycle(1)} disabled={tracks.length < 2}>
-                ▶
-              </button>
-            </span>
-            {editable && (
-              <button type="button" className={toolToggle(addSpot)} onClick={() => setAddSpot(!addSpot)}>
-                Add spot
-              </button>
-            )}
-            <span className="ml-auto flex items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted">Densitogram</span>
-              <button type="button" className={optionBox(false, true)} disabled title="Calibration comes with quantification (phase 4).">
-                Calibration
-              </button>
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span className="flex gap-1">
-              <button type="button" className={optionBox(signalView === "RAW")} onClick={() => setSignalView("RAW")}>
-                Raw
-              </button>
-              <button type="button" className={optionBox(signalView === "PROCESSED")} onClick={() => setSignalView("PROCESSED")}>
-                Processed
-              </button>
-            </span>
-            <label className="flex items-center gap-1.5">
-              Peaks:
-              <select value={pv?.manual ? "MANUAL" : "AUTO"} disabled={!editable || !pv} onChange={(e) => (e.target.value === "MANUAL" ? (toManual(), setEditing(true)) : resetAuto())} className="rounded-lg border border-line bg-white px-2 py-1">
-                <option value="AUTO">Auto</option>
-                <option value="MANUAL">Manual</option>
-              </select>
-            </label>
-            <label className="flex items-center gap-1.5">
-              Smoothing:
-              <select value={settings.densitometry.smoothing ? "SG" : "NONE"} disabled={!editable} onChange={(e) => wb.setSettings({ ...settings, densitometry: { ...settings.densitometry, smoothing: e.target.value === "SG" } })} className="rounded-lg border border-line bg-white px-2 py-1">
-                <option value="SG">Savitzky–Golay</option>
-                <option value="NONE">None</option>
-              </select>
-            </label>
-            <label className="flex items-center gap-1.5">
-              <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} /> Raw signal
-            </label>
-            <label className="flex items-center gap-1.5">
-              <input type="checkbox" checked={labels} onChange={(e) => setLabels(e.target.checked)} /> Labels
-            </label>
-            <label className="flex items-center gap-1.5">
-              Derivative:
-              <select value={derivative} onChange={(e) => setDerivative(Number(e.target.value) as 0 | 1 | 2)} className="rounded-lg border border-line bg-white px-2 py-1">
-                <option value={0}>Off</option>
-                <option value={1}>D1</option>
-                <option value={2}>D2</option>
-              </select>
-            </label>
-            <button type="button" className={`${small} ml-auto`} onClick={() => setSettingsOpen(true)} aria-label="Densitogram settings">
-              ⚙ Settings
-            </button>
-          </div>
+      <div className="space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+        <div className={`${card} space-y-3`}>
           <div className="grid gap-3 md:grid-cols-[13rem_minmax(0,1fr)]">
-            <div className="relative self-start">
-              <img src={`/api/modules/tlc/api/plates/${plate.id}/image?view=analytical&channel=${wb.image.channel}&black=${wb.image.postProcessing.blackPoint}&white=${wb.image.postProcessing.whitePoint}&denoise=${wb.image.postProcessing.denoise ? 1 : 0}`} alt="Plate strip" className="block w-full" />
-              <svg viewBox={`0 0 ${plate.widthPx} ${plate.heightPx}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-label="Tracks on the plate; tap one to select it">
-                {tracks.map((t) => {
-                  const xx = geometry.xMmToPx(t.centerMm - layout.trackWidthMm / 2);
-                  const w = geometry.xMmToPx(layout.trackWidthMm);
-                  return <rect key={t.id} x={xx} y={geometry.yMmToPx(layout.solventFrontMm)} width={w} height={geometry.yMmToPx(layout.baselineMm) - geometry.yMmToPx(layout.solventFrontMm)} fill={t.id === track?.id ? "rgb(37 99 235 / 0.3)" : "rgb(255 255 255 / 0.05)"} stroke={t.id === track?.id ? "#2563eb" : "rgb(255 255 255 / 0.5)"} strokeWidth={Math.max(1.5, plate.widthPx / 300)} className="cursor-pointer" onClick={() => wb.setSelected(t.id)} />;
-                })}
-              </svg>
-            </div>
-            <div>
-              {pv && profile ? (
-                <>
-                  <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className={`w-full ${addSpot ? "cursor-crosshair" : editing ? "cursor-col-resize" : ""}`} role="img" aria-label={`Densitogram of ${pv.track.name}`} onClick={onPlotClick} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={() => (drag.current = null)}>
-                    {pv.spots.map((s) => (
-                      <rect key={s.number} x={x(s.window.startHrf)} y={padT} width={Math.max(1, x(s.window.endHrf) - x(s.window.startHrf))} height={H - padT - padB} fill={s.number === peak ? "rgb(37 99 235 / 0.18)" : "rgb(224 52 76 / 0.1)"} />
-                    ))}
-                    {windows.map((w) => (
-                      <rect key={w.compound} x={x(w.min * 100)} y={H - padB} width={x(w.max * 100) - x(w.min * 100)} height={4} fill="#13965a" opacity={0.6}>
-                        <title>{w.compound}</title>
-                      </rect>
-                    ))}
-                    {showRaw && signalView === "PROCESSED" && <path d={path(pv.raw)} fill="none" stroke="#9aa3b5" strokeWidth={1} />}
-                    <path d={path(profile)} fill="none" stroke="#1b2d57" strokeWidth={1.6} />
-                    {pv.spots.map((s) => (
-                      <g key={s.number}>
-                        <line x1={x(s.window.startHrf)} x2={x(s.window.startHrf)} y1={padT} y2={H - padB} stroke={s.number === peak ? "#2563eb" : "#e0344c"} strokeWidth={s.number === peak && editing ? 2 : 1} strokeDasharray="4 3" />
-                        <line x1={x(s.window.endHrf)} x2={x(s.window.endHrf)} y1={padT} y2={H - padB} stroke={s.number === peak ? "#2563eb" : "#e0344c"} strokeWidth={s.number === peak && editing ? 2 : 1} strokeDasharray="4 3" />
-                        {labels && (
-                          <text x={x(s.peak.maxHrf)} y={padT + 11} textAnchor="middle" fontSize={11} fill="#e0344c" fontWeight={700}>
-                            {s.number}
-                          </text>
-                        )}
-                      </g>
-                    ))}
-                    {[0, 25, 50, 75, 100].map((h) => (
-                      <text key={h} x={x(h)} y={H - 8} textAnchor="middle" fontSize={10} fill="#5a6680">
-                        {h}
-                      </text>
-                    ))}
-                    <text x={2} y={padT + 10} fontSize={10} fill="#5a6680">
-                      {max.toFixed(0)}
-                    </text>
-                    <text x={2} y={H - padB} fontSize={10} fill="#5a6680">
-                      {min.toFixed(0)}
-                    </text>
-                    <text x={W - padR} y={H - 22} textAnchor="end" fontSize={10} fill="#5a6680">
-                      hRF →
-                    </text>
+            {/* Plate strip (colour photo), with the track arrows below it — as on the tablet. */}
+            <div className="flex flex-col gap-2 self-start">
+              <div className="relative overflow-hidden rounded-lg bg-backdrop">
+                <img src={`/api/modules/tlc/api/plates/${plate.id}/image`} alt="Plate strip" className="block w-full" draggable={false} />
+                {showTracks && (
+                  <svg viewBox={`0 0 ${plate.widthPx} ${plate.heightPx}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-label="Tracks on the plate; tap one to select it">
+                    {tracks.map((t) => {
+                      const xx = geometry.xMmToPx(t.centerMm - layout.trackWidthMm / 2);
+                      const w = geometry.xMmToPx(layout.trackWidthMm);
+                      const active = t.id === track?.id;
+                      return <rect key={t.id} x={xx} y={geometry.yMmToPx(layout.solventFrontMm)} width={w} height={geometry.yMmToPx(layout.baselineMm) - geometry.yMmToPx(layout.solventFrontMm)} fill={active ? "rgb(30 79 216 / 0.25)" : "rgb(255 255 255 / 0.06)"} stroke={active ? "#1E4FD8" : "rgb(255 255 255 / 0.7)"} strokeWidth={Math.max(1.5, plate.widthPx / (active ? 160 : 300))} className="cursor-pointer" onClick={() => wb.setSelected(t.id)} />;
+                    })}
                   </svg>
-                  {deriv && (
-                    <div className="relative">
-                      <svg viewBox={`0 0 ${W} ${H * 0.45}`} className="w-full" role="img" aria-label={`D${derivative} of ${pv.track.name}`}>
-                        {(() => {
-                          const dmin = Math.min(...deriv.d);
-                          const dmax = Math.max(...deriv.d);
-                          const ds = dmax - dmin || 1;
-                          const h2 = H * 0.45;
-                          const yy = (v: number) => 6 + (1 - (v - dmin) / ds) * (h2 - 12);
-                          return (
-                            <>
-                              <line x1={padL} x2={W - padR} y1={yy(0)} y2={yy(0)} stroke="#9aa3b5" strokeDasharray="3 3" />
-                              <path d={deriv.hRf.map((h, i) => `${i ? "L" : "M"}${x(h).toFixed(1)},${yy(deriv.d[i]).toFixed(1)}`).join(" ")} fill="none" stroke="#b45f06" strokeWidth={1.3} />
-                              <text x={padL} y={12} fontSize={10} fill="#b45f06" fontWeight={700}>
-                                D{derivative}
-                              </text>
-                            </>
-                          );
-                        })()}
-                      </svg>
-                      <button type="button" className="absolute top-1 right-1 text-xs font-semibold text-brand hover:underline" onClick={() => setDerivative(0)}>
-                        Close D{derivative}
-                      </button>
-                    </div>
+                )}
+              </div>
+              <div className="flex items-center gap-1">
+                <button type="button" className="grid h-9 w-9 place-items-center rounded-full border border-line bg-white text-navy disabled:opacity-40" aria-label="Previous track" onClick={() => cycle(-1)} disabled={tracks.length < 2}>
+                  ‹
+                </button>
+                <span className="flex-1 text-center text-sm font-semibold text-navy">{track ? `Track ${track.id}` : "No track"}</span>
+                <button type="button" className="grid h-9 w-9 place-items-center rounded-full border border-line bg-white text-navy disabled:opacity-40" aria-label="Next track" onClick={() => cycle(1)} disabled={tracks.length < 2}>
+                  ›
+                </button>
+              </div>
+            </div>
+
+            <div className="min-w-0 space-y-2">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                {editable && (
+                  <button type="button" className={toolToggle(addSpot)} onClick={() => (setAddSpot(!addSpot), setMode("SINGLE"))}>
+                    + {addSpot ? "Tap the curve" : "Add spot"}
+                  </button>
+                )}
+                <button type="button" className={toolToggle(showTracks)} onClick={() => setShowTracks(!showTracks)}>
+                  Show tracks
+                </button>
+                <span className="ml-auto inline-flex overflow-hidden rounded-lg border border-line">
+                  {CHART_MODES.map((m) => (
+                    <button key={m.mode} type="button" onClick={() => setMode(m.mode)} className={`px-3 py-1.5 text-sm font-semibold ${mode === m.mode ? "bg-brand-50 text-navy" : "bg-white text-muted hover:text-ink"}`}>
+                      {m.label}
+                    </button>
+                  ))}
+                </span>
+                <button type="button" className="grid h-9 w-9 place-items-center rounded-lg border border-line bg-white text-navy" onClick={() => setSettingsOpen(true)} aria-label="Densitogram settings" title="Densitogram settings">
+                  ⚙
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-line bg-white px-3 py-1.5">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line pb-1.5 text-sm">
+                  <span className="flex">
+                    <span className="border-b-2 border-brand px-2 py-1 font-semibold text-navy">Densitogram</span>
+                    <span className="px-2 py-1 text-muted/60" title="Calibration comes with quantification (phase 4).">
+                      Calibration
+                    </span>
+                    <span className="px-2 py-1 text-muted/60" title="Spectra need a scanning densitometer; NxGen works from plate photographs.">
+                      Spectrum
+                    </span>
+                  </span>
+                  <span className="ml-auto flex flex-wrap items-center gap-2">
+                    <span className="inline-flex overflow-hidden rounded-lg border border-line">
+                      {(["RAW", "PROCESSED"] as const).map((v) => (
+                        <button key={v} type="button" onClick={() => setSignalView(v)} className={`px-2.5 py-1 font-semibold ${signalView === v ? "bg-brand-50 text-navy" : "bg-white text-muted"}`}>
+                          {v === "RAW" ? "Raw" : "Processed"}
+                        </button>
+                      ))}
+                    </span>
+                    <label className="flex items-center gap-1">
+                      <span className="text-muted">Baseline</span>
+                      <select value={baselineLabel} disabled={!editable} onChange={(e) => setBaseline(e.target.value)} className="rounded-lg border border-line bg-white px-1.5 py-1">
+                        <option value="AUTO">Auto</option>
+                        <option value="CHORD">Chord</option>
+                        <option value="NONE">None</option>
+                        {baselineLabel === "BACKGROUND" && <option value="BACKGROUND">Background</option>}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1">
+                      <span className="text-muted">Peaks</span>
+                      <select value={pv?.manual ? "MANUAL" : "AUTO"} disabled={!editable || !pv} onChange={(e) => (e.target.value === "MANUAL" ? (toManual(), setEditing(true)) : resetAuto())} className="rounded-lg border border-line bg-white px-1.5 py-1">
+                        <option value="AUTO">Auto</option>
+                        <option value="MANUAL">Manual</option>
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1">
+                      <span className="text-muted">Smoothing</span>
+                      <select value={settings.densitometry.smoothing ? "SG" : "NONE"} disabled={!editable} onChange={(e) => wb.setSettings({ ...settings, densitometry: { ...settings.densitometry, smoothing: e.target.value === "SG" } })} className="rounded-lg border border-line bg-white px-1.5 py-1">
+                        <option value="SG">S–G</option>
+                        <option value="NONE">None</option>
+                      </select>
+                    </label>
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 py-1.5 text-sm">
+                  <button type="button" className={toolToggle(tool === "ZOOM")} onClick={() => toggleTool("ZOOM")} title="Drag sideways to zoom hRF, up or down to zoom intensity, or drag a box to zoom both. Ctrl/⌘ + scroll also zooms.">
+                    Zoom
+                  </button>
+                  <button type="button" className={toolToggle(tool === "PAN")} onClick={() => toggleTool("PAN")}>
+                    Pan
+                  </button>
+                  <button type="button" className={toolToggle(false)} onClick={() => (setViewport(FULL_VIEW), setTool("NONE"))}>
+                    Reset
+                  </button>
+                  <button type="button" className={toolToggle(false)} onClick={() => setViewport({ ...viewport, yRange: null })}>
+                    Auto Scale
+                  </button>
+                  <button type="button" className={toolToggle(tool === "CURSOR")} onClick={() => (toggleTool("CURSOR"), tool === "CURSOR" && setViewport({ ...viewport, cursor: null }))}>
+                    Cursor
+                  </button>
+                  <span className="mx-1 h-6 w-px bg-line" />
+                  {mode === "SINGLE" ? (
+                    <>
+                      <label className="flex items-center gap-1.5">
+                        <input type="checkbox" checked={showRaw} disabled={!processedView} onChange={(e) => setShowRaw(e.target.checked)} /> Raw signal
+                      </label>
+                      <label className="flex items-center gap-1.5">
+                        <input type="checkbox" checked={showBaseline} onChange={(e) => setShowBaseline(e.target.checked)} /> Baseline
+                      </label>
+                      <label className="flex items-center gap-1.5">
+                        <input type="checkbox" checked={labels} onChange={(e) => setLabels(e.target.checked)} /> Labels
+                      </label>
+                      <label className="flex items-center gap-1.5">
+                        <input type="checkbox" checked={showArea} onChange={(e) => setShowArea(e.target.checked)} /> Area
+                      </label>
+                      <label className="flex items-center gap-1">
+                        <span className="text-muted">Derivative</span>
+                        <select value={derivative} onChange={(e) => setDerivative(Number(e.target.value) as 0 | 1 | 2)} className="rounded-lg border border-line bg-white px-1.5 py-1">
+                          <option value={0}>Off</option>
+                          <option value={1}>D1</option>
+                          <option value={2}>D2</option>
+                        </select>
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <label className="flex items-center gap-1">
+                        <span className="text-muted">Response</span>
+                        <select value={normalized ? "N" : "A"} onChange={(e) => setNormalized(e.target.value === "N")} className="rounded-lg border border-line bg-white px-1.5 py-1">
+                          <option value="A">Absolute</option>
+                          <option value="N">Normalized</option>
+                        </select>
+                      </label>
+                      <label className="flex items-center gap-1">
+                        <span className="text-muted">Reference</span>
+                        <select value={referenceId ?? ""} onChange={(e) => setReferenceId(e.target.value === "" ? null : Number(e.target.value))} className="rounded-lg border border-line bg-white px-1.5 py-1">
+                          <option value="">None</option>
+                          {tracks.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.id}: {t.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
                   )}
-                  <p className="text-xs text-muted">
-                    {addSpot ? "Tap the curve where the spot is." : editing ? "Edit boundaries: drag the dashed start or end line of the selected peak." : "Tap inside a peak to select it."} Noise σ {fmt(pv.noise, 2)}.
-                  </p>
-                </>
-              ) : (
-                <p className="p-8 text-center text-sm text-muted">Select a track to see its densitogram.</p>
-              )}
+                  <span className="relative ml-auto">
+                    <button type="button" className={toolToggle(moreOpen)} onClick={() => setMoreOpen(!moreOpen)} aria-label="More chart options">
+                      ⋯
+                    </button>
+                    {moreOpen && (
+                      <span className="absolute right-0 z-20 mt-1 flex w-56 flex-col rounded-xl border border-line bg-white py-1 shadow-lg">
+                        {[
+                          [showLegend ? "Hide legend" : "Show legend", () => setShowLegend(!showLegend)],
+                          [showGrid ? "Hide grid" : "Show grid", () => setShowGrid(!showGrid)],
+                          ["Densitogram settings…", () => setSettingsOpen(true)],
+                        ].map(([label, fn]) => (
+                          <button key={label as string} type="button" className="px-3 py-2 text-left hover:bg-brand-50" onClick={() => ((fn as () => void)(), setMoreOpen(false))}>
+                            {label as string}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                  </span>
+                </div>
+
+                {pv ? (
+                  <>
+                    <DensitogramPlot
+                      mode={mode}
+                      viewport={viewport}
+                      onViewport={setViewport}
+                      height={deriv && mode === "SINGLE" ? 300 : 380}
+                      processed={pv.processed}
+                      raw={showRaw || !processedView ? pv.raw : null}
+                      showProcessed={processedView}
+                      peakBaselines={settings.densitometry.subtractPeakBaseline}
+                      peaks={processedView ? pv.spots.map((s) => ({ number: s.number, startHrf: s.window.startHrf, endHrf: s.window.endHrf, apexHrf: s.peak.maxHrf, selected: s.number === peak })) : []}
+                      tracks={plotTracks}
+                      selectedTrackId={track?.id ?? null}
+                      showLabels={labels}
+                      showBaseline={showBaseline}
+                      showArea={showArea}
+                      showLegend={showLegend}
+                      showGrid={showGrid}
+                      yLabel={mode !== "SINGLE" && normalized ? "Normalized response (%)" : "Intensity (AU)"}
+                      xTitle={!(deriv && mode === "SINGLE")}
+                      bands={mode === "SINGLE" ? bands : []}
+                      tool={tool}
+                      editBoundaries={editing && editable}
+                      crosshair={addSpot}
+                      ariaLabel={`Densitogram of ${pv.track.name}`}
+                      onSelectPeak={setPeak}
+                      onSelectTrack={(id) => wb.setSelected(id)}
+                      onTapHrf={onTapHrf}
+                      onBoundary={onBoundary}
+                    />
+                    {deriv && mode === "SINGLE" && (
+                      <div className="relative">
+                        <DensitogramPlot
+                          mode="SINGLE"
+                          viewport={viewport}
+                          onViewport={setViewport}
+                          height={190}
+                          processed={deriv}
+                          showBaseline={false}
+                          showArea={false}
+                          showLabels={false}
+                          showLegend={showLegend}
+                          showGrid={showGrid}
+                          yLabel={`D${derivative}`}
+                          seriesLabel={derivative === 1 ? "D1 · first derivative of the processed signal" : "D2 · each minimum = one component"}
+                          seriesColor={PlotColors.Derivative}
+                          zeroLine
+                          fitInterior
+                          compact
+                          tool={tool}
+                          ariaLabel={`D${derivative} of ${pv.track.name}`}
+                        />
+                        <button type="button" className="absolute top-1 right-2 rounded-lg border border-line bg-white px-2.5 py-1 text-xs font-semibold text-navy" onClick={() => setDerivative(0)}>
+                          ✕ Close D{derivative}
+                        </button>
+                      </div>
+                    )}
+                    <p className="pb-1 text-xs text-muted">
+                      {addSpot
+                        ? "Tap the curve where the spot is."
+                        : editing && editable
+                          ? "Edit boundaries: drag the coloured start or end line of the selected peak."
+                          : tool === "ZOOM"
+                            ? "Drag sideways to zoom hRF, up or down to zoom intensity, or drag a box to zoom both."
+                            : tool === "CURSOR"
+                              ? "Tap or drag to read values."
+                              : mode === "STACKED"
+                                ? "Tap a curve to select its track."
+                                : "Tap inside a peak to select it. Ctrl/⌘ + scroll zooms."}{" "}
+                      Noise σ {fmt(pv.noise, 2)}.
+                    </p>
+                  </>
+                ) : (
+                  <p className="p-8 text-center text-sm text-muted">Select a track to see its densitogram.</p>
+                )}
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="space-y-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
         <div className={`${card} space-y-3`}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className={panelLabel}>Peaks in {track ? `Track ${track.id}: ${track.name}` : "—"}</h3>
@@ -1498,7 +1617,6 @@ export function EvaluationStage({
             </div>
           </div>
         )}
-        </div>
       </div>
 
       <aside className={`${card} space-y-3 self-start lg:max-h-full lg:overflow-y-auto`}>

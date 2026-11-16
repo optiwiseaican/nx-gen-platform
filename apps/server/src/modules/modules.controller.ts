@@ -12,8 +12,10 @@ import {
   ForbiddenException,
   Post,
   Req,
+  Res,
   StreamableFile,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import type { ModulePrincipal } from '@crescent/module-sdk';
 import {
   CurrentPrincipal,
@@ -136,6 +138,7 @@ export class ModulesController {
     @Param('path') path: string | string[],
     @Req() req: NxGenRequest,
     @CurrentPrincipal() p: Principal,
+    @Res({ passthrough: true }) res: Response,
   ) {
     const rel = '/' + (Array.isArray(path) ? path.join('/') : path);
     const hit = ID.test(id) ? this.modules.route(id, req.method, rel) : null;
@@ -167,18 +170,24 @@ export class ModulesController {
         contentType?: string;
         data?: unknown;
         fileName?: string;
+        immutable?: boolean;
       } | null;
       if (
         file?.kind === 'file' &&
         Buffer.isBuffer(file.data) &&
         typeof file.contentType === 'string'
-      )
+      ) {
+        // Private: only this signed-in browser keeps it; the URL is still access-checked on every
+        // request the browser does make.
+        if (file.immutable)
+          res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
         return new StreamableFile(file.data, {
           type: file.contentType,
           disposition: file.fileName
             ? `inline; filename="${file.fileName.replace(/[^\w.-]/g, '_')}"`
             : undefined,
         });
+      }
       return out;
     } catch (e) {
       if (e instanceof HttpException) throw e;

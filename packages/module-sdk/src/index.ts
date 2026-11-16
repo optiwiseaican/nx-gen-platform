@@ -278,6 +278,11 @@ export interface ModuleFileResponse {
   contentType: string;
   data: Buffer;
   fileName?: string;
+  /**
+   * The content behind this URL never changes (e.g. addressed by an immutable id), so the
+   * browser may keep it: sent as Cache-Control "private, max-age=31536000, immutable".
+   */
+  immutable?: boolean;
 }
 
 export interface NxGenModule {
