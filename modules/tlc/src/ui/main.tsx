@@ -303,7 +303,7 @@ function LockBanner({ state }: { state: Workflow["state"] }) {
 // Pages
 // ---------------------------------------------------------------------------
 
-function Home({ principal, newOpen }: { principal: Principal; newOpen: boolean }) {
+function Home({ principal, web, newOpen }: { principal: Principal; web: string; newOpen: boolean }) {
   const [rows, setRows] = useState<Analysis[] | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [query, setQuery] = useState("");
@@ -337,7 +337,7 @@ function Home({ principal, newOpen }: { principal: Principal; newOpen: boolean }
           </button>
         )}
       </div>
-      {canAnalyze && <NewAnalysisDialog open={creating} principal={principal} onClose={closeNew} />}
+      {canAnalyze && <NewAnalysisDialog open={creating} principal={principal} web={web} onClose={closeNew} />}
       {!rows && <p className="text-muted">Loading…</p>}
       {rows && shown.length === 0 && (
         <div className={`${card} py-10 text-center`}>
@@ -427,7 +427,7 @@ const STATUS_OPTIONS: { value: Analysis["projectStatus"]; label: string; color: 
 ];
 
 /** The tablet's "Create New Project" dialog, opened over the analyses list. */
-function NewAnalysisDialog({ open, principal, onClose }: { open: boolean; principal: Principal; onClose: () => void }) {
+function NewAnalysisDialog({ open, principal, web, onClose }: { open: boolean; principal: Principal; web: string; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [setup, setSetup] = useState<{ devices: Device[]; methods: Method[]; nextCode: string } | null>(null);
   const [f, setF] = useState({ name: "", type: "ROUTINE_ANALYSIS", sampleId: "", deviceId: "", methodVersionId: "", remarks: "", department: "", projectStatus: "ACTIVE" as Analysis["projectStatus"] });
@@ -494,10 +494,23 @@ function NewAnalysisDialog({ open, principal, onClose }: { open: boolean; princi
           </button>
         </div>
         <div className="space-y-3.5 overflow-y-auto px-[22px] py-3.5">
+          {setup && !setup.devices.some((d) => d.readiness.usable) && (
+            <Callout tone="warn" title={setup.devices.length ? "No TLC instrument is ready for use" : "No TLC instrument registered"}>
+              {setup.devices.length
+                ? "Record an instrument check for the scanner and have it approved; it then appears here."
+                : "Register the TLC scanner under Instruments (an administrator signs it), record its instrument check and have the check approved."}{" "}
+              <a href={`${web}/devices/`} className="font-semibold text-brand underline">
+                Open Instruments
+              </a>
+            </Callout>
+          )}
           {setup && !setup.methods.length && (
             <Callout tone="warn" title="No approved TLC method">
-              Create a method for a TLC scanner under Methods, with a parameter per compound whose unit is “Rf” (e.g. Paracetamol, 0.40–0.50, Rf), and have
-              it reviewed and approved.
+              Create a method for a TLC scanner under Methods, with a parameter per compound whose unit is “Rf” (e.g. Paracetamol, 0.40–0.50, Rf), submit it and
+              have it reviewed and approved.{" "}
+              <a href={`${web}/methods/`} className="font-semibold text-brand underline">
+                Open Methods
+              </a>
             </Callout>
           )}
           <label className="block">
@@ -1200,7 +1213,7 @@ function App() {
   if (analysis) return <AnalysisPage id={analysis} principal={boot.principal} web={boot.web} />;
   return (
     <Shell web={boot.web} principal={boot.principal} active={q.get("new") ? "NEW" : device ? "INSTRUMENT" : "ALL"}>
-      {device ? <InstrumentCheck deviceId={device} web={boot.web} /> : <Home principal={boot.principal} newOpen={q.get("new") === "1"} />}
+      {device ? <InstrumentCheck deviceId={device} web={boot.web} /> : <Home principal={boot.principal} web={boot.web} newOpen={q.get("new") === "1"} />}
     </Shell>
   );
 }
