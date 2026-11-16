@@ -1,8 +1,9 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { evaluate, Evaluation, ILLUMINATIONS, Illumination, RfWindow, TrackInput, validatePlate } from "../shared/tlc";
+import { evaluate, Evaluation, RfWindow, TrackInput, validatePlate } from "../shared/tlc";
 import { Badge, CONCLUSION, Callout, HttpError, ILLUMINATION_LABEL, Tone, api, card, field, fmtDate, mod, primary, request, secondary, send, session } from "./lib";
-import { CropStage, EvaluationFull, EvaluationSnapshot, EvaluationSummary, ImageMeta, PlateMeta, PlateWorkbench, RfTable } from "./plate";
+import { EvaluationFull, EvaluationSnapshot, EvaluationSummary, ImageMeta, PlateMeta, RfTable } from "./plate";
+import { CropStage, EvaluationStage, PictureStage, PlateStage, Stage, StageBar, useWorkbench } from "./stages";
 import "./styles.css";
 
 interface Principal {
@@ -629,6 +630,27 @@ function ManualEvaluation({ a, editable, onSaved }: { a: AnalysisDetail; editabl
   );
 }
 
+/** The Plate and Evaluation stages share one workbench (decoded plate, layout, tracks, settings). */
+function WorkbenchStages({
+  stage,
+  a,
+  current,
+  editable,
+  onContinue,
+  onSaved,
+}: {
+  stage: Stage;
+  a: AnalysisDetail;
+  current: EvaluationFull | null;
+  editable: boolean;
+  onContinue: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const wb = useWorkbench(a.plate!, a.method.rfWindows, current, editable);
+  if (stage === "PLATE") return <PlateStage wb={wb} analysis={a} editable={editable} onContinue={onContinue} />;
+  return <EvaluationStage wb={wb} windows={a.method.rfWindows} analysisId={a.id} current={current} editable={editable} onSaved={onSaved} />;
+}
+
 function AnalysisPage({ id, principal, web }: { id: string; principal: Principal; web: string }) {
   const [a, setA] = useState<AnalysisDetail | null>(null);
   const [wf, setWf] = useState<WorkflowDetail | null>(null);
@@ -638,8 +660,9 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
   const [notice, setNotice] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [step, setStep] = useState<Step | null>(null);
-  const [illumination, setIllumination] = useState<Illumination>("UV254");
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [stage, setStage] = useState<Stage | null>(null);
+  const [pictureId, setPictureId] = useState<string | null>(null);
+  const [crop, setCrop] = useState<{ imageId: string; override: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -647,9 +670,11 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
       setA(x);
       setCurrent(x.currentEvaluationId ? await mod<EvaluationFull>(`/evaluations/${x.currentEvaluationId}`) : null);
       if (x.workflow) setWf(await api<WorkflowDetail>(`/workflow/instances/${x.workflow.id}`));
+      return x;
     } catch (e) {
       if ((e as HttpError).status === 401) location.href = `${web}/login/?reason=session`;
       else setError((e as Error).message);
+      return null;
     }
   }, [id, web]);
   useEffect(() => {
@@ -660,42 +685,29 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
   if (!a || !wf) return <p className="text-muted">Loading…</p>;
 
   const editable = wf.instance.state === "DRAFT" && a.analyzedBy.id === principal.userId && principal.permissions.includes("tlc.analyze");
+  const currentOnPlate = current && a.plate && current.plateId === a.plate.id ? current : null;
+  // Where the analyst left off, as the tablet reopens a project at its last stage.
+  const resumeStage: Stage = !editable ? "SIGNOFF" : !a.plate ? "PICTURE" : currentOnPlate ? "EVALUATION" : "PLATE";
+  const shown: Stage = stage ?? resumeStage;
+  const cropImage = crop ? a.images.find((i) => i.id === crop.imageId) : a.plate ? a.images.find((i) => i.id === a.plate!.imageId) : null;
+  const reachable = (s: Stage) => (s === "PICTURE" || s === "SIGNOFF" ? true : s === "CROP" ? !!(cropImage ?? a.images[0]) : !!a.plate);
+
   const saved = async (message: string) => {
     await load();
     setNotice(message);
     setSaveError(null);
   };
-
-  async function upload(file: File) {
-    setNotice(null);
-    setSaveError(null);
-    try {
-      const r = await request(`/modules/tlc/api/analyses/${id}/images?illumination=${illumination}&name=${encodeURIComponent(file.name)}`, {
-        method: "POST",
-        body: file,
-        headers: { "Content-Type": file.type || "application/octet-stream" },
-      });
-      const out = (await r.json()) as { sha256: string };
-      await load();
-      setNotice(`${ILLUMINATION_LABEL[illumination]} image stored · SHA-256 ${out.sha256.slice(0, 16)}…`);
-    } catch (e) {
-      setSaveError((e as Error).message);
-    } finally {
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  }
-
   async function sign(comment: string, password: string) {
     const ui = STEP_UI[step!];
     await api(`/workflow/instances/${wf!.instance.id}/${step!.toLowerCase()}`, send({ reason: comment, signature: ui.meaning ? { username: principal.username, password } : undefined }));
     const done = step!;
     await load(); // show the new (locked) state before announcing it
     setStep(null);
+    setStage("SIGNOFF");
     setNotice(
       { SUBMIT: "Submitted for review and locked.", WITHDRAW: "Withdrawn to draft.", REVIEW: "Signed as reviewed.", APPROVE: "Approved.", REJECT: "Rejected.", INVALIDATE: "Invalidated." }[done],
     );
   }
-
   async function openSnapshot(e: EvaluationSummary) {
     try {
       setSnapshot(await mod<EvaluationFull>(`/evaluations/${e.id}`));
@@ -709,7 +721,6 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
     { label: "Reviewed", who: wf.instance.reviewedBy?.name, done: ["REVIEWED", "APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
     { label: "Approved", who: wf.instance.approvedBy?.name, done: ["APPROVED", "INVALIDATED", "SUPERSEDED"].includes(wf.instance.state) },
   ];
-  const currentOnPlate = current && a.plate && current.plateId === a.plate.id ? current : null;
   const usesImages = !!a.plate || (!a.tracks.length && a.images.length > 0);
 
   return (
@@ -717,7 +728,7 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-mono text-sm text-muted">
-            {a.code} · {a.device?.code} {a.device?.name}
+            {a.code} · {a.device?.code} {a.device?.name} · {a.method.code} v{a.method.version}
           </p>
           <h2 className="text-xl font-bold">
             {a.sampleId}
@@ -729,169 +740,178 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
           <Badge tone={CONCLUSION[a.conclusion].tone}>{CONCLUSION[a.conclusion].label}</Badge>
         </span>
       </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-white px-3 py-2 shadow-[var(--shadow-card)]">
+        <StageBar stage={shown} reachable={reachable} onStage={(s) => (setStage(s), setNotice(null))} />
+        <span className="text-xs text-muted">
+          Rf windows: {a.method.rfWindows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ") || "none"}
+        </span>
+      </div>
       {notice && <Callout tone="pass">{notice}</Callout>}
       {saveError && <Callout tone="fail">{saveError}</Callout>}
 
-      <ol className="grid gap-2 sm:grid-cols-3" aria-label="Approval progress">
-        {stages.map((s, i) => (
-          <li key={s.label} className={`rounded-xl border px-4 py-2.5 text-sm ${s.done ? "border-pass/30 bg-pass-50" : "border-line bg-white"}`}>
-            <p className="text-xs font-bold uppercase tracking-wide text-muted">
-              {i + 1}. {s.label}
-            </p>
-            <p className="font-semibold">{s.done ? (s.who ?? "—") : "Not yet"}</p>
-          </li>
+      {shown === "PICTURE" && (
+        <PictureStage
+          analysisId={a.id}
+          images={a.images}
+          selectedId={pictureId}
+          editable={editable}
+          onSelect={setPictureId}
+          onUploaded={async (message, imageId) => {
+            await saved(message);
+            setPictureId(imageId);
+          }}
+          onUse={(img, override) => (setCrop({ imageId: img.id, override }), setStage("CROP"), setNotice(null))}
+        />
+      )}
+      {shown === "CROP" &&
+        (cropImage ?? a.images[0] ? (
+          <CropStage
+            key={(cropImage ?? a.images[0]).id}
+            analysisId={a.id}
+            image={cropImage ?? a.images[0]}
+            plate={a.plate}
+            overrideReason={crop?.override ?? a.plate?.qcOverrideReason ?? ""}
+            editable={editable}
+            onStraightened={async (message) => {
+              await saved(message);
+              setStage("PLATE");
+            }}
+          />
+        ) : (
+          <Callout tone="warn">Upload a plate image first.</Callout>
         ))}
-      </ol>
-      {wf.allowedSteps.length > 0 && (
-        <div className="flex flex-wrap gap-3">
-          {wf.allowedSteps.map((s) => (
-            <button key={s} className={STEP_UI[s].tone === "primary" ? primary : secondary} onClick={() => setStep(s)}>
-              {STEP_UI[s].label}
-            </button>
-          ))}
-        </div>
-      )}
+      {(shown === "PLATE" || shown === "EVALUATION") &&
+        (a.plate ? (
+          <WorkbenchStages key={a.plate.id} stage={shown} a={a} current={currentOnPlate} editable={editable} onContinue={() => setStage("EVALUATION")} onSaved={saved} />
+        ) : (
+          <Callout tone="warn">Straighten the plate first (Picture → Crop).</Callout>
+        ))}
 
-      <section className={card}>
-        <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
-          {[
-            ["Method", `${a.method.code} v${a.method.version} · ${a.method.name}`],
-            ["Rf windows", a.method.rfWindows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ") || "—"],
-            ["Plate", `${a.plateType}${a.plateLot ? ` · lot ${a.plateLot}` : ""}`],
-            ["Mobile phase", a.mobilePhase || "—"],
-            ["Analyst", a.analyzedBy.name],
-            ["Created", fmtDate(a.createdAt)],
-          ].map(([k, v]) => (
-            <div key={k} className="grid grid-cols-[8rem_1fr] gap-3">
-              <dt className="text-muted">{k}</dt>
-              <dd className="font-medium">{v}</dd>
-            </div>
-          ))}
-        </dl>
-      </section>
-
-      <section className={`${card} space-y-4`}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="font-bold">1. Plate images</h3>
-          {editable && (
-            <div className="flex flex-wrap items-center gap-2">
-              <select aria-label="Illumination" value={illumination} onChange={(e) => setIllumination(e.target.value as Illumination)} className="rounded-xl border border-line bg-white px-3 py-2 text-sm">
-                {ILLUMINATIONS.map((i) => (
-                  <option key={i} value={i}>
-                    {ILLUMINATION_LABEL[i]}
-                  </option>
-                ))}
-              </select>
-              <input ref={fileRef} id="plate-image" type="file" accept="image/png,image/jpeg" className="sr-only" onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])} />
-              <button className={secondary} onClick={() => fileRef.current?.click()}>
-                Add image…
-              </button>
-            </div>
-          )}
-        </div>
-        {a.images.length === 0 && <p className="text-sm text-muted">No images yet. Images are stored as original records and cannot be changed or removed.</p>}
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {a.images.map((img) => (
-            <figure key={img.id} className="overflow-hidden rounded-xl border border-line">
-              <img src={`/api/modules/tlc/api/images/${img.id}`} alt={`${ILLUMINATION_LABEL[img.illumination]} plate image`} className="aspect-[4/3] w-full bg-canvas object-contain" />
-              <figcaption className="space-y-0.5 p-3 text-xs">
-                <p className="font-semibold text-ink">
-                  {ILLUMINATION_LABEL[img.illumination]} · {img.fileName}
+      {shown === "SIGNOFF" && (
+        <>
+          <ol className="grid gap-2 sm:grid-cols-3" aria-label="Approval progress">
+            {stages.map((s, i) => (
+              <li key={s.label} className={`rounded-xl border px-4 py-2.5 text-sm ${s.done ? "border-pass/30 bg-pass-50" : "border-line bg-white"}`}>
+                <p className="text-xs font-bold uppercase tracking-wide text-muted">
+                  {i + 1}. {s.label}
                 </p>
-                <p className="text-muted">
-                  {(img.sizeBytes / 1024).toFixed(0)} KB · {img.uploadedBy} · {fmtDate(img.uploadedAt)}
-                </p>
-                <p className="break-all font-mono text-[11px] text-muted">SHA-256 {img.sha256}</p>
-              </figcaption>
-            </figure>
-          ))}
-        </div>
-      </section>
-
-      {a.images.length > 0 && (editable || a.plate) && <CropStage analysisId={a.id} images={a.images} plate={a.plate} editable={editable} onSaved={saved} />}
-
-      {a.plate && (editable || currentOnPlate) && (
-        <PlateWorkbench key={a.plate.id} analysisId={a.id} plate={a.plate} windows={a.method.rfWindows} current={currentOnPlate} editable={editable} onSaved={saved} />
-      )}
-      {a.plate && current && !currentOnPlate && editable && (
-        <Callout tone="warn" title="The plate was straightened again">
-          The last evaluation ({current.code}) belongs to the earlier plate. Evaluate the current plate before submitting.
-        </Callout>
-      )}
-
-      {a.evaluations.length > 0 && (
-        <section className={`${card} space-y-3`}>
-          <h3 className="font-bold">Evaluation snapshots</h3>
-          <p className="text-sm text-muted">Every evaluation is kept unchanged with a hash over its inputs and results. The latest one on the current plate is the analysis result.</p>
-          <ul className="divide-y divide-line text-sm">
-            {a.evaluations.map((e) => (
-              <li key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
-                <span>
-                  <b>{e.code}</b> · {e.createdBy} · {fmtDate(e.createdAt)} · {e.tracks} track{e.tracks === 1 ? "" : "s"}, {e.spots} spot{e.spots === 1 ? "" : "s"}
-                  {a.plate && e.plateId !== a.plate.id && <span className="text-muted"> · earlier plate</span>}
-                </span>
-                <span className="flex items-center gap-3">
-                  <Badge tone={CONCLUSION[e.conclusion].tone}>{CONCLUSION[e.conclusion].label}</Badge>
-                  {e.id === a.currentEvaluationId && <Badge tone="info">CURRENT</Badge>}
-                  <button className="font-semibold text-brand hover:underline" onClick={() => void openSnapshot(e)}>
-                    {snapshot?.id === e.id ? "Shown below" : "Show"}
-                  </button>
-                </span>
+                <p className="font-semibold">{s.done ? (s.who ?? "—") : "Not yet"}</p>
               </li>
             ))}
-          </ul>
-          {snapshot && (
-            <div className="rounded-xl border border-line p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <h4 className="font-semibold">Snapshot {snapshot.code}</h4>
-                <button className="text-sm font-semibold text-brand hover:underline" onClick={() => setSnapshot(null)}>
-                  Hide
+          </ol>
+          {wf.allowedSteps.length > 0 && (
+            <div className="flex flex-wrap gap-3">
+              {wf.allowedSteps.map((s) => (
+                <button key={s} className={STEP_UI[s].tone === "primary" ? primary : secondary} onClick={() => setStep(s)}>
+                  {STEP_UI[s].label}
                 </button>
-              </div>
-              <EvaluationSnapshot evaluation={snapshot} plate={a.plate} />
+              ))}
             </div>
           )}
-        </section>
-      )}
+          {a.plate && current && !currentOnPlate && editable && (
+            <Callout tone="warn" title="The plate was straightened again">
+              The last evaluation ({current.code}) belongs to the earlier plate. Evaluate the current plate before submitting.
+            </Callout>
+          )}
+          <section className={card}>
+            <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
+              {[
+                ["Method", `${a.method.code} v${a.method.version} · ${a.method.name}`],
+                ["Rf windows", a.method.rfWindows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ") || "—"],
+                ["Plate", `${a.plateType}${a.plateLot ? ` · lot ${a.plateLot}` : ""}`],
+                ["Mobile phase", a.mobilePhase || "—"],
+                ["Analyst", a.analyzedBy.name],
+                ["Created", fmtDate(a.createdAt)],
+                ["Images", a.images.map((i) => `${ILLUMINATION_LABEL[i.illumination]} (${i.qc ? i.qc.verdict.replace(/_/g, " ").toLowerCase() : "not judged"})`).join(", ") || "none"],
+                ["Straightened plate", a.plate ? `${a.plate.widthMm} × ${a.plate.heightMm} mm · SHA-256 ${a.plate.pixelsSha256.slice(0, 16)}…${a.plate.qcOverrideReason ? " · quality gate overridden" : ""}` : "—"],
+              ].map(([k, v]) => (
+                <div key={k} className="grid grid-cols-[9rem_1fr] gap-3">
+                  <dt className="text-muted">{k}</dt>
+                  <dd className="font-medium">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+          {a.plate?.qcOverrideReason && (
+            <Callout tone="warn" title="Capture quality gate overridden">
+              {a.plate.qcOverrideReason}
+            </Callout>
+          )}
 
-      {!usesImages && !editable && (
-        <section className={`${card} space-y-4`}>
-          <h3 className="font-bold">Evaluation</h3>
-          <ManualEvaluation a={a} editable={false} onSaved={saved} />
-        </section>
-      )}
-      {editable && (
-        <section className={`${card} space-y-4`}>
-          <details open={!a.plate && a.tracks.length > 0}>
-            <summary className="cursor-pointer font-bold">Enter spot distances by hand instead</summary>
-            <p className="mt-1 mb-3 text-sm text-muted">For a plate read with a ruler. A manual evaluation replaces the densitometry result as the analysis conclusion.</p>
-            <ManualEvaluation a={a} editable onSaved={saved} />
-          </details>
-        </section>
-      )}
+          {a.evaluations.length > 0 && (
+            <section className={`${card} space-y-3`}>
+              <h3 className="font-bold">Evaluation snapshots</h3>
+              <p className="text-sm text-muted">Every evaluation is kept unchanged with a hash over its inputs and results. The latest one on the current plate is the analysis result.</p>
+              <ul className="divide-y divide-line text-sm">
+                {a.evaluations.map((e) => (
+                  <li key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                    <span>
+                      <b>{e.code}</b> · {e.createdBy} · {fmtDate(e.createdAt)} · {e.tracks} track{e.tracks === 1 ? "" : "s"}, {e.spots} spot{e.spots === 1 ? "" : "s"}
+                      {a.plate && e.plateId !== a.plate.id && <span className="text-muted"> · earlier plate</span>}
+                    </span>
+                    <span className="flex items-center gap-3">
+                      <Badge tone={CONCLUSION[e.conclusion].tone}>{CONCLUSION[e.conclusion].label}</Badge>
+                      {e.id === a.currentEvaluationId && <Badge tone="info">CURRENT</Badge>}
+                      <button className="font-semibold text-brand hover:underline" onClick={() => void openSnapshot(e)}>
+                        {snapshot?.id === e.id ? "Shown below" : "Show"}
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {snapshot && (
+                <div className="rounded-xl border border-line p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h4 className="font-semibold">Snapshot {snapshot.code}</h4>
+                    <button className="text-sm font-semibold text-brand hover:underline" onClick={() => setSnapshot(null)}>
+                      Hide
+                    </button>
+                  </div>
+                  <EvaluationSnapshot evaluation={snapshot} plate={a.plate} />
+                </div>
+              )}
+            </section>
+          )}
+          {a.evaluations.length === 0 && !usesImages && (
+            <section className={`${card} space-y-4`}>
+              <h3 className="font-bold">Evaluation</h3>
+              <ManualEvaluation a={a} editable={false} onSaved={saved} />
+            </section>
+          )}
+          {editable && (
+            <section className={`${card} space-y-4`}>
+              <details open={!a.plate && a.tracks.length > 0}>
+                <summary className="cursor-pointer font-bold">Enter spot distances by hand instead</summary>
+                <p className="mt-1 mb-3 text-sm text-muted">For a plate read with a ruler. A manual evaluation replaces the densitometry result as the analysis conclusion.</p>
+                <ManualEvaluation a={a} editable onSaved={saved} />
+              </details>
+            </section>
+          )}
 
-      <section className="space-y-3">
-        <h3 className="font-bold">History</h3>
-        {[...wf.history].reverse().map((e) => (
-          <div key={e.id} className={card}>
-            <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
-              <p className="font-semibold">
-                {e.step.charAt(0) + e.step.slice(1).toLowerCase()} <span className="font-normal text-muted">· {e.actorName}</span>
-              </p>
-              <p className="text-xs text-muted">{fmtDate(e.occurredAt)}</p>
-            </div>
-            {e.comment && <p className="mt-1 text-sm text-muted">“{e.comment}”</p>}
-            {e.signature && (
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-canvas/60 p-3 text-sm">
-                <span>
-                  <b>{e.signature.meaningLabel}</b> — {e.signature.signerFullName} ({e.signature.signerUsername}) · {fmtDate(e.signature.signedAt)}
-                </span>
-                <Badge tone={e.signature.intact ? "pass" : "fail"}>{e.signature.intact ? "SIGNATURE VERIFIED" : "SIGNATURE INVALID"}</Badge>
+          <section className="space-y-3">
+            <h3 className="font-bold">History</h3>
+            {[...wf.history].reverse().map((e) => (
+              <div key={e.id} className={card}>
+                <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                  <p className="font-semibold">
+                    {e.step.charAt(0) + e.step.slice(1).toLowerCase()} <span className="font-normal text-muted">· {e.actorName}</span>
+                  </p>
+                  <p className="text-xs text-muted">{fmtDate(e.occurredAt)}</p>
+                </div>
+                {e.comment && <p className="mt-1 text-sm text-muted">“{e.comment}”</p>}
+                {e.signature && (
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-canvas/60 p-3 text-sm">
+                    <span>
+                      <b>{e.signature.meaningLabel}</b> — {e.signature.signerFullName} ({e.signature.signerUsername}) · {fmtDate(e.signature.signedAt)}
+                    </span>
+                    <Badge tone={e.signature.intact ? "pass" : "fail"}>{e.signature.intact ? "SIGNATURE VERIFIED" : "SIGNATURE INVALID"}</Badge>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        ))}
-      </section>
+            ))}
+          </section>
+        </>
+      )}
       <StepDialog step={step} principal={principal} onClose={() => setStep(null)} onSign={sign} />
     </>
   );

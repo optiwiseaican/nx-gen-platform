@@ -1,17 +1,19 @@
 import { createHash } from 'crypto';
 import type { DeviceInfo, ModuleContext, ModuleFileResponse, ModuleRequest, ModuleTx, NxGenModule } from '@crescent/module-sdk';
 import { ModuleError } from '@crescent/module-sdk';
-import { Channel, ImageOps, PlateGeometry, Point, PostProcessing } from '../engine';
+import { Channel, PlateGeometry, Point, PostProcessing, RgbImage, validatePostProcessing } from '../engine';
 import { evaluate, ILLUMINATIONS, Illumination, imageType, parseRfWindows, RfWindow, TrackInput, validatePlate } from '../shared/tlc';
 import { decodeImage, encodePng, pixelBytes } from './images';
 import {
   ENGINE_VERSION,
   EvaluationInput,
   EvaluationResults,
+  ImageQc,
   analyticalGray,
   autoLayout,
   computeEvaluation,
   evaluationContent,
+  imageQc,
   makePlate,
   parseEvaluationInput,
   parsePlateSpec,
@@ -19,6 +21,9 @@ import {
   suggestOutline,
   verifyPlate,
 } from './pipeline';
+
+/** Below this the quality gate has nothing to judge (and the tablet never captures such images). */
+const MIN_QC_SIDE = 64;
 
 const TABLE = 'tlc_analyses';
 const WORKFLOW = 'TLC_ANALYSIS_APPROVAL';
@@ -60,6 +65,7 @@ interface ImageMeta {
   content_type: string;
   size_bytes: number;
   sha256: string;
+  qc: ImageQc | null;
   uploaded_by_name: string | null;
   uploaded_at: Date;
 }
@@ -80,6 +86,7 @@ interface PlateRow {
   rectified?: Buffer;
   rectified_sha256: string;
   pixels_sha256: string;
+  qc_override_reason: string;
   is_current: boolean;
   created_by: string;
   created_by_name?: string;
@@ -124,14 +131,14 @@ async function load(tx: Pick<ModuleTx, 'query'>, id: string): Promise<AnalysisRo
 
 async function images(tx: Pick<ModuleTx, 'query'>, analysisId: string) {
   return tx.query<ImageMeta>(
-    `SELECT i.id, i.illumination, i.file_name, i.content_type, i.size_bytes, i.sha256, i.uploaded_at, u.full_name AS uploaded_by_name
+    `SELECT i.id, i.illumination, i.file_name, i.content_type, i.size_bytes, i.sha256, i.qc, i.uploaded_at, u.full_name AS uploaded_by_name
        FROM tlc_images i LEFT JOIN users u ON u.id = i.uploaded_by WHERE i.analysis_id = $1 ORDER BY i.uploaded_at`,
     [analysisId],
   );
 }
 
 const PLATE_COLUMNS = `p.id, p.analysis_id, p.image_id, p.illumination, p.corners, p.outline_source, p.width_mm, p.height_mm, p.width_px, p.height_px,
-  p.channel, p.post_processing, p.rectified_sha256, p.pixels_sha256, p.is_current, p.created_by, p.created_at, u.full_name AS created_by_name`;
+  p.channel, p.post_processing, p.rectified_sha256, p.pixels_sha256, p.qc_override_reason, p.is_current, p.created_by, p.created_at, u.full_name AS created_by_name`;
 
 async function loadPlate(tx: Pick<ModuleTx, 'query'>, id: string | null, withData = false): Promise<PlateRow | null> {
   if (!id || !UUID.test(id)) return null;
@@ -170,11 +177,24 @@ function plateView(p: PlateRow) {
     channel: p.channel,
     postProcessing: p.post_processing,
     pixelsSha256: p.pixels_sha256,
+    qcOverrideReason: p.qc_override_reason,
     isCurrent: p.is_current,
     createdBy: p.created_by_name ?? p.created_by,
     createdAt: p.created_at.toISOString(),
   };
 }
+
+const imageView = (i: ImageMeta) => ({
+  id: i.id,
+  illumination: i.illumination,
+  fileName: i.file_name,
+  contentType: i.content_type,
+  sizeBytes: i.size_bytes,
+  sha256: i.sha256,
+  qc: i.qc,
+  uploadedBy: i.uploaded_by_name,
+  uploadedAt: i.uploaded_at.toISOString(),
+});
 
 function evaluationView(e: EvaluationRow, full: boolean) {
   const base = {
@@ -216,9 +236,17 @@ async function content(tx: Pick<ModuleTx, 'query'>, id: string) {
       conclusion: a.conclusion,
       remarks: a.remarks,
       analyzedBy: a.analyzed_by,
-      images: imgs.map((i) => ({ illumination: i.illumination, fileName: i.file_name, sha256: i.sha256, sizeBytes: i.size_bytes })),
+      images: imgs.map((i) => ({ illumination: i.illumination, fileName: i.file_name, sha256: i.sha256, sizeBytes: i.size_bytes, qcVerdict: i.qc?.verdict ?? null })),
       straightenedPlate: plate
-        ? { imageId: plate.image_id, illumination: plate.illumination, corners: plate.corners, widthMm: Number(plate.width_mm), heightMm: Number(plate.height_mm), channel: plate.channel, postProcessing: plate.post_processing, pixelsSha256: plate.pixels_sha256 }
+        ? {
+            imageId: plate.image_id,
+            illumination: plate.illumination,
+            corners: plate.corners,
+            widthMm: Number(plate.width_mm),
+            heightMm: Number(plate.height_mm),
+            pixelsSha256: plate.pixels_sha256,
+            qcOverrideReason: plate.qc_override_reason,
+          }
         : null,
       evaluation: evaluation ? { code: evaluation.code, conclusion: evaluation.conclusion, engineVersion: evaluation.engine_version, contentSha256: evaluation.content_sha256 } : null,
     },
@@ -279,8 +307,8 @@ async function editable(tx: ModuleTx, req: ModuleRequest, id: string, what: stri
 
 async function originalImage(tx: Pick<ModuleTx, 'query'>, analysisId: string, imageId: unknown) {
   if (typeof imageId !== 'string' || !UUID.test(imageId)) throw new ModuleError(400, 'Choose one of the analysis’ plate images.', 'imageId');
-  const [img] = await tx.query<{ id: string; illumination: Illumination; data: Buffer; sha256: string }>(
-    'SELECT id, illumination, data, sha256 FROM tlc_images WHERE id = $1 AND analysis_id = $2',
+  const [img] = await tx.query<{ id: string; illumination: Illumination; data: Buffer; sha256: string; qc: ImageQc | null }>(
+    'SELECT id, illumination, data, sha256, qc FROM tlc_images WHERE id = $1 AND analysis_id = $2',
     [imageId, analysisId],
   );
   if (!img) throw new ModuleError(404, 'Plate image not found on this analysis.', 'imageId');
@@ -391,16 +419,7 @@ const TlcModule: NxGenModule = {
         return {
           ...view(a),
           device: await ctx.devices.get(a.device_id),
-          images: imgs.map((i) => ({
-            id: i.id,
-            illumination: i.illumination,
-            fileName: i.file_name,
-            contentType: i.content_type,
-            sizeBytes: i.size_bytes,
-            sha256: i.sha256,
-            uploadedBy: i.uploaded_by_name,
-            uploadedAt: i.uploaded_at.toISOString(),
-          })),
+          images: imgs.map(imageView),
           plate: plate ? plateView(plate) : null,
           evaluations: evaluations.map((e) => evaluationView(e, false)),
           workflow: await ctx.workflow.forRecord(TABLE, a.id),
@@ -448,17 +467,31 @@ const TlcModule: NxGenModule = {
         if (!ILLUMINATIONS.includes(illumination)) throw new ModuleError(400, 'Choose the illumination: white, UV 254 or UV 366.', 'illumination');
         const name = (req.query.name ?? 'plate').replace(/[^\w. -]/g, '_').slice(0, 120) || 'plate';
         const sha = sha256(data);
+        // The capture quality gate, as the tablet runs it on every picture; kept with the image.
+        let rgb: ReturnType<typeof decodeImage>;
+        try {
+          rgb = decodeImage(data);
+        } catch {
+          throw new ModuleError(400, 'The image could not be decoded.');
+        }
+        const qc = rgb.width >= MIN_QC_SIDE && rgb.height >= MIN_QC_SIDE ? imageQc(rgb, illumination) : null;
         const id = await ctx.db.transaction(req.principal, 'TLC plate image added', req.origin, async (tx) => {
           const a = await editable(tx, req, req.params.id, 'add images');
           const [row] = await tx.query<{ id: string }>(
-            `INSERT INTO tlc_images (analysis_id, illumination, file_name, content_type, size_bytes, sha256, data, uploaded_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-            [a.id, illumination, name, type, data.length, sha, data, req.principal.userId],
+            `INSERT INTO tlc_images (analysis_id, illumination, file_name, content_type, size_bytes, sha256, data, uploaded_by, qc)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+            [a.id, illumination, name, type, data.length, sha, data, req.principal.userId, qc ? JSON.stringify(qc) : null],
           );
           return row.id;
         });
-        await ctx.audit.record({ action: 'TLC_IMAGE_ADDED', result: 'SUCCESS', principal: req.principal, recordId: req.params.id, details: { imageId: id, illumination, sha256: sha, sizeBytes: data.length } });
-        return { id, sha256: sha, illumination, sizeBytes: data.length };
+        await ctx.audit.record({
+          action: 'TLC_IMAGE_ADDED',
+          result: 'SUCCESS',
+          principal: req.principal,
+          recordId: req.params.id,
+          details: { imageId: id, illumination, sha256: sha, sizeBytes: data.length, width: rgb.width, height: rgb.height, qcVerdict: qc?.verdict ?? null },
+        });
+        return { id, sha256: sha, illumination, sizeBytes: data.length, width: rgb.width, height: rgb.height, qc };
       },
     });
 
@@ -504,9 +537,16 @@ const TlcModule: NxGenModule = {
       async handler(req) {
         const b = (req.body ?? {}) as Record<string, unknown>;
         const outlineSource = b.outlineSource === 'AUTO' ? 'AUTO' : 'MANUAL';
+        const override = typeof b.qcOverrideReason === 'string' ? b.qcOverrideReason.trim().slice(0, 500) : '';
         const out = await ctx.db.transaction(req.principal, 'TLC plate straightened', req.origin, async (tx) => {
           const a = await editable(tx, req, req.params.id, 'straighten the plate');
           const img = await originalImage(tx, a.id, b.imageId);
+          // The tablet refuses a picture that failed the gate unless Expert mode is on; here the
+          // analyst must give a reason, which stays with the plate and in the audit trail.
+          if (img.qc?.verdict === 'RECAPTURE_REQUIRED' && override.length < 10) {
+            const why = img.qc.items.filter((i) => i.status === 'FAIL').map((i) => i.message).join(' ');
+            throw new ModuleError(409, `This image failed the capture quality gate: ${why} Upload a better image, or give a reason (at least 10 characters) to use it anyway.`, 'qcOverrideReason');
+          }
           const original = decodeImage(img.data);
           const spec = parsePlateSpec(b, original);
           const rectified = makePlate(original, spec);
@@ -515,28 +555,42 @@ const TlcModule: NxGenModule = {
           await tx.query('UPDATE tlc_plates SET is_current = false WHERE analysis_id = $1 AND is_current', [a.id]);
           const [row] = await tx.query<{ id: string }>(
             `INSERT INTO tlc_plates (analysis_id, image_id, illumination, corners, outline_source, width_mm, height_mm, width_px, height_px, channel, post_processing,
-                                     rectified, rectified_sha256, pixels_sha256, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+                                     rectified, rectified_sha256, pixels_sha256, created_by, qc_override_reason)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`,
             [a.id, img.id, img.illumination, JSON.stringify(spec.corners), outlineSource, spec.widthMm, spec.heightMm, rectified.width, rectified.height, spec.channel,
-             JSON.stringify(spec.postProcessing), png, sha256(png), pixels, req.principal.userId],
+             JSON.stringify(spec.postProcessing), png, sha256(png), pixels, req.principal.userId, img.qc?.verdict === 'RECAPTURE_REQUIRED' ? override : ''],
           );
           // The last evaluation stays on record (it belongs to the retired plate) but no longer
           // counts: submission needs an evaluation of the current plate.
           await tx.query("UPDATE tlc_analyses SET current_plate_id = $2, conclusion = 'INCOMPLETE' WHERE id = $1", [a.id, row.id]);
-          return { id: row.id, code: a.code, pixels, width: rectified.width, height: rectified.height, illumination: img.illumination };
+          return { id: row.id, code: a.code, pixels, width: rectified.width, height: rectified.height, illumination: img.illumination, qcVerdict: img.qc?.verdict ?? null };
         });
         await ctx.audit.record({
           action: 'TLC_PLATE_STRAIGHTENED',
           result: 'SUCCESS',
           principal: req.principal,
           recordId: req.params.id,
-          details: { code: out.code, plateId: out.id, illumination: out.illumination, outlineSource, widthPx: out.width, heightPx: out.height, pixelsSha256: out.pixels },
+          details: {
+            code: out.code,
+            plateId: out.id,
+            illumination: out.illumination,
+            outlineSource,
+            widthPx: out.width,
+            heightPx: out.height,
+            pixelsSha256: out.pixels,
+            qcVerdict: out.qcVerdict,
+            qcOverrideReason: out.qcVerdict === 'RECAPTURE_REQUIRED' ? override : null,
+          },
         });
         return plateView((await loadPlate(ctx.db, out.id)) as PlateRow);
       },
     });
 
-    /** The straightened plate as PNG; ?processed=1 applies the plate's post-processing (display only). */
+    /**
+     * The straightened plate as PNG (the RAW view). ?view=analytical renders the image the
+     * calculations use: post-processing then one channel, with ?channel=, ?black=, ?white= and
+     * ?denoise=1 overriding the plate's defaults.
+     */
     ctx.http.route({
       method: 'GET',
       path: '/plates/:plateId/image',
@@ -545,9 +599,16 @@ const TlcModule: NxGenModule = {
         const p = await loadPlate(ctx.db, req.params.plateId, true);
         if (!p?.rectified) throw new ModuleError(404, 'Plate not found.');
         if (sha256(p.rectified) !== p.rectified_sha256) throw new ModuleError(409, 'The stored plate no longer matches its SHA-256.');
-        if (req.query.processed === '1') {
-          const processed = ImageOps.apply(decodeImage(p.rectified), p.post_processing);
-          return { kind: 'file', contentType: 'image/png', data: encodePng(processed), fileName: 'plate-processed.png' };
+        if (req.query.view === 'analytical') {
+          const channel = (['INTENSITY', 'RED', 'GREEN', 'BLUE'].includes(req.query.channel ?? '') ? req.query.channel : p.channel) as Channel;
+          const pp: PostProcessing = {
+            blackPoint: Number(req.query.black ?? p.post_processing.blackPoint),
+            whitePoint: Number(req.query.white ?? p.post_processing.whitePoint),
+            denoise: req.query.denoise === undefined ? p.post_processing.denoise : req.query.denoise === '1',
+          };
+          if (validatePostProcessing(pp).length) throw new ModuleError(400, 'Levels must be 0–255 with black below white.');
+          const gray = analyticalGray(decodeImage(p.rectified), { channel, postProcessing: pp });
+          return { kind: 'file', contentType: 'image/png', data: encodePng(new RgbImage(gray.width, gray.height, gray.toArgb())), fileName: 'plate-analytical.png' };
         }
         return { kind: 'file', contentType: 'image/png', data: p.rectified, fileName: 'plate.png' };
       },
@@ -592,7 +653,7 @@ const TlcModule: NxGenModule = {
           if (!p?.rectified) throw new ModuleError(409, 'Straighten the plate before evaluating it.');
           const spec = plateSpecOf(p);
           const input = parseEvaluationInput(b, spec);
-          const results = computeEvaluation(decodeImage(p.rectified), { ...spec, illumination: p.illumination, pixelsSha256: p.pixels_sha256 }, input, a.rf_windows);
+          const results = computeEvaluation(decodeImage(p.rectified), { widthMm: spec.widthMm, heightMm: spec.heightMm, illumination: p.illumination, pixelsSha256: p.pixels_sha256 }, input, a.rf_windows);
           const [{ n }] = await tx.query<{ n: string }>('SELECT COALESCE(MAX(number), 0) + 1 AS n FROM tlc_evaluations WHERE analysis_id = $1', [a.id]);
           const number = Number(n);
           const code = `E${String(number).padStart(2, '0')}`;
@@ -648,7 +709,7 @@ const TlcModule: NxGenModule = {
         const plateCheck = verifyPlate(decodeImage(img.data), spec, p.pixels_sha256);
         const stored = decodeImage(p.rectified as Buffer);
         const storedPixels = sha256(pixelBytes(stored));
-        const results = computeEvaluation(stored, { ...spec, illumination: p.illumination, pixelsSha256: p.pixels_sha256 }, e.input, a.rf_windows);
+        const results = computeEvaluation(stored, { widthMm: spec.widthMm, heightMm: spec.heightMm, illumination: p.illumination, pixelsSha256: p.pixels_sha256 }, e.input, a.rf_windows);
         const recomputed = sha256(evaluationContent(e.input, results));
         const checks = {
           originalImage: { ok: true, sha256: img.sha256 },

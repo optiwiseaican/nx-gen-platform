@@ -1,9 +1,9 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { RgbImage } from '../engine';
+import { RgbImage, argb } from '../engine';
 import { parseRfWindows } from '../shared/tlc';
 import { decodeImage, encodePng, pixelBytes } from './images';
-import { ENGINE_VERSION, autoLayout, analyticalGray, canonical, computeEvaluation, evaluationContent, makePlate, parseEvaluationInput, parsePlateSpec, plateSize, sha256, suggestOutline, verifyPlate } from './pipeline';
+import { ENGINE_VERSION, autoLayout, analyticalGray, canonical, computeEvaluation, evaluationContent, imageQc, makePlate, parseEvaluationInput, parsePlateSpec, plateSize, sha256, suggestOutline, verifyPlate } from './pipeline';
 import { PlateGeometry, PlateRectifier, quadFrom } from '../engine';
 
 jest.setTimeout(120_000);
@@ -47,6 +47,26 @@ describe('TLC pipeline: outline, straightening and verification', () => {
     expect(sha256(pixelBytes(decodeImage(encodePng(rect))))).toBe(pixels);
   });
 
+  it('runs the capture quality gate on uploads: a photo is reviewed, a cropped plate is taken whole', () => {
+    const photoQc = imageQc(photo, 'UV254');
+    expect(photoQc.verdict).toBe(golden.photo.qcUpload.verdict);
+    expect(photoQc.items.map((i) => `${i.check}:${i.status}`)).toEqual(golden.photo.qcUpload.items.map((i: { check: string; status: string }) => `${i.check}:${i.status}`));
+    expect(photoQc.outline).not.toBeNull();
+    const cropped = imageQc(load('five_lanes_5x10_uv254.png'), 'UV254');
+    expect(cropped.verdict).not.toBe('RECAPTURE_REQUIRED');
+    expect(cropped.items.find((i) => i.check === 'COMPLETENESS')?.status).toBe('NOT_ASSESSED');
+    expect(cropped.outline).toEqual([
+      { x: 0, y: 0 },
+      { x: 625, y: 0 },
+      { x: 625, y: 1250 },
+      { x: 0, y: 1250 },
+    ]);
+    expect(suggestOutline(load('five_lanes_5x10_uv254.png'))?.corners).toEqual(cropped.outline);
+    // A plate photographed far too dark fails the gate.
+    const dark = new RgbImage(200, 400, new Int32Array(200 * 400).fill(argb(8, 9, 8)));
+    expect(imageQc(dark, 'UV254').verdict).toBe('RECAPTURE_REQUIRED');
+  });
+
   it('caps very large plates at 2400 px and floors small ones at 5 px/mm', () => {
     const big = plateSize(quadFrom(corners([[0, 0], [5999, 0], [5999, 2999], [0, 2999]])), 200, 100);
     expect(big).toEqual({ width: 2400, height: 1200 });
@@ -59,7 +79,6 @@ describe('TLC pipeline: outline, straightening and verification', () => {
     expect(() => parsePlateSpec({ corners: corners([[0, 0], [10, 0], [10, 10], [0, 10]]), widthMm: 50, heightMm: 100 }, photo)).toThrow(/too small/);
     expect(() => parsePlateSpec({ corners: corners([[0, 0], [300, 0], [550, 300], [0, 300]]), widthMm: 50, heightMm: 100 }, photo)).toThrow(/not a plate shape/);
     expect(() => parsePlateSpec({ corners: corners([[0, 0], [600, 0], [600, 600], [0, 600]]), widthMm: 5, heightMm: 100 }, photo)).toThrow(/10–300 mm/);
-    expect(() => parsePlateSpec({ corners: corners([[0, 0], [600, 0], [600, 600], [0, 600]]), widthMm: 50, heightMm: 100, postProcessing: { blackPoint: 300 } }, photo)).toThrow(/blackPoint/);
   });
 });
 
@@ -154,6 +173,9 @@ describe('TLC pipeline: evaluation snapshots', () => {
     expect(() => parseEvaluationInput({ ...base, manualSpots: { '9': [] } }, plate)).toThrow(/unknown track/);
     expect(() => parseEvaluationInput({ ...base, manualSpots: { '1': [{ startHrf: 40, endHrf: 40.2 }] } }, plate)).toThrow(/0.5 hRf/);
     expect(() => parseEvaluationInput({ ...base, settings: { densitometry: { regression: 'CUBIC' } } }, plate)).toThrow(/regression/);
+    expect(() => parseEvaluationInput({ ...base, image: { postProcessing: { blackPoint: 300 } } }, plate)).toThrow(/blackPoint/);
+    expect(parseEvaluationInput({ ...base, image: { channel: 'GREEN', postProcessing: { blackPoint: 20, whitePoint: 240, denoise: true } } }, plate).image).toEqual({ channel: 'GREEN', postProcessing: { blackPoint: 20, whitePoint: 240, denoise: true } });
+    expect(parseEvaluationInput(base, plate).image).toEqual({ channel: 'INTENSITY', postProcessing: plate.postProcessing });
     const ok = parseEvaluationInput({ ...base, settings: { densitometry: { subtractBackground: true, smoothingMm: 3 }, spotDetector: { sensitivity: 1.5 } } }, plate);
     expect(ok.settings.densitometry).toMatchObject({ subtractBackground: true, smoothingMm: 3, smoothing: true, regression: 'LINEAR' });
     expect(ok.settings.spotDetector.sensitivity).toBe(1.5);

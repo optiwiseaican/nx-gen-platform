@@ -36,7 +36,7 @@ import {
   quadFrom,
   validatePostProcessing,
 } from '../engine';
-import { CaptureQc } from '../engine';
+import { CaptureQc, CaptureVerdict, PlateDetection, QcItem, verdictOf } from '../engine';
 import { Evaluation, Illumination, RfWindow, TrackRole, evaluateRf } from '../shared/tlc';
 import { pixelBytes } from './images';
 
@@ -139,12 +139,12 @@ export function makePlate(original: RgbImage, spec: PlateSpec): RgbImage {
 }
 
 /**
- * Suggests a plate outline on the original image: the colour-distance route first, plain
- * brightness as a fallback, on a reduced copy as the tablet does; the outline is scaled back.
- * Null when no clean rectangle is found; the analyst then outlines the plate by hand.
+ * The plate found on a reduced copy of the photo (colour distance first, brightness as a
+ * fallback). An image that is already just the plate (the found blob runs to the image edges)
+ * is taken whole, as the tablet's detector does for uploads of cropped plates.
  */
-export function suggestOutline(original: RgbImage): { corners: Point[]; fill: number; preset: { label: string; widthMm: number; heightMm: number } | null } | null {
-  const step = Math.max(1, Math.ceil(Math.max(original.width, original.height) / 1000));
+function findPlate(original: RgbImage, maxSide: number): { small: RgbImage; step: number; detection: PlateDetection | null; cropped: boolean } {
+  const step = Math.max(1, Math.ceil(Math.max(original.width, original.height) / maxSide));
   const small = step === 1 ? original : subsample(original, step);
   const byColor = PlateDetector.detect(PlateDetector.colorDistanceFromBorder(small));
   let found = byColor && byColor.fill >= 0.85 ? byColor : null;
@@ -153,12 +153,61 @@ export function suggestOutline(original: RgbImage): { corners: Point[]; fill: nu
     const candidates = [byColor, byBrightness].filter((d): d is NonNullable<typeof d> => d !== null);
     found = candidates.sort((a, b) => b.fill - a.fill)[0] ?? null;
   }
+  if (found) {
+    const w = small.width;
+    const h = small.height;
+    const tol = Math.max(2, 0.02 * Math.max(w, h));
+    const c = [found.quad.topLeft, found.quad.topRight, found.quad.bottomRight, found.quad.bottomLeft];
+    const edges = [c.some((p) => p.x < tol), c.some((p) => p.x > w - 1 - tol), c.some((p) => p.y < tol), c.some((p) => p.y > h - 1 - tol)].filter(Boolean).length;
+    const share = quadArea(found.quad) / (w * h);
+    if (edges >= 3 && share >= 0.8) {
+      const whole: Quad = { topLeft: { x: 0, y: 0 }, topRight: { x: w - 1, y: 0 }, bottomRight: { x: w - 1, y: h - 1 }, bottomLeft: { x: 0, y: h - 1 } };
+      return { small, step, detection: { quad: whole, threshold: found.threshold, fill: 1, solid: 1, edges: 1 }, cropped: true };
+    }
+  }
+  return { small, step, detection: found, cropped: false };
+}
+
+/**
+ * Suggests a plate outline on the original image, on a reduced copy as the tablet does; the
+ * outline is scaled back. Null when no clean rectangle is found; the analyst then outlines the
+ * plate by hand.
+ */
+export function suggestOutline(original: RgbImage): { corners: Point[]; fill: number; preset: { label: string; widthMm: number; heightMm: number } | null } | null {
+  const { step, detection: found, cropped } = findPlate(original, 1000);
   if (!found || found.fill < 0.6 || !CaptureQc.isPlausiblePlate(found.quad)) return null;
-  const corners = [found.quad.topLeft, found.quad.topRight, found.quad.bottomRight, found.quad.bottomLeft].map((p) => ({
-    x: Math.min(original.width - 1, p.x * step),
-    y: Math.min(original.height - 1, p.y * step),
-  }));
+  const corners = cropped
+    ? [{ x: 0, y: 0 }, { x: original.width - 1, y: 0 }, { x: original.width - 1, y: original.height - 1 }, { x: 0, y: original.height - 1 }]
+    : [found.quad.topLeft, found.quad.topRight, found.quad.bottomRight, found.quad.bottomLeft].map((p) => ({
+        x: Math.min(original.width - 1, p.x * step),
+        y: Math.min(original.height - 1, p.y * step),
+      }));
   return { corners, fill: found.fill, preset: matchPreset(quadFrom(corners)) };
+}
+
+/** Stored with every plate image: the tablet's capture quality gate, run on a ~1200 px copy. */
+export interface ImageQc {
+  verdict: CaptureVerdict;
+  exposureEv: number | null;
+  items: QcItem[];
+  /** The outline the gate judged, in original-image pixels, if one was found. */
+  outline: Point[] | null;
+}
+
+export function imageQc(original: RgbImage, illumination: Illumination): ImageQc {
+  const { small, step, detection, cropped } = findPlate(original, 1200);
+  const report = CaptureQc.evaluate({ image: small, detection, illumination, fromCamera: false });
+  const outline = cropped
+    ? [{ x: 0, y: 0 }, { x: original.width - 1, y: 0 }, { x: original.width - 1, y: original.height - 1 }, { x: 0, y: original.height - 1 }]
+    : detection
+      ? [detection.quad.topLeft, detection.quad.topRight, detection.quad.bottomRight, detection.quad.bottomLeft].map((p) => ({ x: Math.min(original.width - 1, p.x * step), y: Math.min(original.height - 1, p.y * step) }))
+      : null;
+  return {
+    verdict: verdictOf(report),
+    exposureEv: report.exposureEv === null ? null : r3(report.exposureEv),
+    items: report.items.map((i) => ({ ...i, value: i.value === null ? null : r3(i.value) })),
+    outline,
+  };
 }
 
 function subsample(img: RgbImage, step: number): RgbImage {
@@ -194,6 +243,8 @@ export interface EvalTrack {
 export interface EvaluationInput {
   layout: Development & { baselineSource: 'DETECTED' | 'MANUAL'; frontSource: 'DETECTED' | 'MANUAL' };
   tracks: EvalTrack[];
+  /** How the straightened plate becomes the analytical image (the tablet's Plate-stage processing). */
+  image: { channel: Channel; postProcessing: PostProcessing };
   settings: { densitometry: DensitometrySettings; spotDetector: SpotDetectorSettings };
   /** Per track id: windows the analyst set or adjusted instead of the automatic spots. */
   manualSpots: Record<string, PeakWindow[]>;
@@ -234,7 +285,14 @@ const num = (v: unknown, field: string, label: string, min: number, max: number,
   return n;
 };
 
-export function parseEvaluationInput(body: Record<string, unknown>, plate: { widthMm: number; heightMm: number }): EvaluationInput {
+export function parseEvaluationInput(body: Record<string, unknown>, plate: { widthMm: number; heightMm: number; channel: Channel; postProcessing: PostProcessing }): EvaluationInput {
+  const im = (body.image ?? {}) as Record<string, unknown>;
+  const channel = (im.channel ?? plate.channel) as Channel;
+  if (!['INTENSITY', 'RED', 'GREEN', 'BLUE'].includes(channel)) throw new ModuleError(400, 'Choose the channel: intensity, red, green or blue.', 'image');
+  const pp = (im.postProcessing ?? plate.postProcessing) as Partial<PostProcessing>;
+  const postProcessing: PostProcessing = { blackPoint: Number(pp.blackPoint ?? 0), whitePoint: Number(pp.whitePoint ?? 255), denoise: pp.denoise === true };
+  const ppProblems = validatePostProcessing(postProcessing);
+  if (ppProblems.length) throw new ModuleError(400, ppProblems.join(' '), 'image');
   const l = (body.layout ?? {}) as Record<string, unknown>;
   const baselineMm = num(l.baselineMm, 'layout', 'Baseline', 0, plate.heightMm) as number;
   const solventFrontMm = num(l.solventFrontMm, 'layout', 'Solvent front', 0, plate.heightMm) as number;
@@ -307,6 +365,7 @@ export function parseEvaluationInput(body: Record<string, unknown>, plate: { wid
   return {
     layout: { baselineMm, solventFrontMm, trackWidthMm, baselineSource: src(l.baselineSource), frontSource: src(l.frontSource) },
     tracks,
+    image: { channel, postProcessing },
     settings: { densitometry, spotDetector },
     manualSpots,
   };
@@ -345,11 +404,11 @@ function spotView(
 /** Computes an evaluation from the analytical image and the analyst's inputs. Deterministic. */
 export function computeEvaluation(
   rectified: RgbImage,
-  plate: { widthMm: number; heightMm: number; illumination: Illumination; channel: Channel; postProcessing: PostProcessing; pixelsSha256: string },
+  plate: { widthMm: number; heightMm: number; illumination: Illumination; pixelsSha256: string },
   input: EvaluationInput,
   windows: RfWindow[],
 ): EvaluationResults {
-  const gray = analyticalGray(rectified, plate);
+  const gray = analyticalGray(rectified, input.image);
   const geometry = new PlateGeometry(gray.width, gray.height, plate.widthMm, plate.heightMm);
   const polarity = polarityOf(plate.illumination);
   const dev: Development = { baselineMm: input.layout.baselineMm, solventFrontMm: input.layout.solventFrontMm, trackWidthMm: input.layout.trackWidthMm };
@@ -397,8 +456,8 @@ export function computeEvaluation(
       widthMm: plate.widthMm,
       heightMm: plate.heightMm,
       illumination: plate.illumination,
-      channel: plate.channel,
-      postProcessing: plate.postProcessing,
+      channel: input.image.channel,
+      postProcessing: input.image.postProcessing,
     },
   };
 }

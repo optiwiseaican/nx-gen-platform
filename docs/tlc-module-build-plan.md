@@ -59,7 +59,10 @@ licensing) is used rather than copied.
 reproduced bit for bit). Phase 2 done as tlc 1.1.0 (migration 002, plates and evaluation snapshots,
 crop/layout/densitogram screens, recompute check; DB tests and a browser walkthrough pass). The
 spot-detection and QC maths in §6 are now in the engine; the acceptance-profile limits (decision 4)
-are still to come in phase 4.
+are still to come in phase 4. 16 Nov 2026: the screens were reworked to the tablet's stage flow
+(Picture → Crop → Plate → Evaluation → Sign-off, stage bar, image left / side panel right, the
+tablet's labels), the capture quality gate now runs on every uploaded image and is stored with it,
+and a failed gate can only be overridden with a reason (the tablet's "Expert mode"); migration 003.
 
 Effort is in working sessions of the kind used for pH (one session ≈ one focused day). Each phase ends
 with a signed `.nxmod`, module-manager DB tests and a browser walkthrough, like pH.

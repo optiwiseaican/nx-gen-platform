@@ -10,6 +10,8 @@ import {
 import { tmpdir } from 'os';
 import { join, relative, resolve, sep } from 'path';
 import { generateSigningKeyPair, packModule } from '@crescent/licensing';
+import { RgbImage, argb } from '../../../../modules/tlc/src/engine';
+import { encodePng } from '../../../../modules/tlc/src/api/images';
 import { AuditService } from '../audit/audit.service';
 import { BootstrapJournal } from '../audit/bootstrap-journal';
 import type { Principal, RequestOrigin } from '../auth/auth.types';
@@ -659,7 +661,56 @@ describeDb(
         `/analyses/${analysis2}/images`,
         PLATE_PNG,
         { illumination: 'UV254', name: 'five-lanes.png' },
-      )) as { id: string };
+      )) as {
+        id: string;
+        qc: { verdict: string; items: { check: string; status: string }[] };
+      };
+      // The capture quality gate ran on the upload and is kept with the image.
+      expect(img.qc.verdict).not.toBe('RECAPTURE_REQUIRED');
+      expect(img.qc.items.map((i) => i.check)).toContain('EXPOSURE');
+
+      // An image that fails the gate (far too dark) cannot be straightened
+      // without a reason; with one, the reason stays with the plate.
+      const dark = encodePng(
+        new RgbImage(200, 400, new Int32Array(200 * 400).fill(argb(8, 9, 8))),
+      );
+      const darkImg = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/images`,
+        dark,
+        { illumination: 'UV254', name: 'dark.png' },
+      )) as { id: string; qc: { verdict: string } };
+      expect(darkImg.qc.verdict).toBe('RECAPTURE_REQUIRED');
+      const darkCorners = [
+        { x: 0, y: 0 },
+        { x: 199, y: 0 },
+        { x: 199, y: 399 },
+        { x: 0, y: 399 },
+      ];
+      await expect(
+        call('analyst', 'POST', `/analyses/${analysis2}/plate`, {
+          imageId: darkImg.id,
+          corners: darkCorners,
+          widthMm: 50,
+          heightMm: 100,
+        }),
+      ).rejects.toMatchObject({ status: 409, field: 'qcOverrideReason' });
+      const overridden = (await call(
+        'analyst',
+        'POST',
+        `/analyses/${analysis2}/plate`,
+        {
+          imageId: darkImg.id,
+          corners: darkCorners,
+          widthMm: 50,
+          heightMm: 100,
+          qcOverrideReason: 'Reference plate from the validation set, deliberately dark',
+        },
+      )) as { qcOverrideReason: string };
+      expect(overridden.qcOverrideReason).toBe(
+        'Reference plate from the validation set, deliberately dark',
+      );
 
       const outline = (await call(
         'analyst',
@@ -667,13 +718,22 @@ describeDb(
         `/analyses/${analysis2}/outline`,
         undefined,
         { imageId: img.id },
-      )) as { image: { width: number; height: number } };
+      )) as {
+        image: { width: number; height: number };
+        outline: { corners: { x: number; y: number }[] };
+      };
       expect(outline.image).toEqual({
         id: img.id,
         width: 626,
         height: 1251,
         illumination: 'UV254',
       });
+      expect(outline.outline.corners).toEqual([
+        { x: 0, y: 0 },
+        { x: 625, y: 0 },
+        { x: 625, y: 1250 },
+        { x: 0, y: 1250 },
+      ]);
 
       const whole = [
         { x: 0, y: 0 },
@@ -936,10 +996,12 @@ describeDb(
         'SELECT id, is_current FROM tlc_plates WHERE analysis_id = $1 ORDER BY created_at',
         [analysis2],
       );
-      expect(rows.map((r) => [r.id, r.is_current])).toEqual([
+      // The overridden dark plate, the five-lane plate and now plate 2.
+      expect(rows.slice(1).map((r) => [r.id, r.is_current])).toEqual([
         [plateId, false],
         [plate2.id, true],
       ]);
+      expect(rows[0].is_current).toBe(false);
       await expect(act('analyst', workflow2, 'SUBMIT')).rejects.toMatchObject({
         response: {
           message: expect.stringMatching(/evaluate it again/) as unknown,
