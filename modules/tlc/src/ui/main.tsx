@@ -250,7 +250,7 @@ function Shell({ web, principal, active, children }: { web: string; principal: P
 function WorkflowHeader({ a, state, stage, reachable, onStage }: { a: AnalysisDetail; state: Workflow["state"]; stage: Stage; reachable: (s: Stage) => boolean; onStage: (s: Stage) => void }) {
   const st = STATE[state];
   return (
-    <header className="flex flex-wrap items-center gap-x-4 gap-y-2 bg-navy px-3 py-1.5 text-white">
+    <header className="sticky top-0 z-30 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 bg-navy px-3 py-1.5 text-white">
       <div className="flex min-w-0 flex-1 items-center gap-2.5">
         <a href="/modules/tlc/" aria-label="All analyses" className="rounded-lg p-2 hover:bg-white/10">
           <Svg d={ICON.folder} />
@@ -258,11 +258,14 @@ function WorkflowHeader({ a, state, stage, reachable, onStage }: { a: AnalysisDe
         <img src={logo} alt="" className="h-10 w-10 rounded-xl" />
         <span className="min-w-0 leading-tight">
           <span className="block text-[19px] font-bold">NxGen TLC</span>
-          <span className="block truncate text-[13px] text-white/80">
-            {a.name || a.sampleId || a.code}
-            {a.name ? ` · ${a.code}` : ""}
-            {a.sampleId && a.name ? ` · ${a.sampleId}` : ""}
-          </span>
+          {(() => {
+            const subtitle = [a.name || a.sampleId || a.code, a.name ? a.code : "", a.sampleId && a.name ? a.sampleId : ""].filter(Boolean).join(" · ");
+            return (
+              <span title={subtitle} className="line-clamp-2 block break-words text-[13px] text-white/80">
+                {subtitle}
+              </span>
+            );
+          })()}
         </span>
         <span className={`ml-3 inline-flex items-center gap-1 whitespace-nowrap rounded-[14px] bg-white px-2.5 py-1 text-[13px] font-semibold ${st.tone === "pass" ? "text-pass" : st.tone === "warn" ? "text-warn" : st.tone === "fail" ? "text-fail" : "text-muted"}`}>
           {st.locked && <Svg d={ICON.lock} className="h-3.5 w-3.5" />}
@@ -270,7 +273,7 @@ function WorkflowHeader({ a, state, stage, reachable, onStage }: { a: AnalysisDe
         </span>
       </div>
       <StageBar stage={stage} reachable={reachable} onStage={onStage} />
-      <div className="flex flex-1 items-center justify-end gap-2.5">
+      <div className="ml-auto flex flex-none items-center justify-end gap-2.5">
         <SessionChip onDark />
         <button type="button" disabled title="Report export comes with quantification (phase 4)." className="hidden h-11 items-center rounded-full border border-white/70 px-5 text-[15px] font-semibold text-white disabled:opacity-40 sm:inline-flex">
           Report
@@ -916,11 +919,17 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
   const usesImages = !!a.plate || (!a.tracks.length && a.images.length > 0);
 
   return (
-    <div className="min-h-screen">
+    // The header stays put. Picture, Crop, Plate and Evaluation keep the image/plot in view and
+    // scroll only their panels (the tablet's layout); the page itself scrolls for Sign-off.
+    <div className="flex min-h-screen flex-col lg:h-screen">
       <WorkflowHeader a={a} state={wf.instance.state} stage={shown} reachable={reachable} onStage={(s) => (setStage(s), setNotice(null))} />
       <SessionBanner />
       <LockBanner state={wf.instance.state} />
-      <main className="mx-auto max-w-[96rem] space-y-4 px-4 py-4 sm:px-5">
+      <main
+        className={`mx-auto flex w-full max-w-[96rem] flex-col gap-4 px-4 py-4 sm:px-5 lg:min-h-0 lg:flex-1 ${
+          shown !== "SIGNOFF" ? "lg:overflow-hidden" : "lg:overflow-y-auto"
+        }`}
+      >
         {notice && <Callout tone="pass">{notice}</Callout>}
         {saveError && <Callout tone="fail">{saveError}</Callout>}
 

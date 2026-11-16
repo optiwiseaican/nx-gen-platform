@@ -1,5 +1,5 @@
 /** Types shared by the stage screens, plus the read-only snapshot view and the Rf table. */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RgbImage, argb } from "../engine";
 import type { Channel, PostProcessing, Point } from "../engine";
 import type { EvaluatedSpot, EvaluationInput, EvaluationResults, ImageQc } from "../api/pipeline";
@@ -71,6 +71,38 @@ export async function loadPixels(url: string): Promise<RgbImage> {
   const px = new Int32Array(canvas.width * canvas.height);
   for (let i = 0; i < px.length; i++) px[i] = argb(d[4 * i], d[4 * i + 1], d[4 * i + 2]);
   return new RgbImage(canvas.width, canvas.height, px);
+}
+
+/**
+ * The largest box with the image's proportions that fits the space it is given, so an image and
+ * its overlay always fit on screen (the tablet's fixed image area). Children are laid out inside
+ * that box; give them `absolute inset-0` / `w-full h-full`.
+ */
+export function FitBox({ width, height, className = "", children }: { width: number; height: number; className?: string; children: React.ReactNode }) {
+  const outer = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    const el = outer.current;
+    if (!el || !(width > 0 && height > 0)) return;
+    const fit = () => {
+      const r = el.getBoundingClientRect();
+      // On narrow screens the area has no fixed height: fill the width.
+      const maxH = r.height > 40 ? r.height : Infinity;
+      const scale = Math.min(r.width / width, maxH / height);
+      setBox({ w: Math.max(1, Math.floor(width * scale)), h: Math.max(1, Math.floor(height * scale)) });
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [width, height]);
+  return (
+    <div ref={outer} className={`flex min-h-0 min-w-0 items-start justify-center ${className}`}>
+      <div className="relative shrink-0" style={box ? { width: box.w, height: box.h } : { width: "100%", aspectRatio: `${width} / ${height}` }}>
+        {children}
+      </div>
+    </div>
+  );
 }
 
 /** Pointer position in an SVG's user units (the image's own pixels). */

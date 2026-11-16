@@ -35,7 +35,7 @@ import type { Channel, QcCheck } from "../engine";
 import type { EvaluationInput, ImageQc } from "../api/pipeline";
 import { Evaluation, ILLUMINATIONS, Illumination, RfWindow, TrackRole, evaluateRf } from "../shared/tlc";
 import { Badge, CONCLUSION, Callout, ILLUMINATION_LABEL, Tone, card, field, fmtDate, mod, optionBox, panelLabel, panelTitle, primary, request, secondary, send, small, strong, toolToggle } from "./lib";
-import { EvaluationFull, ImageMeta, PlateMeta, RfTable, clamp, fmt, loadPixels, svgPoint } from "./plate";
+import { EvaluationFull, FitBox, ImageMeta, PlateMeta, RfTable, clamp, fmt, loadPixels, svgPoint } from "./plate";
 
 export type Stage = "PICTURE" | "CROP" | "PLATE" | "EVALUATION" | "SIGNOFF";
 export const STAGES: { key: Stage; label: string }[] = [
@@ -57,6 +57,15 @@ const STATUS_MARK: Record<string, { mark: string; color: string }> = {
   FAIL: { mark: "✗", color: "#e0344c" },
   NOT_ASSESSED: { mark: "–", color: "#9aa3b5" },
 };
+
+/**
+ * The tablet's workflow layout: the image on the left stays in view, the side panel on the right
+ * scrolls on its own, and the stage's main action stays pinned at the bottom of that panel.
+ * On narrow screens both simply stack and the page scrolls.
+ */
+const STAGE_GRID = "grid gap-5 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_24rem] lg:grid-rows-[minmax(0,1fr)]";
+const SIDE_PANEL = "lg:min-h-0 lg:overflow-y-auto";
+const PINNED_ACTION = "sticky bottom-0 z-10 -mx-5 border-t border-line bg-white px-5 pt-3 pb-3";
 
 /**
  * The tablet's step bar on the dark header: a numbered circle and label per stage, joined by
@@ -136,11 +145,11 @@ export function PictureStage({
 
   const blocked = qc?.verdict === "RECAPTURE_REQUIRED";
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
-      <div className="relative min-h-[18rem] overflow-hidden rounded-2xl bg-black">
+    <div className={STAGE_GRID}>
+      <div className="relative min-h-[18rem] overflow-hidden rounded-2xl bg-black lg:min-h-0">
         {image ? (
           <>
-            <img src={`/api/modules/tlc/api/images/${image.id}`} alt={`${ILLUMINATION_LABEL[image.illumination]} plate image`} className="max-h-[42rem] w-full object-contain" />
+            <img src={`/api/modules/tlc/api/images/${image.id}`} alt={`${ILLUMINATION_LABEL[image.illumination]} plate image`} className="max-h-[42rem] w-full object-contain lg:absolute lg:inset-0 lg:h-full lg:max-h-none" />
             {verdict && (
               <span className="absolute top-3 left-3 rounded-lg px-3 py-1.5 text-sm font-extrabold tracking-wide text-white" style={{ background: verdict.color }}>
                 {verdict.label}
@@ -155,7 +164,7 @@ export function PictureStage({
         )}
       </div>
 
-      <aside className={`${card} space-y-4`}>
+      <aside className={`${card} ${SIDE_PANEL} space-y-4`}>
         <div>
           <h3 className={panelTitle}>Plate image</h3>
           <p className="text-sm text-muted">Images are stored unchanged, with their SHA-256, and checked by the capture quality gate.</p>
@@ -271,6 +280,20 @@ export function PictureStage({
 // 2. Crop — plate outline and straightening
 // ---------------------------------------------------------------------------
 
+/**
+ * The tablet's PlateSize.matching: the photo only shows proportions, so keep the previous size if
+ * it fits (plates are usually photographed in a row), else the first preset that fits within
+ * ±12 %, else a custom size with the outline's proportions and the previous height.
+ */
+function matchingSize(aspect: number, previous: { widthMm: number; heightMm: number }): { widthMm: number; heightMm: number } {
+  const fits = (s: { widthMm: number; heightMm: number }) => s.widthMm > 0 && s.heightMm > 0 && Math.abs(s.widthMm / s.heightMm / aspect - 1) <= 0.12;
+  if (fits(previous)) return previous;
+  const preset = PLATE_PRESETS.find(fits);
+  if (preset) return { widthMm: preset.widthMm, heightMm: preset.heightMm };
+  const heightMm = previous.heightMm > 0 ? previous.heightMm : 100;
+  return { widthMm: Math.round(aspect * heightMm), heightMm };
+}
+
 export function CropStage({
   analysisId,
   image,
@@ -309,11 +332,9 @@ export function CropStage({
         if (image.qc?.outline) {
           setCorners(image.qc.outline);
           setSource("AUTO");
-          const p = PLATE_PRESETS.find((x) => Math.abs(quadAspect(quadFrom(image.qc!.outline!)) / (x.widthMm / x.heightMm) - 1) <= 0.12);
-          if (p) {
-            setWidthMm(String(p.widthMm));
-            setHeightMm(String(p.heightMm));
-          }
+          const s = matchingSize(quadAspect(quadFrom(image.qc.outline)), { widthMm: Number(widthMm), heightMm: Number(heightMm) });
+          setWidthMm(String(s.widthMm));
+          setHeightMm(String(s.heightMm));
         } else {
           setCorners(whole(img.naturalWidth, img.naturalHeight));
           setSource("MANUAL");
@@ -334,9 +355,10 @@ export function CropStage({
       }
       setCorners(r.outline.corners);
       setSource("AUTO");
-      if (r.outline.preset && !chosen) {
-        setWidthMm(String(r.outline.preset.widthMm));
-        setHeightMm(String(r.outline.preset.heightMm));
+      if (!chosen) {
+        const s = matchingSize(quadAspect(quadFrom(r.outline.corners)), { widthMm: Number(widthMm), heightMm: Number(heightMm) });
+        setWidthMm(String(s.widthMm));
+        setHeightMm(String(s.heightMm));
       }
     } catch (e) {
       setError((e as Error).message);
@@ -376,11 +398,13 @@ export function CropStage({
   const stroke = size ? Math.max(2, size.w / 400) : 2;
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
-      <div className="relative overflow-hidden rounded-2xl border border-line bg-backdrop">
-        <img src={`/api/modules/tlc/api/images/${image.id}`} alt="" className="max-h-[42rem] w-full object-contain" draggable={false} />
+    <div className={STAGE_GRID}>
+      <div className="flex min-h-[18rem] overflow-hidden rounded-2xl border border-line bg-backdrop p-2 lg:min-h-0">
+        {/* The outline layer covers exactly the image's own box, so a corner sits on the pixel it names. */}
+        <FitBox width={size?.w ?? 3} height={size?.h ?? 4} className="flex-1 lg:h-full">
+          <img src={`/api/modules/tlc/api/images/${image.id}`} alt="" className="block h-full w-full" draggable={false} />
         {size && corners && (
-          <svg ref={svgRef} viewBox={`0 0 ${size.w} ${size.h}`} preserveAspectRatio="xMidYMid meet" className="absolute inset-0 h-full w-full touch-none" onPointerMove={onPointerMove} onPointerUp={() => (drag.current = null)} aria-label="Plate outline; drag the corners">
+          <svg ref={svgRef} viewBox={`0 0 ${size.w} ${size.h}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full touch-none" onPointerMove={onPointerMove} onPointerUp={() => (drag.current = null)} aria-label="Plate outline; drag the corners">
             <polygon points={corners.map((c) => `${c.x},${c.y}`).join(" ")} fill="rgb(255 193 7 / 0.12)" stroke="#FFC107" strokeWidth={stroke} />
             <line x1={corners[3].x} y1={corners[3].y} x2={corners[2].x} y2={corners[2].y} stroke="#e0344c" strokeWidth={stroke * 2.5} />
             {corners.map((c, i) => (
@@ -391,9 +415,10 @@ export function CropStage({
             ))}
           </svg>
         )}
+        </FitBox>
       </div>
 
-      <aside className={`${card} space-y-4`}>
+      <aside className={`${card} ${SIDE_PANEL} space-y-4 pb-0`}>
         <div>
           <h3 className={panelTitle}>Plate outline</h3>
           <p className="text-sm text-muted">{source === "AUTO" ? "Plate found automatically. Drag a corner to adjust." : "Drag the four corners onto the plate corners."} The red edge is the bottom, where the samples were applied.</p>
@@ -457,13 +482,15 @@ export function CropStage({
           )}
         </p>
         {error && <Callout tone="fail">{error}</Callout>}
-        {editable ? (
-          <button className={`${primary} w-full`} onClick={() => void straighten()} disabled={!!busy || !corners}>
-            {busy ?? "Straighten plate & continue"}
-          </button>
-        ) : (
-          plate && <p className="text-sm text-muted">Straightened by {plate.createdBy} · {fmtDate(plate.createdAt)}</p>
-        )}
+        <div className={PINNED_ACTION}>
+          {editable ? (
+            <button className={`${primary} w-full`} onClick={() => void straighten()} disabled={!!busy || !corners}>
+              {busy ?? "Straighten plate & continue"}
+            </button>
+          ) : (
+            plate && <p className="text-sm text-muted">Straightened by {plate.createdBy} · {fmtDate(plate.createdAt)}</p>
+          )}
+        </div>
       </aside>
     </div>
   );
@@ -816,8 +843,8 @@ export function PlateStage({
   const viewUrl = view === "RAW" ? `/api/modules/tlc/api/plates/${plate.id}/image` : `/api/modules/tlc/api/plates/${plate.id}/image?view=analytical&channel=${image.channel}&black=${pp.blackPoint}&white=${pp.whitePoint}&denoise=${pp.denoise ? 1 : 0}`;
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
-      <div className={`${card} space-y-3`}>
+    <div className={STAGE_GRID}>
+      <div className={`${card} flex flex-col gap-3 lg:min-h-0`}>
         <div className="flex flex-wrap items-center gap-4 text-sm">
           <label className="flex items-center gap-1.5">
             <input type="checkbox" checked={showTracks} onChange={(e) => setShowTracks(e.target.checked)} /> Show tracks
@@ -834,7 +861,7 @@ export function PlateStage({
             {(wb.saturation * 100).toFixed(2)} % of the pixels inside the tracks are saturated{wb.saturation > 0.01 ? "; heights and areas there are wrong and the evaluation cannot conclude." : "."}
           </Callout>
         )}
-        <div className="flex gap-3">
+        <div className="flex gap-3 lg:min-h-0 lg:flex-1">
           {editable && (
             <div className="flex w-24 shrink-0 flex-col gap-1.5">
               {(
@@ -853,12 +880,13 @@ export function PlateStage({
               </button>
             </div>
           )}
-          <div className="relative min-w-0 flex-1">
-            <img src={viewUrl} alt={`Straightened plate, ${view.toLowerCase()} view`} className="w-full rounded-xl border border-line bg-canvas" draggable={false} />
+          <FitBox width={plate.widthPx} height={plate.heightPx} className="flex-1 lg:h-full">
+            <img src={viewUrl} alt={`Straightened plate, ${view.toLowerCase()} view`} className="block h-full w-full bg-canvas" draggable={false} />
             <span className="absolute top-2 right-2 rounded-md bg-black/55 px-2 py-0.5 font-mono text-[11px] text-white">{view === "RAW" ? "RAW · original, straightened" : "ANALYTICAL · image used by the calculations"}</span>
             <svg
               ref={svgRef}
               viewBox={`0 0 ${plate.widthPx} ${plate.heightPx}`}
+              preserveAspectRatio="none"
               className={`absolute inset-0 h-full w-full touch-none ${tool !== "SELECT" ? "cursor-crosshair" : ""}`}
               onPointerMove={onPointerMove}
               onPointerUp={() => (drag.current = null)}
@@ -912,13 +940,13 @@ export function PlateStage({
                 );
               })}
             </svg>
-          </div>
+          </FitBox>
         </div>
         {editable && <p className="text-xs text-muted">{hint}</p>}
         {!wb.rgb && <p className="text-sm text-muted">Processing image…</p>}
       </div>
 
-      <aside className={`${card} space-y-0 py-1`}>
+      <aside className={`${card} ${SIDE_PANEL} py-1`}>
         <Section title="Image">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-muted">View</p>
@@ -1086,7 +1114,7 @@ export function PlateStage({
             })}
           </div>
         </Section>
-        <div className="border-t border-line pt-3 pb-2">
+        <div className={PINNED_ACTION}>
           <button className={`${primary} w-full`} disabled={tracks.length === 0 || !wb.layoutOk} onClick={onContinue}>
             Continue to evaluation →
           </button>
@@ -1227,9 +1255,11 @@ export function EvaluationStage({
   const nextCode = `E${String((current?.number ?? 0) + 1).padStart(2, "0")}`;
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
-      <div className="space-y-4">
-        <div className={`${card} space-y-3`}>
+    // The densitogram stays in view; the peak table, preview and save scroll beneath it, and the
+    // Peak Inspector scrolls on its own (the tablet's evaluation screen).
+    <div className="grid gap-5 lg:min-h-0 lg:flex-1 lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className="flex flex-col gap-4 lg:min-h-0">
+        <div className={`${card} space-y-3 lg:max-h-[70%] lg:shrink-0 lg:overflow-y-auto`}>
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <span className="flex items-center gap-1">
               <button type="button" className={small} aria-label="Previous track" onClick={() => cycle(-1)} disabled={tracks.length < 2}>
@@ -1294,9 +1324,9 @@ export function EvaluationStage({
             </button>
           </div>
           <div className="grid gap-3 md:grid-cols-[13rem_minmax(0,1fr)]">
-            <div className="relative">
-              <img src={`/api/modules/tlc/api/plates/${plate.id}/image?view=analytical&channel=${wb.image.channel}&black=${wb.image.postProcessing.blackPoint}&white=${wb.image.postProcessing.whitePoint}&denoise=${wb.image.postProcessing.denoise ? 1 : 0}`} alt="Plate strip" className="w-full rounded-lg border border-line" />
-              <svg viewBox={`0 0 ${plate.widthPx} ${plate.heightPx}`} className="absolute inset-0 h-full w-full" aria-label="Tracks on the plate; tap one to select it">
+            <div className="relative self-start">
+              <img src={`/api/modules/tlc/api/plates/${plate.id}/image?view=analytical&channel=${wb.image.channel}&black=${wb.image.postProcessing.blackPoint}&white=${wb.image.postProcessing.whitePoint}&denoise=${wb.image.postProcessing.denoise ? 1 : 0}`} alt="Plate strip" className="block w-full" />
+              <svg viewBox={`0 0 ${plate.widthPx} ${plate.heightPx}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-label="Tracks on the plate; tap one to select it">
                 {tracks.map((t) => {
                   const xx = geometry.xMmToPx(t.centerMm - layout.trackWidthMm / 2);
                   const w = geometry.xMmToPx(layout.trackWidthMm);
@@ -1340,8 +1370,8 @@ export function EvaluationStage({
                     <text x={2} y={H - padB} fontSize={10} fill="#5a6680">
                       {min.toFixed(0)}
                     </text>
-                    <text x={W - padR} y={H - 8} textAnchor="end" fontSize={10} fill="#5a6680">
-                      hRF
+                    <text x={W - padR} y={H - 22} textAnchor="end" fontSize={10} fill="#5a6680">
+                      hRF →
                     </text>
                   </svg>
                   {deriv && (
@@ -1380,6 +1410,7 @@ export function EvaluationStage({
           </div>
         </div>
 
+        <div className="space-y-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
         <div className={`${card} space-y-3`}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className={panelLabel}>Peaks in {track ? `Track ${track.id}: ${track.name}` : "—"}</h3>
@@ -1467,9 +1498,10 @@ export function EvaluationStage({
             </div>
           </div>
         )}
+        </div>
       </div>
 
-      <aside className={`${card} space-y-3 self-start`}>
+      <aside className={`${card} space-y-3 self-start lg:max-h-full lg:overflow-y-auto`}>
         <h3 className={panelTitle}>Peak Inspector</h3>
         {selectedSpot && pv ? (
           <>
