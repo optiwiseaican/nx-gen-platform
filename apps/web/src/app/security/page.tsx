@@ -57,16 +57,25 @@ function Security() {
   );
 
   const accountKeys = account ? (Object.keys(account.policy) as (keyof SecurityPolicy)[]) : [];
+  const isSwitch = (k: keyof SecurityPolicy) => typeof account?.policy[k] === "boolean";
+  const draftValue = (k: keyof SecurityPolicy): number | boolean => (isSwitch(k) ? accountDraft[k] === "true" : Number(accountDraft[k]));
   const accountInvalid = accountKeys.filter((k) => {
+    if (isSwitch(k)) return false;
     const v = Number(accountDraft[k]);
     const { min, max } = account!.limits[k];
     return !Number.isInteger(v) || v < min || v > max;
   });
-  const accountChanges = accountKeys.filter((k) => Number(accountDraft[k]) !== account!.policy[k]);
+  const accountChanges = accountKeys.filter((k) => draftValue(k) !== account!.policy[k]);
+  const SWITCH_HELP: Partial<Record<keyof SecurityPolicy, { on: string; off: string }>> = {
+    independentApproval: {
+      on: "The person who prepares or reviews a record cannot also review or approve it (GMP expectation).",
+      off: "The same person may prepare, review and approve a record, as the TLC tablet's “separate reviewer: off”.",
+    },
+  };
 
   async function saveAccount(reason: string, signature?: SignatureInput) {
     await securityApi.updatePolicy(
-      Object.fromEntries(accountChanges.map((k) => [k, Number(accountDraft[k])])),
+      Object.fromEntries(accountChanges.map((k) => [k, draftValue(k)])),
       reason,
       signature,
     );
@@ -188,6 +197,25 @@ function Security() {
               const { min, max } = account.limits[k];
               const bad = accountInvalid.includes(k);
               const changed = accountChanges.includes(k);
+              if (isSwitch(k)) {
+                const on = accountDraft[k] === "true";
+                return (
+                  <div key={k} className={`flex items-center justify-between gap-4 px-5 py-2.5 ${changed ? "bg-warn-50" : ""}`}>
+                    <label htmlFor={`policy-${k}`} className="text-sm">
+                      <span className="font-medium text-ink">{account.labels[k]}</span>
+                      <span className="block text-xs text-muted">
+                        {SWITCH_HELP[k]?.[on ? "on" : "off"]}
+                        {changed && ` · currently ${account.policy[k] ? "on" : "off"}`}
+                      </span>
+                    </label>
+                    {canEdit ? (
+                      <input id={`policy-${k}`} type="checkbox" checked={on} onChange={(e) => setAccountDraft({ ...accountDraft, [k]: String(e.target.checked) })} className="h-5 w-5" />
+                    ) : (
+                      <span className="font-mono">{account.policy[k] ? "on" : "off"}</span>
+                    )}
+                  </div>
+                );
+              }
               return (
                 <div key={k} className={`flex items-center justify-between gap-4 px-5 py-2.5 ${changed ? "bg-warn-50" : ""}`}>
                   <label htmlFor={`policy-${k}`} className="text-sm">
@@ -270,7 +298,7 @@ function Security() {
           <ul className="list-disc pl-5">
             {accountChanges.map((k) => (
               <li key={k}>
-                {account.labels[k]}: {account.policy[k]} → {accountDraft[k]}
+                {account.labels[k]}: {isSwitch(k) ? (account.policy[k] ? "on" : "off") : account.policy[k]} → {isSwitch(k) ? (accountDraft[k] === "true" ? "on" : "off") : accountDraft[k]}
               </li>
             ))}
           </ul>

@@ -6,7 +6,11 @@ import {
 } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
 import type { Principal, RequestOrigin } from '../auth/auth.types';
-import { NXGEN_CONFIG, SECURITY_POLICY_LIMITS } from '../config/nxgen.config';
+import {
+  BOOLEAN_POLICY_KEYS,
+  NXGEN_CONFIG,
+  SECURITY_POLICY_LIMITS,
+} from '../config/nxgen.config';
 import type { NxGenConfig, SecurityPolicy } from '../config/nxgen.config';
 import { DatabaseService } from '../database/database.service';
 import {
@@ -75,6 +79,15 @@ export class SecurityPolicyService {
       if (!KEYS.includes(key as keyof SecurityPolicy))
         throw new BadRequestException(`Unknown setting ${key}.`);
       const k = key as keyof SecurityPolicy;
+      if (BOOLEAN_POLICY_KEYS.includes(k)) {
+        if (typeof value !== 'boolean')
+          throw new BadRequestException({
+            message: `${POLICY_LABELS[k]} must be on or off.`,
+            field: k,
+          });
+        (after as Record<keyof SecurityPolicy, unknown>)[k] = value;
+        continue;
+      }
       const { min, max } = SECURITY_POLICY_LIMITS[k];
       if (
         typeof value !== 'number' ||
@@ -86,7 +99,7 @@ export class SecurityPolicyService {
           message: `${POLICY_LABELS[k]} must be a whole number from ${min} to ${max}.`,
           field: k,
         });
-      after[k] = value;
+      (after as Record<keyof SecurityPolicy, unknown>)[k] = value;
     }
     const changed = KEYS.filter((k) => after[k] !== before[k]);
     if (!changed.length)

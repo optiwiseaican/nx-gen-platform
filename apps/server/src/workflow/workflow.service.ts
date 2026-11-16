@@ -2,10 +2,14 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { NXGEN_CONFIG } from '../config/nxgen.config';
+import type { NxGenConfig } from '../config/nxgen.config';
 import type { PoolClient } from 'pg';
 import { canonicalize } from '@crescent/licensing';
 import { AuditService } from '../audit/audit.service';
@@ -195,7 +199,19 @@ export class WorkflowService {
     private readonly audit: AuditService,
     private readonly platform: PlatformIdentityService,
     private readonly signatures: SignatureService,
+    /** The security policy in force; absent in unit tests, which then get independent approval. */
+    @Optional() @Inject(NXGEN_CONFIG) private readonly config?: NxGenConfig,
   ) {}
+
+  /**
+   * Whether the person who prepared (or reviewed) a record must be someone other
+   * than the reviewer or approver. A site policy (security settings, signed
+   * change) can switch this off, as the TLC tablet's "separate reviewer" does;
+   * the workflow definition's own flags still apply when it is on.
+   */
+  private independentApproval(): boolean {
+    return this.config?.security.independentApproval !== false;
+  }
 
   registerRecordType(type: WorkflowRecordType) {
     this.types.set(type.tableName, type);
@@ -364,6 +380,7 @@ export class WorkflowService {
   ): string | null {
     const can = (perm: string) => principal.permissions.includes(perm);
     const me = principal.userId;
+    const independent = this.independentApproval();
     switch (step) {
       case 'SUBMIT':
         if (i.state !== 'DRAFT') return 'Only a draft can be submitted.';
@@ -379,7 +396,7 @@ export class WorkflowService {
         if (i.state !== 'IN_REVIEW')
           return 'This version is not awaiting review.';
         if (!can(d.reviewPermission)) return 'You cannot review these records.';
-        if (d.independentReviewer && i.preparedBy?.id === me)
+        if (independent && d.independentReviewer && i.preparedBy?.id === me)
           return 'You prepared this version, so someone else must review it.';
         return null;
       case 'APPROVE': {
@@ -390,9 +407,9 @@ export class WorkflowService {
             : 'This version is not awaiting approval.';
         if (!can(d.approvePermission))
           return 'You cannot approve these records.';
-        if (d.independentApprover && i.preparedBy?.id === me)
+        if (independent && d.independentApprover && i.preparedBy?.id === me)
           return 'You prepared this version, so someone else must approve it.';
-        if (d.independentApprover && i.reviewedBy?.id === me)
+        if (independent && d.independentApprover && i.reviewedBy?.id === me)
           return 'You reviewed this version, so someone else must approve it.';
         return null;
       }
@@ -408,7 +425,7 @@ export class WorkflowService {
           if (returnTo && returnTo !== 'DRAFT' && returnTo !== 'IN_REVIEW')
             return 'Choose whether it returns to draft or to review.';
         } else return 'Only a version under review can be rejected.';
-        if (i.preparedBy?.id === me)
+        if (independent && i.preparedBy?.id === me)
           return 'You prepared this version; withdraw it instead.';
         return null;
       case 'INVALIDATE':

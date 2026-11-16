@@ -10,6 +10,7 @@ export const COLUMNS: Record<keyof SecurityPolicy, string> = {
   lockoutMinutes: 'lockout_minutes',
   sessionIdleMinutes: 'session_idle_minutes',
   sessionMaxHours: 'session_max_hours',
+  independentApproval: 'independent_approval',
 };
 
 export const POLICY_LABELS: Record<keyof SecurityPolicy, string> = {
@@ -20,6 +21,7 @@ export const POLICY_LABELS: Record<keyof SecurityPolicy, string> = {
   lockoutMinutes: 'Lockout duration (minutes)',
   sessionIdleMinutes: 'Inactivity sign-out (minutes)',
   sessionMaxHours: 'Maximum session (hours)',
+  independentApproval: 'Independent review and approval',
 };
 
 export const KEYS = Object.keys(COLUMNS) as (keyof SecurityPolicy)[];
@@ -32,6 +34,7 @@ export interface SettingsRow {
   lockout_minutes: number;
   session_idle_minutes: number;
   session_max_hours: number;
+  independent_approval: boolean;
   version_no: number;
   modified_by: string | null;
   modified_at: Date | null;
@@ -49,7 +52,7 @@ export async function readSecurityPolicy(db: DatabaseService): Promise<{
   );
   if (!r) return null;
   const policy = Object.fromEntries(
-    KEYS.map((k) => [k, r[COLUMNS[k] as keyof SettingsRow] as number]),
+    KEYS.map((k) => [k, r[COLUMNS[k] as keyof SettingsRow]]),
   ) as unknown as SecurityPolicy;
   return {
     policy,

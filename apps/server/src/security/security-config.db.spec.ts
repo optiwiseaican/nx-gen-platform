@@ -143,6 +143,37 @@ describeDb('Security configuration, session, audit export, recovery', () => {
       await expect(
         policy.update(root, { bogus: 1 }, REASON, sign(), ORIGIN),
       ).rejects.toThrow(/Unknown setting/);
+      await expect(
+        policy.update(root, { independentApproval: 0 }, REASON, sign(), ORIGIN),
+      ).rejects.toThrow(/on or off/);
+    });
+
+    it('independent review and approval is on by default and can be switched off with a signed change', async () => {
+      expect(config.security.independentApproval).toBe(true);
+      const result = await policy.update(
+        root,
+        { independentApproval: false },
+        'Single-analyst site: the author signs all steps (SOP-QA-012)',
+        sign(),
+        ORIGIN,
+      );
+      expect(result.policy.independentApproval).toBe(false);
+      expect(config.security.independentApproval).toBe(false);
+      expect((await readSecurityPolicy(db))?.policy.independentApproval).toBe(
+        false,
+      );
+      const [changed] = await audit.list({ action: 'SECURITY_POLICY_CHANGED' });
+      expect(changed.details).toMatchObject({
+        independentApproval: 'true → false',
+      });
+      await policy.update(
+        root,
+        { independentApproval: true },
+        'Restore independent approval',
+        sign(),
+        ORIGIN,
+      );
+      expect(config.security.independentApproval).toBe(true);
     });
 
     it('the database itself rejects weakening the rules below the limits', async () => {

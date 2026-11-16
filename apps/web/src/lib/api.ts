@@ -227,6 +227,8 @@ export interface SecurityPolicy {
   lockoutMinutes: number;
   sessionIdleMinutes: number;
   sessionMaxHours: number;
+  /** Whether the author of a record may also review or approve it (false) or not (true). */
+  independentApproval: boolean;
 }
 
 export interface SecurityPolicyState {

@@ -165,7 +165,7 @@ describeDb(
         isActive: () => true,
       });
       signatures = new SignatureService(config, db, audit, platform);
-      workflow = new WorkflowService(db, audit, platform, signatures);
+      workflow = new WorkflowService(db, audit, platform, signatures, config);
       registry = new ModuleRegistry();
       devices = new DevicesService(db, audit, signatures, workflow, registry);
       devices.onModuleInit();
@@ -1136,6 +1136,44 @@ describeDb(
         ).ok,
       ).toBe(true);
       expect(await audit.verifyChain()).toEqual({ valid: true });
+    });
+
+    it('with independent approval switched off in the security policy, the author may review and approve', async () => {
+      const m = await methods.create(
+        people.root.p,
+        {
+          instrumentType: 'TLC',
+          name: 'Single-analyst method',
+          parameters: [{ name: 'Compound C', value: '0.30–0.36', unit: 'Rf' }],
+        },
+        ORIGIN,
+      );
+      const wf = m.versions[0].workflow.id;
+      await act('root', wf, 'SUBMIT');
+      await expect(act('root', wf, 'REVIEW')).rejects.toThrow(
+        /someone else must review/,
+      );
+      config.security.independentApproval = false;
+      try {
+        await act('root', wf, 'REVIEW', 'Reviewed by the author');
+        await act('root', wf, 'APPROVE', 'Approved by the author');
+      } finally {
+        config.security.independentApproval = true;
+      }
+      const approved = await methods.get(m.id, people.root.p);
+      expect(approved.versions[0].workflow.state).toBe('APPROVED');
+      const sigs = await signatures.list({
+        tableName: 'method_versions',
+        recordId: m.versions[0].id,
+      });
+      expect(sigs.map((s) => s.meaningCode).reverse()).toEqual([
+        'AUTHORED',
+        'REVIEWED',
+        'APPROVED',
+      ]);
+      expect(new Set(sigs.map((s) => s.signerUsername))).toEqual(
+        new Set(['root.admin']),
+      );
     });
   },
 );

@@ -30,7 +30,18 @@ export interface SecurityPolicy {
   lockoutMinutes: number;
   sessionIdleMinutes: number;
   sessionMaxHours: number;
+  /**
+   * Whether the person who prepared or reviewed a record may also review or
+   * approve it. True = independent review and approval (GMP expectation);
+   * false = the tablet's "separate reviewer off", for small sites.
+   */
+  independentApproval: boolean;
 }
+
+/** Policy fields that are on/off switches rather than numbers. */
+export const BOOLEAN_POLICY_KEYS: readonly (keyof SecurityPolicy)[] = [
+  'independentApproval',
+];
 
 /** Values in force before an administrator changes them (also seeded by migration 005). */
 export const DEFAULT_SECURITY_POLICY: Readonly<SecurityPolicy> = Object.freeze({
@@ -41,6 +52,7 @@ export const DEFAULT_SECURITY_POLICY: Readonly<SecurityPolicy> = Object.freeze({
   lockoutMinutes: 30,
   sessionIdleMinutes: 15,
   sessionMaxHours: 12,
+  independentApproval: true,
 });
 
 /**
@@ -57,6 +69,7 @@ export const SECURITY_POLICY_LIMITS: Readonly<
   lockoutMinutes: { min: 5, max: 1440 },
   sessionIdleMinutes: { min: 5, max: 60 },
   sessionMaxHours: { min: 1, max: 24 },
+  independentApproval: { min: 0, max: 1 },
 });
 
 export interface NxGenConfig {
