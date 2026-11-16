@@ -297,11 +297,16 @@ function LockBanner({ state }: { state: Workflow["state"] }) {
 // Pages
 // ---------------------------------------------------------------------------
 
-function Home({ principal }: { principal: Principal }) {
+function Home({ principal, newOpen }: { principal: Principal; newOpen: boolean }) {
   const [rows, setRows] = useState<Analysis[] | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(newOpen);
   const [error, setError] = useState<string | null>(null);
+  const closeNew = () => {
+    setCreating(false);
+    if (location.search.includes("new=1")) history.replaceState(null, "", "/modules/tlc/");
+  };
   useEffect(() => {
     mod<Analysis[]>("/analyses").then(setRows).catch((e: Error) => setError(e.message));
     mod<{ devices: Device[] }>("/setup").then((s) => setDevices(s.devices)).catch(() => undefined);
@@ -320,19 +325,20 @@ function Home({ principal }: { principal: Principal }) {
         </div>
         <input aria-label="Search analyses" placeholder="Search by sample, batch or method" value={query} onChange={(e) => setQuery(e.target.value)} className="h-[50px] w-[270px] rounded-xl border border-outline bg-white px-4 text-[15px]" />
         {canAnalyze && (
-          <a href="/modules/tlc/?new=1" className={`${primary} gap-2 bg-brand hover:bg-navy`}>
+          <button type="button" className={`${primary} gap-2 bg-brand hover:bg-navy`} onClick={() => setCreating(true)}>
             <Svg d={ICON.add} className="h-5 w-5" /> New analysis
-          </a>
+          </button>
         )}
       </div>
+      {canAnalyze && <NewAnalysisDialog open={creating} onClose={closeNew} />}
       {!rows && <p className="text-muted">Loading…</p>}
       {rows && shown.length === 0 && (
         <div className={`${card} py-10 text-center`}>
           <p className="text-muted">{rows.length ? "No analyses match the search." : "No analyses yet."}</p>
           {canAnalyze && !rows.length && (
-            <a href="/modules/tlc/?new=1" className={`${primary} mt-4`}>
+            <button type="button" className={`${primary} mt-4`} onClick={() => setCreating(true)}>
               New analysis
-            </a>
+            </button>
           )}
         </div>
       )}
@@ -390,29 +396,55 @@ function Home({ principal }: { principal: Principal }) {
   );
 }
 
-function NewAnalysis() {
+/** A field label as the tablet draws it: bold, with a red asterisk when required or "(Optional)". */
+function FieldLabel({ text, required, optional }: { text: string; required?: boolean; optional?: boolean }) {
+  return (
+    <span className="block text-[13px] font-semibold text-ink">
+      {text}
+      {required && <span className="text-fail"> *</span>}
+      {optional && <span className="font-normal text-muted"> (Optional)</span>}
+    </span>
+  );
+}
+
+const SAMPLE_MAX = 80;
+const compact = "mt-1 h-[42px] w-full rounded-[10px] border border-outline bg-white px-3 text-[14px] text-ink placeholder:text-muted/70";
+
+/** The tablet's "Create New Project" dialog, opened over the analyses list. */
+function NewAnalysisDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
   const [setup, setSetup] = useState<{ devices: Device[]; methods: Method[] } | null>(null);
   const [f, setF] = useState({ deviceId: "", methodVersionId: "", sampleId: "", batch: "", plateType: "Silica gel 60 F254 (glass)", plateLot: "", mobilePhase: "", remarks: "" });
   const [error, setError] = useState<string | null>(null);
+  const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    mod<{ devices: Device[]; methods: Method[] }>("/setup")
-      .then((s) => {
-        setSetup(s);
-        setF((x) => ({ ...x, deviceId: s.devices.find((d) => d.readiness.usable)?.id ?? "", methodVersionId: s.methods.find((m) => m.windows.length)?.versionId ?? "" }));
-      })
-      .catch((e: Error) => setError(e.message));
-  }, []);
-  if (!setup) return error ? <Callout tone="fail">{error}</Callout> : <p className="text-muted">Loading…</p>;
+    const d = ref.current;
+    if (!d) return;
+    if (open && !d.open) {
+      setTouched(false);
+      setError(null);
+      d.showModal();
+      mod<{ devices: Device[]; methods: Method[] }>("/setup")
+        .then((s) => {
+          setSetup(s);
+          setF((x) => ({ ...x, deviceId: x.deviceId || (s.devices.find((d) => d.readiness.usable)?.id ?? ""), methodVersionId: x.methodVersionId || (s.methods.find((m) => m.windows.length)?.versionId ?? "") }));
+        })
+        .catch((e: Error) => setError(e.message));
+    } else if (!open && d.open) d.close();
+  }, [open]);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
-  const method = setup.methods.find((m) => m.versionId === f.methodVersionId);
+  const method = setup?.methods.find((m) => m.versionId === f.methodVersionId);
+  const missing = { sampleId: !f.sampleId.trim(), deviceId: !f.deviceId, methodVersionId: !f.methodVersionId, plateType: f.plateType.trim().length < 2 };
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
+    setTouched(true);
+    if (Object.values(missing).some(Boolean)) return;
     setBusy(true);
     setError(null);
     try {
-      const a = await mod<Analysis>("/analyses", send(f));
+      const a = await mod<Analysis>("/analyses", send({ ...f, sampleId: f.sampleId.trim() }));
       location.href = `/modules/tlc/?analysis=${a.id}`;
     } catch (err) {
       setError((err as Error).message);
@@ -421,83 +453,96 @@ function NewAnalysis() {
   }
 
   return (
-    <form onSubmit={create} className={`${card} max-w-4xl space-y-5`}>
-      <div>
-        <h2 className={panelTitle}>New analysis</h2>
-        <p className="text-sm text-muted">The analysis uses an approved method and a usable instrument; the plate is photographed in the next step.</p>
-      </div>
-      {!setup.methods.length && (
-        <Callout tone="warn" title="No approved TLC method">
-          Create a method for a TLC scanner under Methods, with a parameter per compound whose unit is “Rf” (e.g. Paracetamol, 0.40–0.50, Rf), and have it
-          reviewed and approved.
-        </Callout>
-      )}
-      <div className="grid gap-5 sm:grid-cols-2">
-        <label className="text-sm font-semibold">
-          Instrument
-          <select value={f.deviceId} onChange={set("deviceId")} className={field}>
-            <option value="">Choose…</option>
-            {setup.devices.map((d) => (
-              <option key={d.id} value={d.id} disabled={!d.readiness.usable}>
-                {d.code} · {d.name}
-                {!d.readiness.usable && ` (${d.readiness.state.replace(/_/g, " ").toLowerCase()})`}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm font-semibold">
-          Approved method
-          <select value={f.methodVersionId} onChange={set("methodVersionId")} className={field}>
-            <option value="">Choose…</option>
-            {setup.methods.map((m) => (
-              <option key={m.versionId} value={m.versionId}>
-                {m.code} v{m.versionNumber} · {m.name}
-              </option>
-            ))}
-          </select>
-          {method && (
-            <span className="mt-1 block text-xs font-normal text-muted">
-              {method.windows.length
-                ? `Rf windows: ${method.windows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ")}`
-                : "This method has no Rf windows (parameters with unit Rf)."}
-            </span>
+    <dialog ref={ref} onClose={onClose} className="m-auto w-[min(85vw,1040px)] rounded-[14px] border-0 bg-white p-0 shadow-2xl backdrop:bg-black/40">
+      <form onSubmit={create} className="flex max-h-[85vh] flex-col">
+        <div className="flex items-start px-[22px] pt-3.5 pr-2">
+          <div className="flex-1">
+            <h2 className="text-[20px] font-bold text-ink">Create New Analysis</h2>
+            <p className="text-[13px] text-muted">Start a new TLC analysis with minimal information. The plate is photographed in the next step.</p>
+          </div>
+          <button type="button" aria-label="Close" className="grid h-9 w-9 place-items-center rounded-full text-muted hover:bg-canvas" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <div className="space-y-3.5 overflow-y-auto px-[22px] py-3.5">
+          {setup && !setup.methods.length && (
+            <Callout tone="warn" title="No approved TLC method">
+              Create a method for a TLC scanner under Methods, with a parameter per compound whose unit is “Rf” (e.g. Paracetamol, 0.40–0.50, Rf), and have
+              it reviewed and approved.
+            </Callout>
           )}
-        </label>
-        <label className="text-sm font-semibold">
-          Sample ID
-          <input value={f.sampleId} onChange={set("sampleId")} className={field} placeholder="e.g. SMP-2026-1187" required />
-        </label>
-        <label className="text-sm font-semibold">
-          Batch
-          <input value={f.batch} onChange={set("batch")} className={field} placeholder="e.g. B-24-0311" />
-        </label>
-        <label className="text-sm font-semibold">
-          Plate type
-          <input value={f.plateType} onChange={set("plateType")} className={field} />
-        </label>
-        <label className="text-sm font-semibold">
-          Plate lot
-          <input value={f.plateLot} onChange={set("plateLot")} className={field} placeholder="e.g. HX38412" />
-        </label>
-      </div>
-      <label className="block text-sm font-semibold">
-        Mobile phase / solvent
-        <input value={f.mobilePhase} onChange={set("mobilePhase")} className={field} placeholder="e.g. Toluene : ethyl acetate : formic acid (5:4:1)" />
-      </label>
-      <label className="block text-sm font-semibold">
-        Notes
-        <textarea rows={2} value={f.remarks} onChange={set("remarks")} className={field} />
-      </label>
-      {error && <Callout tone="fail">{error}</Callout>}
-      <div className="flex justify-end gap-3">
-        <a href="/modules/tlc/" className={secondary}>
-          Cancel
-        </a>
-        <button className={primary} disabled={busy}>
-          {busy ? "Creating…" : "Create analysis"}
-        </button>
-      </div>
-    </form>
+          <label className="block">
+            <FieldLabel text="Sample ID" required />
+            <input value={f.sampleId} onChange={(e) => setF({ ...f, sampleId: e.target.value.slice(0, SAMPLE_MAX) })} className={`${compact} ${touched && missing.sampleId ? "border-fail" : ""}`} placeholder="Enter the sample ID, e.g. SMP-2026-1187" autoFocus />
+            <span className="mt-0.5 flex px-0.5 text-[11px]">
+              <span className="flex-1 text-fail">{touched && missing.sampleId ? "Enter the sample ID" : ""}</span>
+              <span className="text-muted">
+                {f.sampleId.length}/{SAMPLE_MAX}
+              </span>
+            </span>
+          </label>
+          <div className="grid gap-3.5 sm:grid-cols-2">
+            <label className="block">
+              <FieldLabel text="Instrument" required />
+              <select value={f.deviceId} onChange={set("deviceId")} className={`${compact} ${touched && missing.deviceId ? "border-fail" : ""}`}>
+                <option value="">{setup ? "Choose…" : "Loading…"}</option>
+                {setup?.devices.map((d) => (
+                  <option key={d.id} value={d.id} disabled={!d.readiness.usable}>
+                    {d.code} · {d.name}
+                    {!d.readiness.usable && ` (${d.readiness.state.replace(/_/g, " ").toLowerCase()})`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <FieldLabel text="Method" required />
+              <select value={f.methodVersionId} onChange={set("methodVersionId")} className={`${compact} ${touched && missing.methodVersionId ? "border-fail" : ""}`}>
+                <option value="">{setup ? "Choose an approved method…" : "Loading…"}</option>
+                {setup?.methods.map((m) => (
+                  <option key={m.versionId} value={m.versionId}>
+                    {m.code} v{m.versionNumber} · {m.name}
+                  </option>
+                ))}
+              </select>
+              {method && (
+                <span className="mt-0.5 block text-[11px] text-muted">
+                  {method.windows.length ? `Rf windows: ${method.windows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ")}` : "This method has no Rf windows (parameters with unit Rf)."}
+                </span>
+              )}
+            </label>
+            <label className="block">
+              <FieldLabel text="Batch" optional />
+              <input value={f.batch} onChange={set("batch")} className={compact} placeholder="Optional, e.g. B-24-0311" />
+            </label>
+            <label className="block">
+              <FieldLabel text="Plate lot" optional />
+              <input value={f.plateLot} onChange={set("plateLot")} className={compact} placeholder="e.g. HX38412" />
+            </label>
+            <label className="block">
+              <FieldLabel text="Plate type" required />
+              <input value={f.plateType} onChange={set("plateType")} className={`${compact} ${touched && missing.plateType ? "border-fail" : ""}`} placeholder="e.g. Silica gel 60 F254 (glass)" />
+            </label>
+            <label className="block">
+              <FieldLabel text="Mobile phase / solvent" optional />
+              <input value={f.mobilePhase} onChange={set("mobilePhase")} className={compact} placeholder="e.g. Toluene : ethyl acetate : formic acid (5:4:1)" />
+            </label>
+          </div>
+          <label className="block">
+            <FieldLabel text="Notes" optional />
+            <textarea rows={2} value={f.remarks} onChange={set("remarks")} className={`${compact} h-auto py-2`} />
+          </label>
+          {error && <Callout tone="fail">{error}</Callout>}
+        </div>
+        <div className="flex items-center justify-end gap-3 border-t border-line px-[22px] py-3">
+          <button type="button" className={`${secondary} h-[42px] w-[110px]`} onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className={`${primary} h-[42px] w-[220px]`} disabled={busy}>
+            {busy ? "Creating…" : "Create & Start Analysis"}
+          </button>
+        </div>
+      </form>
+    </dialog>
   );
 }
 
@@ -1078,7 +1123,7 @@ function App() {
   if (analysis) return <AnalysisPage id={analysis} principal={boot.principal} web={boot.web} />;
   return (
     <Shell web={boot.web} principal={boot.principal} active={q.get("new") ? "NEW" : device ? "INSTRUMENT" : "ALL"}>
-      {q.get("new") ? <NewAnalysis /> : device ? <InstrumentCheck deviceId={device} web={boot.web} /> : <Home principal={boot.principal} />}
+      {device ? <InstrumentCheck deviceId={device} web={boot.web} /> : <Home principal={boot.principal} newOpen={q.get("new") === "1"} />}
     </Shell>
   );
 }
