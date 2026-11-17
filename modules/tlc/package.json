@@ -1,6 +1,6 @@
 {
   "name": "@crescent/module-tlc",
-  "version": "1.1.8",
+  "version": "1.1.10",
   "private": true,
   "description": "NxGen TLC module: TLC scanners, plate analyses with original images, Rf evaluation and signed approval",
   "scripts": {

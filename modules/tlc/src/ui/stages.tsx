@@ -555,7 +555,9 @@ export function useWorkbench(plate: PlateMeta, windows: RfWindow[], current: Eva
   const [layout, setLayout] = useState<Layout>(() => (current ? current.input.layout : { ...DEFAULT_DEVELOPMENT, baselineSource: "MANUAL", frontSource: "MANUAL" }));
   const [tracks, setTracks] = useState<EvalTrack[]>(current?.input.tracks ?? []);
   const [image, setImage] = useState<ImageSettings>(current?.input.image ?? { channel: plate.channel, postProcessing: plate.postProcessing });
-  const [settings, setSettings] = useState<Workbench["settings"]>(current?.input.settings ?? { densitometry: DEFAULT_DENSITOMETRY, spotDetector: DEFAULT_SPOT_DETECTOR });
+  // New work starts as the tablet's session does (SessionState: subtractBackground = true), i.e.
+  // Baseline "Auto": background removed and each peak measured above its chord.
+  const [settings, setSettings] = useState<Workbench["settings"]>(current?.input.settings ?? { densitometry: { ...DEFAULT_DENSITOMETRY, subtractBackground: true }, spotDetector: DEFAULT_SPOT_DETECTOR });
   const [manualSpots, setManualSpots] = useState<Record<string, PeakWindow[]>>(current?.input.manualSpots ?? {});
   const [selected, setSelected] = useState<number | null>(null);
   const [detected, setDetected] = useState<string | null>(null);
@@ -727,7 +729,7 @@ function Stepper({ label, value, step, min, max, unit, onChange, disabled }: { l
         <button type="button" className={small} aria-label={`${label} plus`} onClick={() => set(value + step)} disabled={disabled}>
           +
         </button>
-        {unit && <span className="w-6 text-xs text-muted">{unit}</span>}
+        {unit && <span className="min-w-6 text-xs text-muted">{unit}</span>}
       </span>
     </label>
   );
@@ -1174,7 +1176,11 @@ export function EvaluationStage({
   const [derivative, setDerivative] = useState<0 | 1 | 2>(0);
   const [addSpot, setAddSpot] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [peak, setPeak] = useState<number | null>(null);
+  // The selected peak belongs to a track: changing track shows no peak, unless one of that
+  // track's peaks was picked (e.g. by tapping its spot on the plate strip).
+  const [peakSel, setPeakSel] = useState<{ trackId: number | null; n: number } | null>(null);
+  const peak = peakSel && peakSel.trackId === selected ? peakSel.n : null;
+  const setPeak = (n: number | null) => setPeakSel(n === null ? null : { trackId: selected, n });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1198,7 +1204,10 @@ export function EvaluationStage({
   useEffect(() => {
     if (selected === null && tracks.length) wb.setSelected(tracks[0].id);
   }, [selected, tracks, wb]);
-  useEffect(() => setPeak(null), [selected]);
+  const pickSpot = (trackId: number, n: number) => {
+    setPeakSel({ trackId, n });
+    if (trackId !== selected) wb.setSelected(trackId);
+  };
   const cycle = (d: 1 | -1) => tracks.length && wb.setSelected(tracks[(index + d + tracks.length) % tracks.length].id);
 
   const processedView = signalView === "PROCESSED";
@@ -1284,7 +1293,38 @@ export function EvaluationStage({
                       const xx = geometry.xMmToPx(t.centerMm - layout.trackWidthMm / 2);
                       const w = geometry.xMmToPx(layout.trackWidthMm);
                       const active = t.id === track?.id;
-                      return <rect key={t.id} x={xx} y={geometry.yMmToPx(layout.solventFrontMm)} width={w} height={geometry.yMmToPx(layout.baselineMm) - geometry.yMmToPx(layout.solventFrontMm)} fill={active ? "rgb(30 79 216 / 0.25)" : "rgb(255 255 255 / 0.06)"} stroke={active ? "#1E4FD8" : "rgb(255 255 255 / 0.7)"} strokeWidth={Math.max(1.5, plate.widthPx / (active ? 160 : 300))} className="cursor-pointer" onClick={() => wb.setSelected(t.id)} />;
+                      const stroke = Math.max(1.5, plate.widthPx / 300);
+                      const hrfToY = (h: number) => geometry.yMmToPx(layout.baselineMm + (h / 100) * (layout.solventFrontMm - layout.baselineMm));
+                      return (
+                        <g key={t.id}>
+                          <rect x={xx} y={geometry.yMmToPx(layout.solventFrontMm)} width={w} height={geometry.yMmToPx(layout.baselineMm) - geometry.yMmToPx(layout.solventFrontMm)} fill={active ? "rgb(30 79 216 / 0.06)" : "rgb(255 255 255 / 0.06)"} stroke={active ? "#1E4FD8" : "rgb(255 255 255 / 0.7)"} strokeWidth={active ? stroke * 1.4 : stroke} strokeDasharray={active ? `${stroke * 4} ${stroke * 2}` : undefined} className="cursor-pointer" onClick={() => wb.setSelected(t.id)} />
+                          {/* Detected (or manual) spots, as on the Plate stage; the selected track's in its peak colours. */}
+                          {previews
+                            .find((p) => p.track.id === t.id)
+                            ?.spots.map((s) => {
+                              const color = active ? PlotColors.Peaks[(s.number - 1) % PlotColors.Peaks.length] : "#e0344c";
+                              const chosen = active && s.number === peak;
+                              const ys = hrfToY(s.window.startHrf);
+                              const ye = hrfToY(s.window.endHrf);
+                              return (
+                                <rect
+                                  key={s.number}
+                                  x={xx}
+                                  y={ye}
+                                  width={w}
+                                  height={Math.max(1, ys - ye)}
+                                  fill={chosen ? `${color}40` : `${color}14`}
+                                  stroke={color}
+                                  strokeWidth={chosen ? stroke * 3 : stroke * 1.8}
+                                  className="cursor-pointer"
+                                  onClick={() => pickSpot(t.id, s.number)}
+                                >
+                                  <title>{`Track ${t.id} · peak ${s.number} · hRF ${fmt(s.peak.maxHrf)}`}</title>
+                                </rect>
+                              );
+                            })}
+                        </g>
+                      );
                     })}
                   </svg>
                 )}
@@ -1647,9 +1687,10 @@ export function EvaluationStage({
             {editable && (
               <>
                 {editing ? (
-                  <div className="grid grid-cols-2 gap-2">
-                    <Stepper label="Start" value={selectedSpot.window.startHrf} step={0.5} min={0} max={100} onChange={(v) => setWindows(windowsOf(pv).map((w, i) => (pv.spots[i].number === peak ? { startHrf: Math.min(v, w.endHrf - 0.5), endHrf: w.endHrf } : w)))} />
-                    <Stepper label="End" value={selectedSpot.window.endHrf} step={0.5} min={0} max={100} onChange={(v) => setWindows(windowsOf(pv).map((w, i) => (pv.spots[i].number === peak ? { startHrf: w.startHrf, endHrf: Math.max(v, w.startHrf + 0.5) } : w)))} />
+                  <div className="space-y-2 rounded-xl border border-line p-3">
+                    <p className="text-xs text-muted">Drag the coloured lines on the densitogram, or set them here.</p>
+                    <Stepper label="Start" unit="hRF" value={selectedSpot.window.startHrf} step={0.5} min={0} max={100} onChange={(v) => setWindows(windowsOf(pv).map((w, i) => (pv.spots[i].number === peak ? { startHrf: Math.min(v, w.endHrf - 0.5), endHrf: w.endHrf } : w)))} />
+                    <Stepper label="End" unit="hRF" value={selectedSpot.window.endHrf} step={0.5} min={0} max={100} onChange={(v) => setWindows(windowsOf(pv).map((w, i) => (pv.spots[i].number === peak ? { startHrf: w.startHrf, endHrf: Math.max(v, w.startHrf + 0.5) } : w)))} />
                   </div>
                 ) : null}
                 <button type="button" className={`${secondary} w-full`} onClick={() => (editing ? setEditing(false) : (toManual(), setEditing(true)))}>
