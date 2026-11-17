@@ -21,10 +21,14 @@ licensing) is used rather than copied.
 
 ## 2. Decisions needed before phase 2 (ask the user / hardware team)
 
-1. **Camera.** The tablet uses its own camera. On NxGen the choices are (a) a USB camera read by the
-   browser (`getUserMedia`, works in Electron and Chrome), (b) the TLC Scan-10 box captures and sends the
-   image, (c) upload only (already exists). The plan assumes **(a) with (c) as fallback**; the capture-QC
-   maths is the same either way. Decision affects phase 5 only.
+1. **Camera — decided (17 Nov 2026).** The lamp box carries an **IDS U3-34L0XCP-C-HQ Rev 1.2**
+   (uEye XCP, Sony IMX676 colour, 3552 × 3552 px, 2 µm pixels, rolling shutter, 12-bit, ≈17 fps,
+   USB 3 Type-C bus-powered, C-mount, no autofocus, IR-cut "HQ" filter). It is a **USB3 Vision /
+   GenICam** camera, not a UVC webcam: browsers (`getUserMedia`) and Electron cannot see it, so the
+   earlier option (a) is dropped. The lab PC runs **Windows or Linux**, where IDS peak (drivers + U3V
+   GenTL producer, APIs for C/C++/C#/Python) is supported; IDS peak has **no macOS build**. Capture goes
+   through a core camera service in the NxGen server on that PC (phase 5); upload stays as the fallback
+   and for development on macOS. Lens not chosen yet (see phase 5, step 5a).
 2. **Lamp box link.** Wi-Fi WebSocket box (`ws://192.168.4.1:81/ws`) can be driven from the NestJS
    server directly. The BLE controller cannot be driven from a browser reliably; if BLE is the production
    path, the desktop service (Electron) must bridge it. Decision affects phase 5 only.
@@ -126,7 +130,39 @@ Replaces typed-in distances with image-derived results while keeping manual over
   CSV kinds: peaks, spots, profiles, standards, results (UTF-8, dot decimal,
   `<AnalysisID>_<EvaluationID>_<content>.csv`). Report versions RPT v1/v2 recorded with hash.
 
-### Phase 5 — Hardware: capture, lamps, diagnostics (3–4 sessions, after decisions 1–2) → tlc 1.4.0
+### Phase 5 — Hardware: capture, lamps, diagnostics (4–5 sessions, after decisions 1–2) → tlc 1.4.0
+
+**Camera (IDS U3-34L0XCP-C-HQ in the lamp box, server on a Windows/Linux lab PC)**
+
+- **5a. Optics (hardware team, before validation).** Choose a C-mount lens for the largest plate
+  (20 × 20 cm → field ≈ 22 cm on a 7.1 mm square sensor, magnification ≈ 0.032): roughly 8 mm at
+  ≈ 280 mm or 12 mm at ≈ 380 mm working distance; low distortion, lockable focus and iris. 3552 px over
+  220 mm ≈ 16 px/mm, well above the 5 px/mm floor. A 400 nm long-pass filter is worth testing for the
+  UV lamps (cuts reflected UV haze, keeps the F254 fluorescence). Focus is mechanical: set once,
+  locked, and checked by the focus diagnostic at each calibration.
+- **5b. Camera helper.** A small helper process built on **IDS peak** (Python `ids_peak` +
+  `ids_peak_ipl` first, frozen to a single executable for Windows and Linux; a C++ build later if
+  needed). JSON over stdin/stdout: `list`, `open(serial)`, `info` (model, serial, firmware, sensor
+  temperature), `configure` (exposure µs, gain, white-balance gains, pixel format, ROI),
+  `still` (one full-resolution frame), `preview start/stop` (downscaled JPEG frames ≈ 5 fps). Stills
+  are debayered 12-bit → 16-bit RGB PNG (lossless) with the camera's settings and serial attached.
+  Ships with the desktop app; the IDS peak runtime is a prerequisite of the installer.
+- **5c. Core camera service in the server** (`apps/server/src/camera/`, additive; not in the serial
+  gateway). Starts and supervises the helper, one owner at a time (no two captures at once), audit
+  events (camera connected/lost, capture, settings applied), and a **simulator camera** that returns
+  fixture plates at a chosen exposure so everything is developed and tested on macOS and in CI.
+  Exposed to modules through the SDK as `ctx.cameras` (`list`, `still(settings)`, `preview`) under a new
+  permission, the way `ctx.gateway` exposes serial instruments.
+- **5d. TLC capture flow.** Picture stage gets **Capture** beside **Upload**: live preview with the
+  plate-position guide, then the tablet's sequence (below) using manual exposure, gain and white
+  balance taken from the **method** (fixed per method so plates are comparable; the tablet's
+  "camera settings" method fields). The original 16-bit still is stored in `tlc_images` with its
+  SHA-256, camera serial and settings, and goes through the same capture-QC gate as uploads.
+  The instrument register entry for the box records the camera serial; a different camera fails the
+  instrument check.
+
+**Lamps and the rest**
+
 - Lamp box driver in the server (WebSocket protocol: `status`/`select`/`ping`, events `door`,
   `uv_timeout`; door interlock and 120 s UV limit are in firmware and are surfaced, not re-implemented).
   BLE controller via desktop bridge if required. Simulator kept for tests.
@@ -184,6 +220,12 @@ CV ≤ 2 / 5 %, saturation WARN 0.5 % FAIL 2 %, dark rise 5 / 10, light leak 8 /
 
 - **Faithfulness.** Without the golden dataset (phase 1) the port's numbers cannot be defended in a
   validation. Do this first, not last.
+- **Camera on macOS.** IDS peak has no macOS build, so real capture can only be developed and tested
+  on the Windows/Linux lab PC; macOS development uses the simulator camera and uploads. Aravis (open
+  source, USB3 Vision, runs on macOS) is unconfirmed for this camera family.
+- **Camera stills are large.** A 3552 × 3552 16-bit RGB PNG is ≈ 40–75 MB. Store once; previews and
+  rectified plates are derived and cached (as for uploads); consider storing the raw Bayer frame
+  (≈ 19 MB at 12-bit) plus the debayer recipe if storage becomes a concern.
 - **Image size.** Raw images are 8–40 MB; store once (`tlc_images`, exists), compute from a cached
   rectified copy, never re-encode the original.
 - **Two sessions on one module.** Another session is working on `modules/ph` in this repo. Keep TLC
