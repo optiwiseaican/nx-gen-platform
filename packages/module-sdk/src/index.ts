@@ -240,6 +240,81 @@ export interface ModuleContext {
      */
     send(device: DeviceInfo, fields: Record<string, string | number>, options?: { persist?: boolean }): Promise<CommandResult>;
   };
+  /**
+   * Cameras on this server's computer. The live preview is served by the core at
+   * GET /api/cameras/<serial>/preview?exposureUs=&gain=&wb=r,g,b (an image stream for an <img>).
+   */
+  cameras: {
+    status(): CameraStatus;
+    list(): Promise<CameraDescriptor[]>;
+    info(serial: string | null): Promise<CameraInfo>;
+    /** One still, audited as CAMERA_CAPTURE by the core. Camera problems throw an Error named CameraError. */
+    still(principal: ModulePrincipal, request: CameraStillRequest, origin: RequestOrigin): Promise<CameraStill>;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Cameras (industrial USB3 Vision cameras owned by the server; see apps/server/src/camera)
+// ---------------------------------------------------------------------------
+
+export interface CameraStatus {
+  /** OFF: no cameras on this server; SIMULATOR: a simulated camera (development); IDS: IDS peak. */
+  mode: 'OFF' | 'SIMULATOR' | 'IDS';
+  helper: 'OFF' | 'STOPPED' | 'RUNNING' | 'FAILED';
+  helperVersion: string | null;
+  sdk: string | null;
+  simulated: boolean;
+  error: string | null;
+}
+
+export interface CameraDescriptor {
+  serial: string;
+  model: string;
+  vendor: string;
+  /** False when another program holds the camera. */
+  openable: boolean;
+  simulated: boolean;
+}
+
+export interface CameraInfo extends Omit<CameraDescriptor, 'simulated'> {
+  firmware: string | null;
+  temperatureC: number | null;
+  sensor: { width: number; height: number; pixelFormat: string; bits: number; shutter: string };
+  limits: { exposureUs: [number, number] | null; gain: [number, number] | null };
+  simulated: boolean;
+}
+
+export interface CameraStillRequest {
+  /** Camera serial; empty = the only camera connected. */
+  serial?: string;
+  exposureUs: number;
+  gain?: number;
+  /** Red, green, blue factors applied on the host (exact and recorded). */
+  whiteBalance?: [number, number, number];
+  /** Recorded in the audit trail, e.g. "TLC-0003 plate image". */
+  purpose?: string;
+}
+
+/** A full-resolution still: lossless 16-bit RGB PNG demosaiced from the raw frame, with its settings. */
+export interface CameraStill {
+  data: Buffer;
+  sha256: string;
+  contentType: 'image/png';
+  serial: string;
+  simulated: boolean;
+  width: number;
+  height: number;
+  bitDepth: number;
+  /** Bits per sample delivered by the sensor (e.g. 12). */
+  sourceBits: number;
+  pixelFormat: string;
+  exposureUs: number;
+  gain: number;
+  whiteBalance: [number, number, number];
+  temperatureC: number | null;
+  /** Share of pixels at the sensor's full scale. */
+  saturatedFraction: number;
+  capturedAt: string;
 }
 
 /** A database transaction opened by the core with the acting user recorded (audit triggers need it). */

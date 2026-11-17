@@ -21,7 +21,7 @@ export function readServiceSettings(userDataPath: string): Record<string, string
   return settings.DATABASE_URL ? settings : null;
 }
 
-export function serviceEnvironment(options: ServiceOptions, settings: Record<string, string>, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function serviceEnvironment(options: ServiceOptions, settings: Record<string, string>, base: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const origin = `http://127.0.0.1:${options.port}`;
   const env: NodeJS.ProcessEnv = {
     ...base,
@@ -34,7 +34,23 @@ export function serviceEnvironment(options: ServiceOptions, settings: Record<str
   };
   if (options.localBuild) delete env.NODE_ENV;
   else env.NODE_ENV = 'production';
+  // The lamp box camera: the server runs the camera helper shipped in the app. IDS peak has no
+  // macOS build, so cameras are off there unless the settings file asks for the simulator.
+  if (!env.NXGEN_CAMERA_HELPER) {
+    const helper = cameraHelperPath(options.resourcesPath, platform);
+    if (helper) env.NXGEN_CAMERA_HELPER = helper;
+  }
+  if (!env.NXGEN_CAMERA && platform === 'darwin') env.NXGEN_CAMERA = 'off';
   return env;
+}
+
+/** The camera helper shipped in the app's resources (frozen executable, else the Python script). */
+export function cameraHelperPath(resourcesPath: string, platform: NodeJS.Platform = process.platform): string | null {
+  const dir = join(resourcesPath, 'camera-helper');
+  for (const name of [platform === 'win32' ? 'nxgen-camera.exe' : 'nxgen-camera', 'nxgen_camera.py']) {
+    if (existsSync(join(dir, name))) return join(dir, name);
+  }
+  return null;
 }
 
 /** Runs the NestJS service with Electron's own Node, logging to a file the user can send us. */

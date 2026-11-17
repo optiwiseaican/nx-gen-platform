@@ -1,0 +1,6 @@
+# Real cameras (Windows / Linux, with the IDS peak SDK installed first).
+# The simulator (--simulate) needs none of these.
+ids_peak>=1.17
+ids_peak_ipl>=1.17
+numpy>=1.24
+Pillow>=10.0   # optional: JPEG live preview (PNG is used without it)

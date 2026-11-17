@@ -50,6 +50,17 @@ export interface ImageMeta {
   sizeBytes: number;
   sha256: string;
   qc: ImageQc | null;
+  source: "UPLOAD" | "CAMERA";
+  camera: {
+    serial: string;
+    model: string | null;
+    simulated: boolean;
+    exposureUs: number;
+    gain: number;
+    whiteBalance: [number, number, number];
+    attempts: { exposureUs: number; exposureEv: number | null; verdict: string }[];
+    settingsFromMethod: boolean;
+  } | null;
   uploadedBy: string | null;
   uploadedAt: string;
 }

@@ -161,6 +161,16 @@ Replaces typed-in distances with image-derived results while keeping manual over
   The instrument register entry for the box records the camera serial; a different camera fails the
   instrument check.
 
+**Status (17 Nov 2026, tlc 1.2.1):** 5b–5d built. `tools/camera-helper` (protocol, IDS peak camera,
+simulator; demosaic verified for all Bayer layouts), `apps/server/src/camera` (CameraService,
+`GET /api/cameras`, live preview stream, audit CAMERA_CAPTURE / CAMERA_LOST), SDK `ctx.cameras`,
+desktop service points at the bundled helper (cameras off on macOS), TLC `GET /camera`,
+`POST /analyses/:id/capture` (method settings "Camera exposure / gain / white balance", auto retake
+≤ 2), migration 005 (`tlc_images.source`, `camera`), Picture stage live view + Capture. Tested with
+the simulator (server spec, TLC DB spec, browser walkthrough). **Open:** run the helper against the
+real camera on the lab PC (IdsCamera calls are unverified), Windows/Linux app packaging that
+bundles the helper, lens (5a), lamps, diagnostics.
+
 **Lamps and the rest**
 
 - Lamp box driver in the server (WebSocket protocol: `status`/`select`/`ping`, events `door`,

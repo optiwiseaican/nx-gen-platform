@@ -194,9 +194,10 @@ export interface ImageQc {
   outline: Point[] | null;
 }
 
-export function imageQc(original: RgbImage, illumination: Illumination): ImageQc {
+/** The capture quality gate on a whole image; `fromCamera` applies the stricter rules for live captures. */
+export function imageQc(original: RgbImage, illumination: Illumination, fromCamera = false): ImageQc {
   const { small, step, detection, cropped } = findPlate(original, 1200);
-  const report = CaptureQc.evaluate({ image: small, detection, illumination, fromCamera: false });
+  const report = CaptureQc.evaluate({ image: small, detection, illumination, fromCamera });
   const outline = cropped
     ? [{ x: 0, y: 0 }, { x: original.width - 1, y: 0 }, { x: original.width - 1, y: original.height - 1 }, { x: 0, y: original.height - 1 }]
     : detection

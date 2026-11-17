@@ -125,6 +125,43 @@ export function PictureStage({
   const qc = image?.qc ?? null;
   const verdict = qc ? VERDICT[qc.verdict] : null;
 
+  // The lamp box camera, through the server (browsers cannot see USB3 Vision cameras).
+  const [camera, setCamera] = useState<CameraOverview | null>(null);
+  const [live, setLive] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const loadCamera = useCallback(async () => {
+    try {
+      setCamera(await mod<CameraOverview>(`/camera?analysis=${analysisId}`));
+    } catch (e) {
+      setCamera({ status: { mode: "OFF", helper: "FAILED", simulated: false, error: (e as Error).message }, cameras: [], settings: null, problems: [], preferredSerial: null });
+    }
+  }, [analysisId]);
+  useEffect(() => {
+    if (editable) void loadCamera();
+  }, [editable, loadCamera]);
+  const cam = camera?.cameras.find((c) => c.serial === camera.preferredSerial) ?? (camera?.cameras.length === 1 ? camera.cameras[0] : null);
+  const camSettings = camera?.settings ?? null;
+
+  async function capture() {
+    if (!cam) return;
+    setCapturing(true);
+    setError(null);
+    try {
+      const out = await mod<{ id: string; sha256: string; qc: ImageQc | null; camera: { exposureUs: number; attempts: unknown[] } }>(`/analyses/${analysisId}/capture`, send({ illumination, serial: cam.serial }));
+      setLive(false);
+      const retakes = out.camera.attempts.length - 1;
+      await onUploaded(
+        `${ILLUMINATION_LABEL[illumination]} image captured (${cam.simulated ? "simulated camera" : cam.serial}, ${fmtExposure(out.camera.exposureUs)}${retakes > 0 ? `, exposure corrected in ${retakes} retake${retakes === 1 ? "" : "s"}` : ""}) · SHA-256 ${out.sha256.slice(0, 16)}… · quality gate: ${out.qc ? VERDICT[out.qc.verdict].label : "not judged"}`,
+        out.id,
+      );
+    } catch (e) {
+      setError((e as Error).message);
+      void loadCamera();
+    } finally {
+      setCapturing(false);
+    }
+  }
+
   async function upload(file: File) {
     setBusy(true);
     setError(null);
@@ -148,7 +185,9 @@ export function PictureStage({
   return (
     <div className={STAGE_GRID}>
       <div className="relative min-h-[18rem] overflow-hidden rounded-2xl bg-black lg:min-h-0">
-        {image ? (
+        {live && cam && camSettings ? (
+          <LivePreview serial={cam.serial} simulated={cam.simulated} exposureUs={camSettings.exposureUs} gain={camSettings.gain} whiteBalance={camSettings.whiteBalance} illumination={illumination} />
+        ) : image ? (
           <>
             <img src={`/api/modules/tlc/api/images/${image.id}`} alt={`${ILLUMINATION_LABEL[image.illumination]} plate image`} className="max-h-[42rem] w-full object-contain lg:absolute lg:inset-0 lg:h-full lg:max-h-none" />
             {verdict && (
@@ -157,11 +196,14 @@ export function PictureStage({
               </span>
             )}
             <span className="absolute bottom-3 left-3 rounded-md bg-black/55 px-2 py-1 font-mono text-[11px] text-white">
-              RAW · {image.fileName} · {ILLUMINATION_LABEL[image.illumination]}
+              {image.source === "CAMERA" && image.camera
+                ? `CAMERA${image.camera.simulated ? " (SIMULATED)" : ""} · ${image.camera.serial} · ${fmtExposure(image.camera.exposureUs)} · gain ${fmt(image.camera.gain, 1)}`
+                : `RAW · ${image.fileName}`}{" "}
+              · {ILLUMINATION_LABEL[image.illumination]}
             </span>
           </>
         ) : (
-          <p className="p-8 text-center text-sm text-white/70">No plate image yet. Upload the plate photographed under the lamp you need.</p>
+          <p className="p-8 text-center text-sm text-white/70">No plate image yet. Capture the plate with the camera, or upload a photo taken under the lamp you need.</p>
         )}
       </div>
 
@@ -213,11 +255,51 @@ export function PictureStage({
                 ))}
               </select>
             </label>
+            <div className="space-y-2 rounded-xl border border-line p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold">Camera</p>
+                <button type="button" className="text-xs font-semibold text-brand hover:underline" onClick={() => void loadCamera()}>
+                  Refresh
+                </button>
+              </div>
+              {!camera ? (
+                <p className="text-muted">Looking for the camera…</p>
+              ) : cam ? (
+                <>
+                  <p>
+                    {cam.model} · <span className="font-mono">{cam.serial}</span>
+                    {cam.simulated && <Badge tone="warn">Simulated</Badge>}
+                  </p>
+                  {camSettings && (
+                    <p className="text-xs text-muted">
+                      Exposure {fmtExposure(camSettings.exposureUs)} · gain {fmt(camSettings.gain, 1)} · white balance {camSettings.whiteBalance.map((v) => fmt(v, 2)).join("/")} ·{" "}
+                      {camSettings.fixed ? "set by the method" : "exposure corrected automatically (no exposure in the method)"}
+                    </p>
+                  )}
+                  {camera.problems.length > 0 && <Callout tone="fail">{camera.problems.join(" ")}</Callout>}
+                  {cam.simulated && <p className="text-xs text-warn">Development server: the simulated camera photographs a stored plate. Real captures need the lab PC with the IDS camera.</p>}
+                </>
+              ) : (
+                <p className="text-muted">
+                  {camera.status.mode === "OFF" ? "Cameras are switched off on this server." : camera.cameras.length > 1 ? "Several cameras are connected; set the instrument's serial number to the camera's serial." : "No camera connected to this computer. Check the USB 3 cable."}
+                  {camera.status.error && <span className="block text-xs text-fail">{camera.status.error}</span>}
+                </p>
+              )}
+              {cam && (
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" className={secondary} onClick={() => setLive(!live)} disabled={capturing}>
+                    {live ? "Stop live view" : "Live view"}
+                  </button>
+                  <button type="button" className={primary} onClick={() => void capture()} disabled={capturing || busy || (camera?.problems.length ?? 0) > 0}>
+                    {capturing ? "Capturing…" : "Capture"}
+                  </button>
+                </div>
+              )}
+            </div>
             <input ref={fileRef} id="plate-image" type="file" accept="image/png,image/jpeg" className="sr-only" onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])} />
-            <button className={`${strong} w-full`} onClick={() => fileRef.current?.click()} disabled={busy}>
+            <button className={`${cam ? secondary : strong} w-full`} onClick={() => fileRef.current?.click()} disabled={busy || capturing}>
               {busy ? "Checking the image…" : "Upload plate image"}
             </button>
-            <p className="text-xs text-muted">Camera capture through the instrument link comes with the hardware phase; until then, upload the photo.</p>
           </>
         )}
         {error && <Callout tone="fail">{error}</Callout>}
@@ -226,7 +308,7 @@ export function PictureStage({
           <div className="space-y-3 border-t border-line pt-4">
             <div>
               <h4 className={panelTitle}>Capture review</h4>
-              <p className="text-sm text-muted">{editable ? "Uploaded image checked. Use it or choose another." : "How the image passed the capture quality gate."}</p>
+              <p className="text-sm text-muted">{editable ? `${image.source === "CAMERA" ? "Captured" : "Uploaded"} image checked. Use it or choose another.` : "How the image passed the capture quality gate."}</p>
             </div>
             <p className="text-sm font-semibold">Quality checks</p>
             {qc ? (
@@ -273,6 +355,61 @@ export function PictureStage({
           </div>
         )}
       </aside>
+    </div>
+  );
+}
+
+interface CameraOverview {
+  status: { mode: "OFF" | "SIMULATOR" | "IDS"; helper: string; simulated: boolean; error: string | null };
+  cameras: { serial: string; model: string; vendor?: string; openable: boolean; simulated: boolean }[];
+  settings: { exposureUs: number; gain: number; whiteBalance: [number, number, number]; fixed: boolean } | null;
+  problems: string[];
+  preferredSerial: string | null;
+}
+
+const fmtExposure = (us: number) => (us >= 1_000_000 ? `${fmt(us / 1e6, 2)} s` : us >= 1000 ? `${fmt(us / 1000, us >= 10_000 ? 0 : 1)} ms` : `${Math.round(us)} µs`);
+
+/**
+ * The camera's live image, streamed by the server (GET /api/cameras/<serial>/preview), with the
+ * plate guide: the plate should sit inside the dashed frame with its bottom (baseline) towards the
+ * red edge. Removing the component closes the stream, which stops the preview on the server.
+ */
+function LivePreview({ serial, simulated, exposureUs, gain, whiteBalance, illumination }: { serial: string; simulated: boolean; exposureUs: number; gain: number; whiteBalance: [number, number, number]; illumination: Illumination }) {
+  const ref = useRef<HTMLImageElement>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const src = `/api/cameras/${encodeURIComponent(serial)}/preview?exposureUs=${exposureUs}&gain=${gain}&wb=${whiteBalance.join(",")}&n=${attempt}`;
+  useEffect(() => {
+    const img = ref.current;
+    return () => {
+      // Drop the connection now rather than when the image is garbage collected.
+      if (img) img.src = "";
+    };
+  }, [src]);
+  return (
+    <div className="flex h-full min-h-[18rem] items-center justify-center lg:absolute lg:inset-0">
+      <div className="relative">
+        {!failed ? (
+          <img ref={ref} src={src} alt="Live camera image" className="block h-auto w-full max-w-full lg:h-[calc(100vh-11rem)] lg:w-auto" onError={() => setFailed(true)} />
+        ) : (
+          <div className="p-8 text-center text-sm text-white/80">
+            The live image stopped.
+            <button type="button" className="ml-2 font-semibold text-white underline" onClick={() => (setFailed(false), setAttempt(attempt + 1))}>
+              Reconnect
+            </button>
+          </div>
+        )}
+        {!failed && (
+          <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden>
+            <rect x={10} y={8} width={80} height={84} fill="none" stroke="#FFC107" strokeWidth={0.5} strokeDasharray="2 1.5" vectorEffect="non-scaling-stroke" />
+            <line x1={10} x2={90} y1={92} y2={92} stroke="#e0344c" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+          </svg>
+        )}
+      </div>
+      <span className="absolute top-3 left-3 flex items-center gap-1.5 rounded-lg bg-black/60 px-2.5 py-1 text-xs font-bold tracking-wide text-white">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" /> LIVE · {simulated ? "SIMULATED CAMERA" : serial} · {ILLUMINATION_LABEL[illumination]}
+      </span>
+      <span className="absolute bottom-3 left-3 rounded-md bg-black/55 px-2 py-1 text-[11px] text-white">Place the plate inside the dashed frame, sample line (bottom) towards the red edge.</span>
     </div>
   );
 }

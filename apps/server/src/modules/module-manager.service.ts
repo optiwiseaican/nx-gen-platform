@@ -7,7 +7,9 @@ import {
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
+import { CameraError, CameraService } from '../camera/camera.service';
 import { createHash, randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { createRequire } from 'module';
@@ -144,6 +146,8 @@ export class ModuleManagerService implements OnModuleInit {
     private readonly devices: DevicesService,
     private readonly gateway: GatewayService,
     private readonly workflow: WorkflowService,
+    /** Absent in specs that do not need cameras; modules then see none. */
+    @Optional() private readonly cameras?: CameraService,
   ) {}
 
   /** Transactions handed to modules, mapped back to their database client. */
@@ -569,6 +573,29 @@ export class ModuleManagerService implements OnModuleInit {
           if (!types.has(device.instrumentType))
             throw new Error('Not this module’s instrument');
           return this.gateway.send(device, fields, options);
+        },
+      },
+      cameras: {
+        status: () =>
+          this.cameras?.status() ?? {
+            mode: 'OFF',
+            helper: 'OFF',
+            helperVersion: null,
+            sdk: null,
+            simulated: false,
+            error: null,
+          },
+        list: () => this.cameras?.list() ?? Promise.resolve([]),
+        info: (serial) => {
+          if (!this.cameras) throw new CameraError('Cameras are switched off on this server.');
+          return this.cameras.info(serial);
+        },
+        still: (principal, request, origin) => {
+          if (!this.cameras) throw new CameraError('Cameras are switched off on this server.');
+          return this.cameras.still(principal, {
+            ...request,
+            purpose: `${manifest.id}: ${request.purpose ?? 'capture'}`,
+          }, origin);
         },
       },
     };

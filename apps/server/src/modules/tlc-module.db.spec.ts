@@ -13,6 +13,7 @@ import { generateSigningKeyPair, packModule } from '@crescent/licensing';
 import { RgbImage, argb } from '../../../../modules/tlc/src/engine';
 import { encodePng } from '../../../../modules/tlc/src/api/images';
 import { AuditService } from '../audit/audit.service';
+import { CameraService } from '../camera/camera.service';
 import { BootstrapJournal } from '../audit/bootstrap-journal';
 import type { Principal, RequestOrigin } from '../auth/auth.types';
 import { IdentityService } from '../auth/identity.service';
@@ -131,6 +132,7 @@ describeDb(
       }) as Promise<Record<string, unknown>>;
     };
     let deviceId: string;
+    let cameras: CameraService | undefined;
     let methodVersionId: string;
     let analysisId: string;
     let workflowId: string;
@@ -185,6 +187,8 @@ describeDb(
         devices,
         gateway,
         workflow,
+        // The simulated lamp box camera (tools/camera-helper --simulate).
+        (process.env.NXGEN_CAMERA = 'simulator', (cameras = new CameraService(config, audit))),
       );
       const admin = new UserAdminService(
         config,
@@ -230,6 +234,8 @@ describeDb(
     afterAll(async () => {
       for (const m of registry.all()) registry.remove(m.id);
       await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await cameras?.onModuleDestroy();
+      delete process.env.NXGEN_CAMERA;
       await db.onModuleDestroy();
       rmSync(dataDir, { recursive: true, force: true });
     });
@@ -1174,6 +1180,73 @@ describeDb(
       expect(new Set(sigs.map((s) => s.signerUsername))).toEqual(
         new Set(['root.admin']),
       );
+    });
+
+    it('captures the plate with the lamp box camera: method settings, automatic exposure, traceable to the camera', async () => {
+      const overview = (await call('analyst', 'GET', '/camera', undefined, {})) as {
+        status: { mode: string };
+        cameras: { serial: string; simulated: boolean }[];
+      };
+      expect(overview.status.mode).toBe('SIMULATOR');
+      expect(overview.cameras).toEqual([expect.objectContaining({ serial: 'SIM-0001', simulated: true })]);
+
+      const a = (await call('analyst', 'POST', '/analyses', {
+        deviceId,
+        methodVersionId,
+        name: 'Camera capture',
+        sampleId: 'SMP-CAM-1',
+      })) as { id: string; code: string };
+      const settings = (await call('analyst', 'GET', '/camera', undefined, { analysis: a.id })) as {
+        settings: { exposureUs: number; fixed: boolean };
+        preferredSerial: string;
+      };
+      // The method sets no camera exposure: 20 ms to start, corrected automatically.
+      expect(settings.settings).toMatchObject({ exposureUs: 20000, fixed: false });
+      expect(settings.preferredSerial).toBe('SIM-0001');
+
+      await expect(call('analyst', 'POST', `/analyses/${a.id}/capture`, { illumination: 'NOPE' })).rejects.toMatchObject({ status: 400 });
+      await expect(call('reviewer', 'POST', `/analyses/${a.id}/capture`, { illumination: 'UV254' })).rejects.toMatchObject({ status: 403 });
+
+      const shot = (await call('analyst', 'POST', `/analyses/${a.id}/capture`, { illumination: 'UV254' })) as {
+        id: string;
+        sha256: string;
+        qc: { verdict: string; exposureEv: number | null } | null;
+        camera: { serial: string; simulated: boolean; attempts: { exposureUs: number; exposureEv: number | null }[]; exposureUs: number };
+      };
+      expect(shot.camera).toMatchObject({ serial: 'SIM-0001', simulated: true });
+      // The simulator's reference exposure reads 60 % of full scale: the gate asks for more light,
+      // so the capture retakes with a longer exposure (≤ 2 retakes), as the tablet does.
+      expect(shot.camera.attempts.length).toBeGreaterThanOrEqual(1);
+      expect(shot.camera.attempts.length).toBeLessThanOrEqual(3);
+      if (shot.camera.attempts.length > 1) expect(shot.camera.exposureUs).not.toBe(20000);
+      expect(shot.qc).not.toBeNull();
+
+      const [row] = await db.query<{ source: string; camera: { serial: string }; sha256: string; content_type: string }>(
+        `SELECT source, camera, sha256, content_type FROM ${schema}.tlc_images WHERE id = $1`,
+        [shot.id],
+      );
+      expect(row).toMatchObject({ source: 'CAMERA', sha256: shot.sha256, content_type: 'image/png' });
+      expect(row.camera.serial).toBe('SIM-0001');
+
+      const view = (await call('analyst', 'GET', `/analyses/${a.id}`)) as {
+        images: { id: string; source: string; camera: { serial: string } | null }[];
+      };
+      expect(view.images[0]).toMatchObject({ id: shot.id, source: 'CAMERA', camera: expect.objectContaining({ serial: 'SIM-0001' }) });
+
+      const [cap] = await audit.list({ action: 'CAMERA_CAPTURE' });
+      expect(cap).toMatchObject({ result: 'SUCCESS', actor: people.analyst.p.userId });
+      const [added] = await audit.list({ action: 'TLC_IMAGE_CAPTURED' });
+      expect(added.details).toMatchObject({ camera: 'SIM-0001', simulated: true });
+
+      // An uploaded image is marked as such and carries no camera.
+      const upload = (await call('analyst', 'POST', `/analyses/${a.id}/images`, encodePng(new RgbImage(80, 80, new Int32Array(80 * 80).fill(argb(40, 200, 60)))), {
+        illumination: 'UV254',
+      })) as { id: string };
+      const [up] = await db.query<{ source: string; camera: unknown }>(`SELECT source, camera FROM ${schema}.tlc_images WHERE id = $1`, [upload.id]);
+      expect(up).toEqual({ source: 'UPLOAD', camera: null });
+      await expect(
+        db.query(`UPDATE ${schema}.tlc_images SET source = 'CAMERA' WHERE id = $1`, [upload.id]),
+      ).rejects.toThrow(/NXGEN-TLC-001/);
     });
   },
 );

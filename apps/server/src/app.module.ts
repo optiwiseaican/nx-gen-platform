@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from './auth/auth.module';
+import { CameraModule } from './camera/camera.module';
 import { CoreModule } from './core/core.module';
 import { DevicesModule } from './devices/devices.module';
 import { LicensingModule } from './licensing/licensing.module';
@@ -23,6 +24,7 @@ import { WorkflowModule } from './workflow/workflow.module';
     MethodsModule,
     DevicesModule,
     GatewayModule,
+    CameraModule,
     ModulesModule,
   ],
 })

@@ -76,6 +76,53 @@ export function parseRfWindows(parameters: { name: string; value: string; unit: 
   return { windows, problems };
 }
 
+/** Camera settings for a capture. `fixed` = the method sets the exposure, so it is not adjusted. */
+export interface CameraSettingsInput {
+  exposureUs: number;
+  gain: number;
+  whiteBalance: [number, number, number];
+  fixed: boolean;
+}
+
+export const DEFAULT_CAMERA: CameraSettingsInput = { exposureUs: 20000, gain: 1, whiteBalance: [1, 1, 1], fixed: false };
+
+/**
+ * Camera settings from a TLC method's parameters, as the tablet keeps them on the method so every
+ * plate of a method is photographed the same way:
+ *   "Camera exposure"       value in µs, ms or s (unit)        e.g. 25 ms
+ *   "Camera gain"           factor (unit "x" or empty)         e.g. 1.5
+ *   "Camera white balance"  "red/green/blue" factors           e.g. 1.6/1.0/1.9
+ * Anything not set falls back to the defaults (20 ms, gain 1, white balance 1/1/1); without a
+ * method exposure the capture adjusts the exposure automatically (the tablet's auto retake).
+ */
+export function parseCameraSettings(parameters: { name: string; value: string; unit: string }[]): { settings: CameraSettingsInput; problems: string[] } {
+  const s: CameraSettingsInput = { ...DEFAULT_CAMERA, whiteBalance: [...DEFAULT_CAMERA.whiteBalance] as [number, number, number] };
+  const problems: string[] = [];
+  for (const p of parameters) {
+    const name = p.name.trim().toLowerCase();
+    const unit = p.unit.trim().toLowerCase();
+    const value = p.value.trim().replace(',', '.');
+    if (name === 'camera exposure') {
+      const n = Number(value);
+      const k = unit === 'µs' || unit === 'us' ? 1 : unit === 'ms' ? 1000 : unit === 's' ? 1e6 : NaN;
+      if (!(n > 0) || !Number.isFinite(k) || !(n * k >= 31 && n * k <= 2_000_000)) problems.push(`Camera exposure must be 31 µs – 2 s with unit µs, ms or s: ${p.value} ${p.unit}`);
+      else {
+        s.exposureUs = Math.round(n * k);
+        s.fixed = true;
+      }
+    } else if (name === 'camera gain') {
+      const n = Number(value);
+      if (!(n >= 1 && n <= 16) || !(unit === '' || unit === 'x' || unit === '×')) problems.push(`Camera gain must be a factor from 1 to 16: ${p.value} ${p.unit}`);
+      else s.gain = n;
+    } else if (name === 'camera white balance') {
+      const parts = value.split('/').map(Number);
+      if (parts.length !== 3 || !parts.every((x) => x >= 0.1 && x <= 8)) problems.push(`Camera white balance must be "red/green/blue" factors between 0.1 and 8: ${p.value}`);
+      else s.whiteBalance = parts as [number, number, number];
+    }
+  }
+  return { settings: s, problems };
+}
+
 /** Problems that make the plate data unusable, or []. */
 export function validatePlate(frontMm: number | null, tracks: TrackInput[]): string[] {
   const p: string[] = [];

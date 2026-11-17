@@ -1,8 +1,8 @@
 import { createHash } from 'crypto';
 import type { DeviceInfo, ModuleContext, ModuleFileResponse, ModuleRequest, ModuleTx, NxGenModule } from '@crescent/module-sdk';
 import { ModuleError } from '@crescent/module-sdk';
-import { Channel, PlateGeometry, Point, PostProcessing, RgbImage, validatePostProcessing } from '../engine';
-import { evaluate, ILLUMINATIONS, Illumination, imageType, parseRfWindows, RfWindow, TrackInput, validatePlate } from '../shared/tlc';
+import { autoRetakeEv, Channel, PlateGeometry, Point, PostProcessing, RgbImage, validatePostProcessing } from '../engine';
+import { CameraSettingsInput, DEFAULT_CAMERA, evaluate, ILLUMINATIONS, Illumination, imageType, parseCameraSettings, parseRfWindows, RfWindow, TrackInput, validatePlate } from '../shared/tlc';
 import { decodeImage, encodePng, pixelBytes } from './images';
 import {
   ENGINE_VERSION,
@@ -125,8 +125,27 @@ interface ImageMeta {
   size_bytes: number;
   sha256: string;
   qc: ImageQc | null;
+  source: 'UPLOAD' | 'CAMERA';
+  camera: CameraRecord | null;
   uploaded_by_name: string | null;
   uploaded_at: Date;
+}
+
+/** What tlc_images.camera keeps for a captured image (migration 005). */
+interface CameraRecord {
+  serial: string;
+  model: string | null;
+  simulated: boolean;
+  exposureUs: number;
+  gain: number;
+  whiteBalance: [number, number, number];
+  pixelFormat: string;
+  sourceBits: number;
+  temperatureC: number | null;
+  saturatedFraction: number;
+  settingsFromMethod: boolean;
+  attempts: { exposureUs: number; exposureEv: number | null; verdict: string }[];
+  capturedAt: string;
 }
 
 interface PlateRow {
@@ -196,7 +215,7 @@ async function load(tx: Pick<ModuleTx, 'query'>, id: string): Promise<AnalysisRo
 
 async function images(tx: Pick<ModuleTx, 'query'>, analysisId: string) {
   return tx.query<ImageMeta>(
-    `SELECT i.id, i.illumination, i.file_name, i.content_type, i.size_bytes, i.sha256, i.qc, i.uploaded_at, u.full_name AS uploaded_by_name
+    `SELECT i.id, i.illumination, i.file_name, i.content_type, i.size_bytes, i.sha256, i.qc, i.source, i.camera, i.uploaded_at, u.full_name AS uploaded_by_name
        FROM tlc_images i LEFT JOIN users u ON u.id = i.uploaded_by WHERE i.analysis_id = $1 ORDER BY i.uploaded_at`,
     [analysisId],
   );
@@ -257,6 +276,8 @@ const imageView = (i: ImageMeta) => ({
   sizeBytes: i.size_bytes,
   sha256: i.sha256,
   qc: i.qc,
+  source: i.source,
+  camera: i.camera,
   uploadedBy: i.uploaded_by_name,
   uploadedAt: i.uploaded_at.toISOString(),
 });
@@ -383,6 +404,23 @@ async function editable(tx: ModuleTx, req: ModuleRequest, id: string, what: stri
   const a = await load(tx, id);
   if (a.analyzed_by !== req.principal.userId) throw new ModuleError(403, `Only the analyst who created the analysis can ${what}.`);
   return a;
+}
+
+/** Camera settings from the analysis' method version (the parameters as approved). */
+async function methodCamera(a: AnalysisRow): Promise<{ settings: CameraSettingsInput; problems: string[] }> {
+  const [mv] = await ctx.db.query<{ parameters: { name: string; value: string; unit: string }[] }>('SELECT parameters FROM method_versions WHERE id = $1', [a.method_version_id]);
+  return parseCameraSettings(mv?.parameters ?? []);
+}
+
+/**
+ * The camera for this analysis: the one whose serial is the instrument's serial number if it is
+ * connected, else the only camera connected; null when it cannot be decided.
+ */
+async function deviceCameraSerial(a: AnalysisRow, cameras: { serial: string }[]): Promise<string | null> {
+  const [d] = await ctx.db.query<{ serial_number: string | null }>('SELECT serial_number FROM devices WHERE id = $1', [a.device_id]);
+  const own = cameras.find((c) => d?.serial_number && c.serial === d.serial_number);
+  if (own) return own.serial;
+  return cameras.length === 1 ? cameras[0].serial : null;
 }
 
 async function originalImage(tx: Pick<ModuleTx, 'query'>, analysisId: string, imageId: unknown) {
@@ -592,6 +630,136 @@ const TlcModule: NxGenModule = {
         const a = await load(ctx.db, req.params.id);
         await ctx.audit.record({ action: 'TLC_PLATE_EVALUATED', result: 'SUCCESS', principal: req.principal, recordId: a.id, details: { code: a.code, conclusion: a.conclusion, tracks: tracks.length, mode: 'MANUAL' } });
         return view(a);
+      },
+    });
+
+    // ------------------------------------------------------------------
+    // Camera (the lamp box camera on the server's computer; see core CameraService)
+    // ------------------------------------------------------------------
+
+    /**
+     * Cameras the server can use, and the settings the analysis' method asks for. The live preview
+     * itself is the core stream GET /api/cameras/<serial>/preview.
+     */
+    ctx.http.route({
+      method: 'GET',
+      path: '/camera',
+      permission: 'tlc.view',
+      passive: true,
+      async handler(req) {
+        const status = ctx.cameras.status();
+        let cameras: Awaited<ReturnType<ModuleContext['cameras']['list']>> = [];
+        let error: string | null = null;
+        try {
+          cameras = await ctx.cameras.list();
+        } catch (e) {
+          error = (e as Error).message;
+        }
+        let settings = DEFAULT_CAMERA;
+        let problems: string[] = [];
+        let preferred: string | null = null;
+        if (typeof req.query.analysis === 'string' && UUID.test(req.query.analysis)) {
+          const a = await load(ctx.db, req.query.analysis);
+          ({ settings, problems } = await methodCamera(a));
+          preferred = await deviceCameraSerial(a, cameras);
+        }
+        return { status: { ...ctx.cameras.status(), error: error ?? status.error }, cameras, settings, problems, preferredSerial: preferred };
+      },
+    });
+
+    /**
+     * Capture the plate with the camera: the tablet's sequence on the server. Settings come from the
+     * method; without a method exposure the exposure is corrected automatically (up to 2 retakes
+     * when the quality gate finds it ≥ 0.3 EV off). The kept still is stored like an upload (original
+     * bytes, SHA-256, quality gate) together with the camera and settings that took it.
+     */
+    ctx.http.route({
+      method: 'POST',
+      path: '/analyses/:id/capture',
+      permission: 'tlc.analyze',
+      async handler(req) {
+        const body = (req.body ?? {}) as { illumination?: string; serial?: string };
+        const illumination = body.illumination as Illumination;
+        if (!ILLUMINATIONS.includes(illumination)) throw new ModuleError(400, 'Choose the illumination: white, UV 254 or UV 366.', 'illumination');
+        const a = await load(ctx.db, req.params.id);
+        if (a.analyzed_by !== req.principal.userId) throw new ModuleError(403, 'Only the analyst who created the analysis can add images.');
+        await usableDevice(a.device_id);
+        const { settings, problems } = await methodCamera(a);
+        if (problems.length) throw new ModuleError(409, `The method's camera settings are not usable: ${problems.join(' ')}`);
+        let cameras: Awaited<ReturnType<ModuleContext['cameras']['list']>>;
+        try {
+          cameras = await ctx.cameras.list();
+        } catch (e) {
+          throw new ModuleError(409, (e as Error).message);
+        }
+        const serial = typeof body.serial === 'string' && body.serial ? body.serial : await deviceCameraSerial(a, cameras);
+        if (!serial || !cameras.some((c) => c.serial === serial)) throw new ModuleError(409, 'No camera is connected to this computer. Check the USB 3 cable, or upload an image instead.');
+
+        // The tablet's capture loop: take, check, correct the exposure, retake (≤ 2).
+        let exposureUs = settings.exposureUs;
+        const attempts: { exposureUs: number; exposureEv: number | null; verdict: string }[] = [];
+        let still: Awaited<ReturnType<ModuleContext['cameras']['still']>>;
+        let rgb: ReturnType<typeof decodeImage>;
+        let qc: ImageQc | null;
+        for (;;) {
+          try {
+            still = await ctx.cameras.still(req.principal, { serial, exposureUs, gain: settings.gain, whiteBalance: settings.whiteBalance, purpose: `${a.code} plate image` }, req.origin);
+          } catch (e) {
+            throw new ModuleError(409, (e as Error).message);
+          }
+          rgb = decodeImage(still.data);
+          qc = rgb.width >= MIN_QC_SIDE && rgb.height >= MIN_QC_SIDE ? imageQc(rgb, illumination, true) : null;
+          attempts.push({ exposureUs: still.exposureUs, exposureEv: qc?.exposureEv ?? null, verdict: qc?.verdict ?? 'NOT_ASSESSED' });
+          const ev = qc && !settings.fixed ? autoRetakeEv({ items: qc.items, exposureEv: qc.exposureEv, stats: null }) : null;
+          if (ev === null || attempts.length > 2) break;
+          exposureUs = Math.round(Math.min(2_000_000, Math.max(31, exposureUs * 2 ** ev)));
+        }
+        const camera = {
+          serial: still.serial,
+          model: cameras.find((c) => c.serial === still.serial)?.model ?? null,
+          simulated: still.simulated,
+          exposureUs: still.exposureUs,
+          gain: still.gain,
+          whiteBalance: still.whiteBalance,
+          pixelFormat: still.pixelFormat,
+          sourceBits: still.sourceBits,
+          temperatureC: still.temperatureC,
+          saturatedFraction: still.saturatedFraction,
+          settingsFromMethod: settings.fixed,
+          attempts,
+          capturedAt: still.capturedAt,
+        };
+        const fileName = `${a.code}-${illumination}-${still.capturedAt.replace(/[:.]/g, '-')}.png`;
+        const id = await ctx.db.transaction(req.principal, 'TLC plate image captured', req.origin, async (tx) => {
+          const row = await editable(tx, req, req.params.id, 'add images');
+          const [r] = await tx.query<{ id: string }>(
+            `INSERT INTO tlc_images (analysis_id, illumination, file_name, content_type, size_bytes, sha256, data, uploaded_by, qc, source, camera)
+             VALUES ($1, $2, $3, 'image/png', $4, $5, $6, $7, $8, 'CAMERA', $9) RETURNING id`,
+            [row.id, illumination, fileName, still.data.length, still.sha256, still.data, req.principal.userId, qc ? JSON.stringify(qc) : null, JSON.stringify(camera)],
+          );
+          return r.id;
+        });
+        await ctx.audit.record({
+          action: 'TLC_IMAGE_CAPTURED',
+          result: 'SUCCESS',
+          principal: req.principal,
+          recordId: req.params.id,
+          details: {
+            imageId: id,
+            illumination,
+            sha256: still.sha256,
+            sizeBytes: still.data.length,
+            width: rgb.width,
+            height: rgb.height,
+            camera: still.serial,
+            simulated: still.simulated,
+            exposureUs: still.exposureUs,
+            gain: still.gain,
+            attempts: attempts.length,
+            qcVerdict: qc?.verdict ?? null,
+          },
+        });
+        return { id, sha256: still.sha256, illumination, sizeBytes: still.data.length, width: rgb.width, height: rgb.height, qc, camera };
       },
     });
 
