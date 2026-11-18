@@ -119,7 +119,8 @@ export class BootstrapJournal {
 
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     appendFileSync(this.path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-    const fd = openSync(this.path, 'r');
+    // Opened for writing: Windows refuses to flush (fsync) a read-only handle (EPERM).
+    const fd = openSync(this.path, 'r+');
     try {
       fsyncSync(fd);
     } finally {
