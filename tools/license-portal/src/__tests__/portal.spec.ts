@@ -1,7 +1,7 @@
 import { AddressInfo } from 'net';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { Pool } from 'pg';
 import {
   computeKeyId,
@@ -13,15 +13,14 @@ import {
   HashedFingerprint,
   verifyLicense,
 } from '@crescent/licensing';
-// The bundled PostgreSQL the desktop app uses, for a real database without a server.
-import { LocalDatabase } from '../../../../apps/desktop/src/local-database';
+// The built-in PostgreSQL NxGen uses, for a real database without a server.
+import { bundledBinariesDir, LocalDatabase } from '@crescent/local-postgres';
 import { createPortalApp } from '../app';
 import { activate, PortalRefusal } from '../portal';
 import { PortalStore } from '../store';
 
-const PLATFORM_PACKAGE = { win32: 'windows-x64', linux: 'linux-x64', darwin: 'darwin-arm64' }[process.platform as string];
-const binaries = resolve(__dirname, '..', '..', '..', '..', 'node_modules', '@embedded-postgres', PLATFORM_PACKAGE ?? 'none', 'native');
-const runnable = !!PLATFORM_PACKAGE && LocalDatabase.available(binaries) && process.getuid?.() !== 0;
+const binaries = bundledBinariesDir();
+const runnable = !!binaries && LocalDatabase.available(binaries) && process.getuid?.() !== 0;
 
 const fingerprint = (seed: string): HashedFingerprint =>
   hashFingerprint({
@@ -35,7 +34,7 @@ const fingerprint = (seed: string): HashedFingerprint =>
 
 (runnable ? describe : describe.skip)('AICAN License Portal', () => {
   const dir = mkdtempSync(join(tmpdir(), 'nxgen-portal-'));
-  const db = new LocalDatabase({ binariesDir: binaries, dir, port: 47950 + Math.floor(Math.random() * 40) });
+  const db = new LocalDatabase({ binariesDir: binaries!, dir, port: 47950 + Math.floor(Math.random() * 40) });
   const vendor = generateSigningKeyPair();
   let store: PortalStore;
 

@@ -26,7 +26,7 @@
       ${If} $0 == error
         Abort
       ${EndIf}
-      ${NSD_CreateLabel} 0 0 100% 40u "NxGen activates this computer with the key the first time it starts (an internet connection is needed once). Without internet, NxGen offers activation with a license file instead. You can also leave this empty and enter the key in NxGen."
+      ${NSD_CreateLabel} 0 0 100% 40u "NxGen uses this key when it is activated the first time; no internet connection is needed (the activation screen shows how to activate with a license file). You can also leave this empty and enter the key in NxGen."
       Pop $0
       ${NSD_CreateLabel} 0 48u 100% 10u "Activation key (NXG-XXXX-XXXX-XXXX):"
       Pop $0

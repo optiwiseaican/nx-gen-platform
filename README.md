@@ -96,12 +96,12 @@ setting for an external server. Build the installer on the lab PC itself: it bun
 `npm run package:mac` builds a Mac test app that uses the database server named in `.env` (e.g. the Aiven test
 database); `NXGEN_BUNDLE_POSTGRES=1` gives it the built-in database instead.
 
-Activation (master specification §11): the installer asks for the **activation key** from AICAN and saves it in
-`C:\ProgramData\NxGen\activation-key.txt`. At the first start NxGen records its installation (Smart Installer step:
-Platform Instance identity, checks, `data\platform\installation-report.json`), sends the key with this computer's
-activation request to the **AICAN License Portal** (`tools/license-portal`, address set at build time with
-`NXGEN_LICENSE_PORTAL_URL`), receives the licence bound to this computer and activates; then it runs offline.
-Without internet the activation screen offers the offline route (save request → portal page → licence file).
+Activation (master specification §11; lab PCs have no internet): the installer asks for the **activation key** from
+AICAN and saves it in `C:\ProgramData\NxGen\activation-key.txt`. At the first start NxGen records its installation
+(Smart Installer step: Platform Instance identity, checks, `data\platform\installation-report.json`) and shows the
+activation screen with the key filled in: **Save Activation Request** → carry the `.nxreq` to AICAN →
+`tools/license-portal` issues the `.nxlic` locked to that PC → **Select License File**. A build made with
+`NXGEN_LICENSE_PORTAL_URL` activates online with the key alone instead (sites with internet).
 
 Building the Windows installer (on the lab PC, one time):
 
@@ -112,9 +112,9 @@ Building the Windows installer (on the lab PC, one time):
 2. `git clone …` (not into OneDrive), `npm install`, and copy `apps/server/config/trusted-license-keys.dev.json` from
    the development Mac (it holds the public key the portal signs with).
 3. `npm run build -w @crescent/shared -w @crescent/licensing -w @crescent/module-sdk`, then
-   `$env:NXGEN_LICENSE_PORTAL_URL="https://…"; npm run package:win` → `apps\desktop\release\NxGen-Setup-2.0.0.exe`.
+   `npm run package:win` → `apps\desktop\release\NxGen-Setup-2.0.0.exe` (no portal address: offline activation).
 
-Installing: run the setup, enter the activation key, finish; open NxGen → it activates by itself → create the first
-administrator → install the TLC module under **Modules → Choose .nxmod package**. The real camera is used
+Installing: run the setup, enter the activation key, finish; open NxGen → Save Activation Request → licence file
+from AICAN → Select License File → create the first administrator → install the TLC module under **Modules → Choose .nxmod package**. The real camera is used
 (`NXGEN_CAMERA=ids`); to test without one put `NXGEN_CAMERA=simulator` in `C:\ProgramData\NxGen\nxgen.env`. Logs:
 service `%APPDATA%\NxGen\logs\service.log`, database `C:\ProgramData\NxGen\database\postgres.log`.

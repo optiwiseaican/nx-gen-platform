@@ -32,7 +32,7 @@ const linkDir = (to, at) => symlinkSync(to, at, process.platform === 'win32' ? '
 const step = (s) => console.log(`\n== ${s}`);
 
 step('Shared packages');
-npm(['run', 'build', '-w', '@crescent/licensing', '-w', '@crescent/module-sdk']);
+npm(['run', 'build', '-w', '@crescent/licensing', '-w', '@crescent/module-sdk', '-w', '@crescent/local-postgres']);
 
 step('Service');
 const server = join(stage, 'server');

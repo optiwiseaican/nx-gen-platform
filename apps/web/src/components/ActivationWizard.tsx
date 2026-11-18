@@ -450,20 +450,25 @@ function ActivateScreen(props: {
               <p id="code-help" className="mt-2 text-sm text-muted">
                 {portalUrl
                   ? "Enter the activation key you received from AICAN. NxGen gets its license from the AICAN License Portal (an internet connection is needed once)."
-                  : "Make sure you have the valid NxGen activation code and the signed license package available on this computer."}
+                  : "Enter the activation key you received from AICAN, then activate with a license file as shown below."}
               </p>
             )}
           </div>
 
-          {props.packageRequired && props.offline ? (
-            <Callout tone="warn" title="No connection to the AICAN License Portal">
-              <p>Activate without internet on this computer:</p>
+          {(props.packageRequired && props.offline) || !portalUrl ? (
+            <Callout tone={portalUrl ? "warn" : "info"} title={portalUrl ? "No connection to the AICAN License Portal" : "Activate with a license file"}>
+              <p>{portalUrl ? "Activate without internet on this computer:" : "This computer is activated offline:"}</p>
               <ol className="mt-1 list-decimal space-y-1 pl-5">
                 <li>Save this computer&apos;s activation request.</li>
                 <li>
-                  On any computer with internet, open{" "}
-                  <span className="font-mono text-ink">{portalUrl ?? "the AICAN License Portal"}</span>, enter the activation
-                  key and upload the request. You receive a license file (.nxlic).
+                  {portalUrl ? (
+                    <>
+                      On any computer with internet, open <span className="font-mono text-ink">{portalUrl}</span>, enter the
+                      activation key and upload the request. You receive a license file (.nxlic).
+                    </>
+                  ) : (
+                    <>Take the request file (e.g. on a USB stick) to AICAN with the activation key. You receive a license file (.nxlic) for this computer.</>
+                  )}
                 </li>
                 <li>Bring the license file here and select it.</li>
               </ol>

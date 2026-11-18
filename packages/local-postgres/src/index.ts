@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { promisify } from 'util';
 
 const run = promisify(execFile);
@@ -146,5 +146,23 @@ export class LocalDatabase {
     if (!this.owned) return;
     this.owned = false;
     await this.tool('pg_ctl', ['stop', '-D', this.dataDir, '-m', 'fast', '-w', '-t', '60'], 90_000).catch(() => undefined);
+  }
+}
+
+/** The platform's @embedded-postgres package (development and the portal); packaged apps ship its native/ folder. */
+export const EMBEDDED_POSTGRES_PACKAGE: Partial<Record<NodeJS.Platform, string>> = {
+  win32: '@embedded-postgres/windows-x64',
+  linux: '@embedded-postgres/linux-x64',
+  darwin: '@embedded-postgres/darwin-arm64',
+};
+
+export function bundledBinariesDir(platform: NodeJS.Platform = process.platform): string | null {
+  const pkg = EMBEDDED_POSTGRES_PACKAGE[platform];
+  if (!pkg) return null;
+  try {
+    // The package exports only dist/index.js; native/ sits beside dist/.
+    return join(dirname(require.resolve(pkg)), '..', 'native');
+  } catch {
+    return null;
   }
 }

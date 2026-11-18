@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * AICAN License Portal — activation keys (VENDOR-ONLY). Uses the portal's database settings (config.ts).
+ * AICAN License Portal — activation keys and offline licences (VENDOR-ONLY). Uses the portal's database
+ * (config.ts: built-in on this computer unless PORTAL_DATABASE_URL is set).
  *
  *   keys create --customer-id <id> --customer-name <name> [--site <site>] [--modules tlc,ph]
  *               [--devices 1] [--type PERPETUAL|SUBSCRIPTION] [--expires YYYY-MM-DD]
@@ -8,16 +9,27 @@
  *   keys list
  *   keys show <NXG-...>        the computers it activated
  *   keys revoke <NXG-...>      no further activations (licences already issued keep working offline)
+ *   keys issue <NXG-...> --request <PC.nxreq> [--out <PC.nxlic>]
+ *                              offline activation: the lab PC's request file → its licence file
  */
+import { readFileSync, writeFileSync } from 'fs';
+import { dirname, join, resolve } from 'path';
 import { parseArgs } from 'util';
 import { generateActivationCode, parseActivationCode } from '@crescent/licensing';
-import { portalStore } from './config';
+import { openPortalStore, signingKey } from './config';
+import { activate, PortalRefusal } from './portal';
 
 const MODULE_ID = /^[a-z][a-z0-9-]{1,31}$/;
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
-  const store = portalStore();
+  if (!['create', 'list', 'show', 'revoke', 'issue'].includes(command ?? '')) {
+    console.log('Usage: keys create | list | show <key> | revoke <key> | issue <key> --request <file.nxreq>   (see src/cli.ts)');
+    process.exitCode = command ? 1 : 0;
+    return;
+  }
+  const opened = await openPortalStore();
+  const store = opened.store;
   try {
     await store.migrate();
     if (command === 'create') {
@@ -68,17 +80,31 @@ async function main() {
         const state = k.revokedAt ? 'REVOKED' : k.expiresAt && k.expiresAt < new Date() ? 'EXPIRED' : 'ACTIVE';
         console.log(`${k.code}  ${state.padEnd(7)}  ${String(k.computers).padStart(2)}/${k.deviceLimit} computers  ${k.customerName}  [${k.modules.join(',')}]`);
       }
+    } else if (command === 'issue') {
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { request: { type: 'string' }, out: { type: 'string' } } });
+      if (!positionals[0] || !values.request) throw new Error('Usage: keys issue <NXG-...> --request <PC.nxreq> [--out <PC.nxlic>]');
+      try {
+        const issued = await activate(store, signingKey().pem, {
+          activationCode: positionals[0],
+          request: readFileSync(values.request, 'utf8'),
+          channel: 'OFFLINE',
+        });
+        const out = resolve(values.out ?? join(dirname(resolve(values.request)), issued.fileName));
+        writeFileSync(out, issued.licenseText);
+        console.log(`License file: ${out}`);
+        console.log('Take it to the lab PC: NxGen → Select License File.');
+      } catch (err) {
+        if (err instanceof PortalRefusal) throw new Error(`${err.errorCode}: ${err.message}`);
+        throw err;
+      }
     } else if (command === 'show' || command === 'revoke') {
       const parsed = parseActivationCode(rest[0] ?? '');
       if (!parsed.valid) throw new Error('Give the activation key: NXG-XXXX-XXXX-XXXX');
       if (command === 'revoke') console.log((await store.revokeKey(parsed.code)) ? `Revoked ${parsed.code}` : `No active key ${parsed.code}`);
       else for (const a of await store.activations(parsed.code)) console.log(`${a.issuedAt.toISOString()}  ${a.instanceId}  ${a.channel}  licence ${a.licenseId}`);
-    } else {
-      console.log('Usage: keys create | list | show <key> | revoke <key>   (see the header of src/cli.ts)');
-      process.exitCode = command ? 1 : 0;
     }
   } finally {
-    await store.pool.end();
+    await opened.close();
   }
 }
 

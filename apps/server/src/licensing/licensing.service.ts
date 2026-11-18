@@ -161,7 +161,9 @@ export class LicensingService implements OnApplicationBootstrap {
   private async activateWithInstallerKey(): Promise<void> {
     if (this.state !== LicenseState.NOT_ACTIVATED) return;
     const code = this.pendingActivationCode();
-    if (!code) return;
+    // Without a License Portal (lab PCs without internet) the key waits on the activation screen for the
+    // licence file, unless that file has already been provided.
+    if (!code || (!this.config.licensePortalUrl && !this.store.findProvisioned(code))) return;
     this.logger.log(`Activating with the key from the installer (${code})`);
     const outcome = await this.activate(code);
     if (!outcome.ok)

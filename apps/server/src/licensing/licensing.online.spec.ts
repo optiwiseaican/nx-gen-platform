@@ -77,9 +77,9 @@ describe('LicensingService — activation with the key alone (AICAN License Port
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  async function harness(portal: ReturnType<typeof fakePortal> | 'unreachable', keyFile?: string) {
-    let url = 'http://127.0.0.1:9'; // discard port: nothing listens
-    if (portal !== 'unreachable') {
+  async function harness(portal: ReturnType<typeof fakePortal> | 'unreachable' | 'none', keyFile?: string) {
+    let url: string | null = portal === 'none' ? null : 'http://127.0.0.1:9'; // discard port: nothing listens
+    if (portal !== 'unreachable' && portal !== 'none') {
       server = portal.server.listen(0, '127.0.0.1');
       await new Promise((r) => server!.once('listening', r));
       url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -166,6 +166,19 @@ describe('LicensingService — activation with the key alone (AICAN License Port
     expect(outcome).toMatchObject({ ok: false, errorCode: 'NX-LIC-E016', licensePackageRequired: true, offlineActivation: true });
     expect(service.getState()).toBe(LicenseState.NOT_ACTIVATED);
     expect(service.getStatus().activation.portalUrl).toBe('http://127.0.0.1:9/');
+  });
+
+  it('lab PC build without a portal: the installer key waits on the activation screen for the licence file', async () => {
+    const code = generateActivationCode();
+    const keyFile = join(dataDir, 'activation-key.txt');
+    writeFileSync(keyFile, code);
+    const { service, identity, journal } = await harness('none', keyFile);
+    expect(service.getState()).toBe(LicenseState.NOT_ACTIVATED);
+    expect(journal.readAll().some((r) => r.action === 'ACTIVATION_INITIATED')).toBe(false);
+    expect(service.getStatus().activation).toEqual({ pendingActivationCode: code, portalUrl: null });
+    const text = issue(code, createActivationRequest({ platform: identity, platformVersion: PLATFORM_VERSION, fingerprint: FINGERPRINT }));
+    expect((await service.activate(code, text, 'LAB-PC.nxlic')).ok).toBe(true);
+    expect(existsSync(keyFile)).toBe(false);
   });
 
   it('a portal error that is not a refusal counts as unreachable, never as a licence failure', async () => {

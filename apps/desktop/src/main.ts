@@ -3,7 +3,7 @@ import type { ChildProcess } from 'child_process';
 import { existsSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import { checkLicense, loadShellTrustedKeys, ShellLicenseResult } from './license-check';
-import { LocalDatabase } from './local-database';
+import { LocalDatabase } from '@crescent/local-postgres';
 import { databaseChoice, machineDirectory, readServiceSettings, runSmartInstaller, SERVICE_ENV_FILE, startService } from './service';
 
 // In development the shell loads the Next.js dev server and talks to the API on :4000.

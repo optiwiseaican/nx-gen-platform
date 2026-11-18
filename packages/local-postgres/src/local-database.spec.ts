@@ -1,17 +1,16 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { Client } from 'pg';
-import { LocalDatabase } from '../local-database';
+import { LocalDatabase, bundledBinariesDir } from './index';
 
-const PLATFORM_PACKAGE = { win32: 'windows-x64', linux: 'linux-x64', darwin: 'darwin-arm64' }[process.platform as string];
-const binaries = resolve(__dirname, '..', '..', '..', '..', 'node_modules', '@embedded-postgres', PLATFORM_PACKAGE ?? 'none', 'native');
-const runnable = !!PLATFORM_PACKAGE && LocalDatabase.available(binaries) && process.getuid?.() !== 0;
+const binaries = bundledBinariesDir();
+const runnable = !!binaries && LocalDatabase.available(binaries) && process.getuid?.() !== 0;
 
 (runnable ? describe : describe.skip)('LocalDatabase (bundled PostgreSQL)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'nxgen-localdb-'));
   const port = 47900 + Math.floor(Math.random() * 90);
-  const db = new LocalDatabase({ binariesDir: binaries, dir, port });
+  const db = new LocalDatabase({ binariesDir: binaries!, dir, port });
 
   afterAll(async () => {
     await db.stop();
@@ -55,7 +54,7 @@ const runnable = !!PLATFORM_PACKAGE && LocalDatabase.available(binaries) && proc
   }, 180_000);
 
   it('uses a server another session already started, and leaves it running', async () => {
-    const second = new LocalDatabase({ binariesDir: binaries, dir, port });
+    const second = new LocalDatabase({ binariesDir: binaries!, dir, port });
     const url = await second.start();
     await second.stop();
     expect(await db.isRunning()).toBe(true);

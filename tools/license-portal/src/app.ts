@@ -66,8 +66,8 @@ button{margin-top:22px;background:var(--brand);color:#fff;border:0;border-radius
 @media (max-width:680px){main{margin:16px}}
 </style></head><body><header>AICAN License Portal</header><main>
 <h1>Activate NxGen offline</h1>
-<p>For a computer without internet: in NxGen choose <b>Save activation request</b>, bring the <code>.nxreq</code> file here,
-and enter the activation key you received from AICAN. Take the license file back to NxGen and choose <b>Select license file</b>.</p>
+<p>For a lab PC without internet: in NxGen choose <b>Save Activation Request</b> and bring the <code>.nxreq</code> file here
+(e.g. on a USB stick) with the PC's activation key. Take the license file back to the lab PC and choose <b>Select License File</b>.</p>
 <form id="f">
 <label for="code">Activation key</label><input id="code" type="text" placeholder="NXG-XXXX-XXXX-XXXX" autocomplete="off" required>
 <label for="req">Activation request (.nxreq)</label><input id="req" type="file" accept=".nxreq,.json,.txt" required>

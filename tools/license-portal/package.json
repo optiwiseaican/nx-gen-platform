@@ -12,7 +12,8 @@
   "dependencies": {
     "@crescent/licensing": "0.1.0",
     "express": "5.2.1",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "@crescent/local-postgres": "1.0.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

@@ -1,0 +1,28 @@
+{
+  "name": "@crescent/local-postgres",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The built-in PostgreSQL 16 that NxGen installations and the offline AICAN License Portal run: create once, start/stop with the app.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "jest"
+  },
+  "optionalDependencies": {
+    "@embedded-postgres/windows-x64": "16.15.0-beta.19",
+    "@embedded-postgres/linux-x64": "16.15.0-beta.19",
+    "@embedded-postgres/darwin-arm64": "16.15.0-beta.19"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  },
+  "jest": {
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "testEnvironment": "node",
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    }
+  }
+}
