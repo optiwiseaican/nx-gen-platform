@@ -55,7 +55,14 @@ export interface ActivationOutcome {
 export class ApiError extends Error {
   constructor(
     readonly status: number,
-    readonly body: { message?: string | string[]; code?: string; field?: string; problems?: string[] } | null,
+    readonly body: {
+      message?: string | string[];
+      code?: string;
+      field?: string;
+      problems?: string[];
+      /** NX-AUTH-LOCKED: seconds until the account unlocks. */
+      retryAfterSeconds?: number;
+    } | null,
   ) {
     const m = body?.message;
     super(Array.isArray(m) ? m.join(" ") : (m ?? `Request failed (${status})`));

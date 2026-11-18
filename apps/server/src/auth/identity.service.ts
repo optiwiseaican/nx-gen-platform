@@ -53,6 +53,21 @@ const hashToken = (token: string) =>
  * 11.10(g), 11.300). Local accounts only for now; AD/LDAP plug in behind
  * the same login() contract later.
  */
+
+/**
+ * A locked account: the message, plus how long the lock lasts (seconds, from the server clock) so the sign-in
+ * screen can count down. Only reached with the account's correct username, like the message itself.
+ */
+function accountLocked(lockedUntil: Date): UnauthorizedException {
+  return new UnauthorizedException({
+    code: 'NX-AUTH-LOCKED',
+    message:
+      'This account is temporarily locked after repeated failed sign-in attempts. Try again later or contact your administrator.',
+    lockedUntil: lockedUntil.toISOString(),
+    retryAfterSeconds: Math.max(1, Math.ceil((lockedUntil.getTime() - Date.now()) / 1000)),
+  });
+}
+
 @Injectable()
 export class IdentityService {
   private administratorExistsCache = false;
@@ -358,9 +373,7 @@ export class IdentityService {
       await this.securityEvent('LOGIN_FAILED', 'FAILURE', origin, who, {
         reason: 'Account locked',
       });
-      throw new UnauthorizedException(
-        'This account is temporarily locked after repeated failed sign-in attempts. Try again later or contact your administrator.',
-      );
+      throw accountLocked(user.locked_until);
     }
 
     if (!(await verifyPassword(password ?? '', user.password_hash))) {
@@ -385,6 +398,7 @@ export class IdentityService {
           reason: `${attempts} consecutive failed sign-in attempts`,
           details: { lockedUntil: rows[0].locked_until?.toISOString() ?? null },
         });
+        if (rows[0].locked_until) throw accountLocked(rows[0].locked_until);
       }
       throw new UnauthorizedException(GENERIC_LOGIN_FAILURE);
     }

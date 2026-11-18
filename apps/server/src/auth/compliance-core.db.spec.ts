@@ -385,10 +385,17 @@ describeDb('Compliance Core on PostgreSQL', () => {
         maxFailedLogins: 3,
       });
       await db.query('UPDATE user_security_state SET failed_login_count = 0');
-      for (let i = 0; i < 3; i++)
+      for (let i = 0; i < 2; i++)
         await expect(
           strict.login('admin', 'Wrong-Password-1', ORIGIN),
         ).rejects.toThrow();
+      // The attempt that locks it already says so, with the time left for the sign-in countdown.
+      const lockedNow = await strict
+        .login('admin', 'Wrong-Password-1', ORIGIN)
+        .catch((e: { getResponse(): Record<string, unknown> }) => e.getResponse());
+      expect(lockedNow).toMatchObject({ code: 'NX-AUTH-LOCKED' });
+      expect(lockedNow.retryAfterSeconds).toBeGreaterThan(29 * 60);
+      expect(lockedNow.retryAfterSeconds).toBeLessThanOrEqual(30 * 60);
       await expect(strict.login('admin', STRONG, ORIGIN)).rejects.toThrow(
         /locked/,
       );

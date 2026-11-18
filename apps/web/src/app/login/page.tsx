@@ -6,13 +6,22 @@ import { Suspense, useEffect, useState } from "react";
 import { BrandHeader } from "@/components/AppShell";
 import { TextField } from "@/components/forms";
 import { ArrowRight, Button, Callout } from "@/components/ui";
-import { authApi } from "@/lib/api";
+import { ApiError, authApi } from "@/lib/api";
 
 const REASONS: Record<string, string> = {
   session: "Your session has ended. Sign in again to continue.",
   "signed-out": "You have been signed out.",
   "password-changed": "Your password was changed. Sign in with the new password.",
 };
+
+/** 29:59, or 1:02:03 for locks over an hour. */
+function formatRemaining(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
 
 function LoginForm() {
   const router = useRouter();
@@ -22,6 +31,22 @@ function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [noAdmin, setNoAdmin] = useState(false);
+  /** When a locked account unlocks (this computer's clock), for the countdown. */
+  const [lockedUntil, setLockedUntil] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!lockedUntil) return;
+    const timer = setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (t >= lockedUntil) {
+        setLockedUntil(null);
+        setError(null);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lockedUntil]);
 
   useEffect(() => {
     setParams(new URLSearchParams(window.location.search));
@@ -40,6 +65,9 @@ function LoginForm() {
     } catch (err) {
       setPassword("");
       setError(err instanceof Error ? err.message : "Sign-in failed.");
+      const wait = err instanceof ApiError && err.body?.code === "NX-AUTH-LOCKED" ? err.body.retryAfterSeconds : undefined;
+      setLockedUntil(wait ? Date.now() + wait * 1000 : null);
+      setNow(Date.now());
     } finally {
       setBusy(false);
     }
@@ -61,8 +89,17 @@ function LoginForm() {
         )}
         <TextField id="username" label="Username or email" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoCapitalize="none" autoFocus spellCheck={false} />
         <TextField id="password" label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-        {error && <Callout tone="fail">{error}</Callout>}
-        <Button type="submit" className="w-full" disabled={busy}>
+        {error && (
+          <Callout tone="fail">
+            {error}
+            {lockedUntil && (
+              <p className="mt-2 font-semibold text-ink" aria-live="polite">
+                Unlocks in <span className="font-mono">{formatRemaining(lockedUntil - now)}</span>
+              </p>
+            )}
+          </Callout>
+        )}
+        <Button type="submit" className="w-full" disabled={busy || !!lockedUntil}>
           {busy ? "Signing in…" : "Sign in"} <ArrowRight />
         </Button>
         <p className="text-xs text-muted">Sign-in attempts are recorded in the audit trail.</p>
