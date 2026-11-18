@@ -20,6 +20,15 @@ export interface MigrationResult {
   current: number;
 }
 
+/**
+ * SHA-256 of the migration text with LF line endings, so a checkout that converted the file to
+ * CRLF (Git for Windows' default) has the same checksum as the one recorded when it was applied.
+ * Any other change, including whitespace inside a line, still changes the checksum.
+ */
+export function migrationChecksum(sql: string): string {
+  return createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex');
+}
+
 export function loadMigrations(dir = MIGRATIONS_DIR): MigrationFile[] {
   return readdirSync(dir)
     .filter((f) => /^\d{3}_[a-z0-9_]+\.sql$/.test(f))
@@ -30,7 +39,7 @@ export function loadMigrations(dir = MIGRATIONS_DIR): MigrationFile[] {
         version: Number(file.slice(0, 3)),
         name: file.replace(/\.sql$/, ''),
         sql,
-        checksum: createHash('sha256').update(sql).digest('hex'),
+        checksum: migrationChecksum(sql),
       };
     });
 }
