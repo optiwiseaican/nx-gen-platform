@@ -48,11 +48,12 @@ interface Workflow {
 interface Analysis {
   id: string;
   code: string;
-  deviceId: string;
-  deviceCode?: string;
+  deviceId: string | null;
+  deviceCode?: string | null;
   thumbnail?: { kind: "plate" | "image"; id: string } | null;
   imageCount?: number;
-  method: { code: string; version: number; name: string; rfWindows: RfWindow[] };
+  /** Null until chosen (optional at creation, required before submitting). */
+  method: { versionId: string; code: string; version: number; name: string; rfWindows: RfWindow[] } | null;
   name: string;
   department: string;
   projectStatus: "ACTIVE" | "ON_HOLD" | "COMPLETED";
@@ -324,7 +325,7 @@ function Home({ principal, web, newOpen }: { principal: Principal; web: string; 
   const canAnalyze = principal.permissions.includes("tlc.analyze");
   const canCalibrate = principal.permissions.includes("calibration.perform");
   const q = query.trim().toLowerCase();
-  const shown = (rows ?? []).filter((a) => !q || [a.name, a.code, a.sampleId, a.batch, a.department, a.method.code, a.method.name].some((v) => (v ?? "").toLowerCase().includes(q)));
+  const shown = (rows ?? []).filter((a) => !q || [a.name, a.code, a.sampleId, a.batch, a.department, a.method?.code, a.method?.name].some((v) => (v ?? "").toLowerCase().includes(q)));
   const STATUS_LABEL = { ACTIVE: "Active", ON_HOLD: "On hold", COMPLETED: "Completed" } as const;
   return (
     <>
@@ -374,7 +375,7 @@ function Home({ principal, web, newOpen }: { principal: Principal; web: string; 
                   {a.batch ? ` · ${a.batch}` : ""}
                 </span>
                 <span className="block truncate text-sm text-muted">
-                  {a.method.code} v{a.method.version} · {a.deviceCode}
+                  {a.method ? `${a.method.code} v${a.method.version}` : "No method yet"} · {a.deviceCode ?? "no instrument yet"}
                 </span>
                 <span className="mt-2 block">
                   <Badge tone={CONCLUSION[a.conclusion].tone}>{CONCLUSION[a.conclusion].label}</Badge>
@@ -429,6 +430,66 @@ const STATUS_OPTIONS: { value: Analysis["projectStatus"]; label: string; color: 
   { value: "COMPLETED", label: "Completed", color: "#5d6b68" },
 ];
 
+/**
+ * Instrument and method of a draft that was created without them: chosen here, required before
+ * submitting. Choosing a method sets the Rf windows the evaluation is judged against.
+ */
+function SetupCard({ a, onSaved }: { a: AnalysisDetail; onSaved: (message: string) => Promise<void> }) {
+  const [setup, setSetup] = useState<{ devices: Device[]; methods: Method[] } | null>(null);
+  const [deviceId, setDeviceId] = useState(a.deviceId ?? "");
+  const [methodVersionId, setMethodVersionId] = useState(a.method?.versionId ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    mod<{ devices: Device[]; methods: Method[] }>("/setup")
+      .then(setSetup)
+      .catch((e: Error) => setError(e.message));
+  }, []);
+  const changed = deviceId !== (a.deviceId ?? "") || methodVersionId !== (a.method?.versionId ?? "");
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await mod(`/analyses/${a.id}/setup`, send({ deviceId: deviceId || null, methodVersionId: methodVersionId || null }, "PUT"));
+      await onSaved("Instrument and method saved.");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="mx-auto w-full max-w-[96rem] px-4 pt-3 sm:px-5">
+      <Callout tone="warn" title="Choose the instrument and method">
+        <p>Needed before this analysis is submitted for review. The method sets the Rf windows the evaluation is judged against.</p>
+        <div className="mt-2 grid gap-2.5 sm:grid-cols-[1fr_1fr_auto]">
+          <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)} className={compact} aria-label="Instrument">
+            <option value="">{setup ? "Instrument…" : "Loading…"}</option>
+            {setup?.devices.map((d) => (
+              <option key={d.id} value={d.id} disabled={!d.readiness.usable}>
+                {d.code} · {d.name}
+                {!d.readiness.usable && ` (${d.readiness.state.replace(/_/g, " ").toLowerCase()})`}
+              </option>
+            ))}
+          </select>
+          <select value={methodVersionId} onChange={(e) => setMethodVersionId(e.target.value)} className={compact} aria-label="Method">
+            <option value="">{setup ? "Approved method…" : "Loading…"}</option>
+            {setup?.methods.map((m) => (
+              <option key={m.versionId} value={m.versionId}>
+                {m.code} v{m.versionNumber} · {m.name}
+              </option>
+            ))}
+          </select>
+          <button type="button" className={`${primary} h-[38px] px-5`} onClick={() => void save()} disabled={busy || !changed}>
+            {busy ? "Saving…" : "Save"}
+          </button>
+        </div>
+        {error && <p className="mt-2 text-sm font-semibold text-fail">{error}</p>}
+      </Callout>
+    </div>
+  );
+}
+
 /** The tablet's "Create New Project" dialog, opened over the analyses list. */
 function NewAnalysisDialog({ open, principal, web, onClose }: { open: boolean; principal: Principal; web: string; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -454,7 +515,8 @@ function NewAnalysisDialog({ open, principal, web, onClose }: { open: boolean; p
   }, [open]);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
   const method = setup?.methods.find((m) => m.versionId === f.methodVersionId);
-  const missing = { name: !f.name.trim(), deviceId: !f.deviceId, methodVersionId: !f.methodVersionId };
+  // Instrument and method may be chosen later on the analysis (required before submitting).
+  const missing = { name: !f.name.trim() };
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -463,7 +525,10 @@ function NewAnalysisDialog({ open, principal, web, onClose }: { open: boolean; p
     setBusy(true);
     setError(null);
     try {
-      const a = await mod<Analysis>("/analyses", send({ ...f, name: f.name.trim(), sampleId: f.sampleId.trim() }));
+      const a = await mod<Analysis>(
+        "/analyses",
+        send({ ...f, name: f.name.trim(), sampleId: f.sampleId.trim(), deviceId: f.deviceId || undefined, methodVersionId: f.methodVersionId || undefined }),
+      );
       location.href = `/modules/tlc/?analysis=${a.id}`;
     } catch (err) {
       setError((err as Error).message);
@@ -497,23 +562,27 @@ function NewAnalysisDialog({ open, principal, web, onClose }: { open: boolean; p
           </button>
         </div>
         <div className="space-y-3.5 overflow-y-auto px-[22px] py-3.5">
-          {setup && !setup.devices.some((d) => d.readiness.usable) && (
-            <Callout tone="warn" title={setup.devices.length ? "No TLC instrument is ready for use" : "No TLC instrument registered"}>
-              {setup.devices.length
-                ? "Record an instrument check for the scanner and have it approved; it then appears here."
-                : "Register the TLC scanner under Instruments (an administrator signs it), record its instrument check and have the check approved."}{" "}
-              <a href={`${web}/devices/`} className="font-semibold text-brand underline">
-                Open Instruments
-              </a>
-            </Callout>
-          )}
-          {setup && !setup.methods.length && (
-            <Callout tone="warn" title="No approved TLC method">
-              Create a method for a TLC scanner under Methods, with a parameter per compound whose unit is “Rf” (e.g. Paracetamol, 0.40–0.50, Rf), submit it and
-              have it reviewed and approved.{" "}
-              <a href={`${web}/methods/`} className="font-semibold text-brand underline">
-                Open Methods
-              </a>
+          {setup && (!setup.devices.some((d) => d.readiness.usable) || !setup.methods.length) && (
+            <Callout tone="info" title="Instrument and method can be chosen later">
+              {!setup.devices.some((d) => d.readiness.usable) && (
+                <>
+                  {setup.devices.length ? "No TLC instrument is ready for use yet (its instrument check must be approved)." : "No TLC instrument is registered yet."}{" "}
+                  <a href={`${web}/devices/`} className="font-semibold text-brand underline">
+                    Open Instruments
+                  </a>
+                  .{" "}
+                </>
+              )}
+              {!setup.methods.length && (
+                <>
+                  No approved TLC method yet (a method with a parameter per compound whose unit is “Rf”).{" "}
+                  <a href={`${web}/methods/`} className="font-semibold text-brand underline">
+                    Open Methods
+                  </a>
+                  .{" "}
+                </>
+              )}
+              You can create the project now; both are needed before it is submitted for review.
             </Callout>
           )}
           <label className="block">
@@ -546,9 +615,9 @@ function NewAnalysisDialog({ open, principal, web, onClose }: { open: boolean; p
               </div>
             </div>
             <label className="block">
-              <FieldLabel text="Instrument" required />
-              <select value={f.deviceId} onChange={set("deviceId")} className={`${compact} ${touched && missing.deviceId ? "border-fail" : ""}`}>
-                <option value="">{setup ? "Choose…" : "Loading…"}</option>
+              <FieldLabel text="Instrument" optional />
+              <select value={f.deviceId} onChange={set("deviceId")} className={compact}>
+                <option value="">{setup ? "Choose later…" : "Loading…"}</option>
                 {setup?.devices.map((d) => (
                   <option key={d.id} value={d.id} disabled={!d.readiness.usable}>
                     {d.code} · {d.name}
@@ -558,9 +627,9 @@ function NewAnalysisDialog({ open, principal, web, onClose }: { open: boolean; p
               </select>
             </label>
             <label className="block">
-              <FieldLabel text="Method" required />
-              <select value={f.methodVersionId} onChange={set("methodVersionId")} className={`${compact} ${touched && missing.methodVersionId ? "border-fail" : ""}`}>
-                <option value="">{setup ? "Choose an approved method…" : "Loading…"}</option>
+              <FieldLabel text="Method" optional />
+              <select value={f.methodVersionId} onChange={set("methodVersionId")} className={compact}>
+                <option value="">{setup ? "Choose later…" : "Loading…"}</option>
                 {setup?.methods.map((m) => (
                   <option key={m.versionId} value={m.versionId}>
                     {m.code} v{m.versionNumber} · {m.name}
@@ -722,8 +791,8 @@ function ManualEvaluation({ a, editable, onSaved }: { a: AnalysisDetail; editabl
   const [saving, setSaving] = useState(false);
   const frontMm = front.trim() ? Number(front) : null;
   const problems = validatePlate(frontMm, tracks);
-  const preview: Evaluation | null = !problems.length && frontMm ? evaluate(frontMm, tracks, a.method.rfWindows) : null;
-  const compounds = a.method.rfWindows.map((w) => w.compound);
+  const preview: Evaluation | null = !problems.length && frontMm ? evaluate(frontMm, tracks, a.method?.rfWindows ?? []) : null;
+  const compounds = (a.method?.rfWindows ?? []).map((w) => w.compound);
   const setTrack = (i: number, t: Partial<TrackInput>) => setTracks(tracks.map((x, j) => (j === i ? { ...x, ...t } : x)));
 
   async function save() {
@@ -836,9 +905,10 @@ function WorkbenchStages({
   onSaved: (message: string) => Promise<void>;
   onDetails: (patch: Record<string, string>) => Promise<void>;
 }) {
-  const wb = useWorkbench(a.plate!, a.method.rfWindows, current, editable);
+  const windows = a.method?.rfWindows ?? [];
+  const wb = useWorkbench(a.plate!, windows, current, editable);
   if (stage === "PLATE") return <PlateStage wb={wb} analysis={a} editable={editable} onContinue={onContinue} onDetails={onDetails} />;
-  return <EvaluationStage wb={wb} windows={a.method.rfWindows} analysisId={a.id} current={current} editable={editable} onSaved={onSaved} />;
+  return <EvaluationStage wb={wb} windows={windows} analysisId={a.id} current={current} editable={editable} onSaved={onSaved} />;
 }
 
 function AnalysisPage({ id, principal, web }: { id: string; principal: Principal; web: string }) {
@@ -925,6 +995,7 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
       <WorkflowHeader a={a} state={wf.instance.state} stage={shown} reachable={reachable} onStage={(s) => (setStage(s), setNotice(null))} />
       <SessionBanner />
       <LockBanner state={wf.instance.state} />
+      {editable && (!a.deviceId || !a.method) && <SetupCard a={a} onSaved={saved} />}
       <main
         className={`mx-auto flex w-full max-w-[96rem] flex-col gap-4 px-4 py-4 sm:px-5 lg:min-h-0 lg:flex-1 ${
           shown !== "SIGNOFF" ? "lg:overflow-hidden" : "lg:overflow-y-auto"
@@ -994,8 +1065,9 @@ function AnalysisPage({ id, principal, web }: { id: string; principal: Principal
                     ["Status", `${{ ACTIVE: "Active", ON_HOLD: "On hold", COMPLETED: "Completed" }[a.projectStatus] ?? "Active"} · Routine Analysis`],
                     ["Sample / batch", `${a.sampleId || "—"}${a.batch ? ` · ${a.batch}` : ""}`],
                     ["Owner", `${a.analyzedBy.name}${a.department ? ` · ${a.department}` : ""}`],
-                    ["Method", `${a.method.code} v${a.method.version} · ${a.method.name}`],
-                    ["Rf windows", a.method.rfWindows.map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ") || "—"],
+                    ["Instrument", a.device ? `${a.device.code} · ${a.device.name}` : "Not chosen yet"],
+                    ["Method", a.method ? `${a.method.code} v${a.method.version} · ${a.method.name}` : "Not chosen yet"],
+                    ["Rf windows", (a.method?.rfWindows ?? []).map((w) => `${w.compound} ${w.min}–${w.max}`).join(", ") || "—"],
                     ["Plate", `${a.plateType}${a.plateLot ? ` · lot ${a.plateLot}` : ""}${a.stationaryPhase ? ` · ${a.stationaryPhase}` : ""}`],
                     ["Mobile phase", a.mobilePhase || "—"],
                     ["Staining", a.staining || "—"],

@@ -1248,5 +1248,47 @@ describeDb(
         db.query(`UPDATE ${schema}.tlc_images SET source = 'CAMERA' WHERE id = $1`, [upload.id]),
       ).rejects.toThrow(/NXGEN-TLC-001/);
     });
+
+    it('instrument and method are optional at creation, chosen later, and required before submitting', async () => {
+      const a = (await call('analyst', 'POST', '/analyses', { name: 'Set up later' })) as {
+        id: string;
+        deviceId: string | null;
+        method: unknown;
+      };
+      expect(a).toMatchObject({ deviceId: null, method: null });
+      const listed = (await call('analyst', 'GET', '/analyses')) as unknown as { id: string; deviceCode: string | null }[];
+      expect(listed.find((x) => x.id === a.id)?.deviceCode).toBeNull();
+      const { workflow } = (await call('analyst', 'GET', `/analyses/${a.id}`)) as { workflow: { id: string } };
+      await expect(act('analyst', workflow.id, 'SUBMIT')).rejects.toMatchObject({
+        response: { code: 'NX-WF-INCOMPLETE', message: 'Choose the TLC instrument for this analysis before submitting.' },
+      });
+      // Camera capture is tied to the instrument; without one the analyst is told to choose it (uploads need none).
+      await expect(call('analyst', 'POST', `/analyses/${a.id}/capture`, { illumination: 'WHITE' })).rejects.toMatchObject({
+        status: 409,
+        field: 'deviceId',
+      });
+
+      // Only the analyst, only approved methods and usable instruments.
+      await expect(call('analyst2', 'PUT', `/analyses/${a.id}/setup`, { deviceId })).rejects.toMatchObject({ status: 403 });
+      await expect(call('analyst', 'PUT', `/analyses/${a.id}/setup`, { methodVersionId: 'nope' })).rejects.toMatchObject({ status: 400 });
+      const withDevice = (await call('analyst', 'PUT', `/analyses/${a.id}/setup`, { deviceId })) as { deviceId: string; method: unknown };
+      expect(withDevice).toMatchObject({ deviceId, method: null });
+      await expect(act('analyst', workflow.id, 'SUBMIT')).rejects.toMatchObject({
+        response: { message: 'Choose the approved TLC method for this analysis before submitting.' },
+      });
+
+      // A manual evaluation, then the method: choosing a method clears the old result (new Rf windows).
+      const done = (await call('analyst', 'PUT', `/analyses/${a.id}/setup`, { methodVersionId })) as {
+        method: { versionId: string; rfWindows: unknown[] };
+      };
+      expect(done.method.versionId).toBe(methodVersionId);
+      expect(done.method.rfWindows.length).toBeGreaterThan(0);
+      const [changed] = await audit.list({ action: 'TLC_ANALYSIS_SETUP_CHANGED' });
+      expect(changed.details).toMatchObject({ method: expect.stringMatching(/ v\d+$/) });
+      // Now the usual rule applies: an image is needed.
+      await expect(act('analyst', workflow.id, 'SUBMIT')).rejects.toMatchObject({
+        response: { message: 'Add at least one plate image before submitting.' },
+      });
+    });
   },
 );

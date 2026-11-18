@@ -87,12 +87,13 @@ const imageCache = (() => {
 interface AnalysisRow {
   id: string;
   code: string;
-  device_id: string;
-  method_id: string;
-  method_version_id: string;
-  method_code: string;
-  method_version: number;
-  method_name: string;
+  /** Null until the analyst chooses them (required before submitting). */
+  device_id: string | null;
+  method_id: string | null;
+  method_version_id: string | null;
+  method_code: string | null;
+  method_version: number | null;
+  method_name: string | null;
   rf_windows: RfWindow[];
   name: string;
   department: string;
@@ -307,7 +308,9 @@ async function content(tx: Pick<ModuleTx, 'query'>, id: string) {
   const imgs = await images(tx, id);
   const plate = await loadPlate(tx, a.current_plate_id);
   const evaluation = await loadEvaluation(tx, a.current_evaluation_id);
-  const [device] = await tx.query<{ code: string; name: string; serial_number: string }>('SELECT code, name, serial_number FROM devices WHERE id = $1', [a.device_id]);
+  const [device] = a.device_id
+    ? await tx.query<{ code: string; name: string; serial_number: string }>('SELECT code, name, serial_number FROM devices WHERE id = $1', [a.device_id])
+    : [null];
   return {
     title: `${a.code} · ${a.name || a.sample_id}${a.batch ? ` (${a.batch})` : ''}`,
     content: {
@@ -316,7 +319,7 @@ async function content(tx: Pick<ModuleTx, 'query'>, id: string) {
       department: a.department,
       projectStatus: a.project_status,
       instrument: device,
-      method: { code: a.method_code, version: a.method_version, name: a.method_name, rfWindows: a.rf_windows },
+      method: a.method_id ? { code: a.method_code, version: a.method_version, name: a.method_name, rfWindows: a.rf_windows } : null,
       sampleId: a.sample_id,
       batch: a.batch,
       plate: {
@@ -354,7 +357,9 @@ function view(a: AnalysisRow) {
     id: a.id,
     code: a.code,
     deviceId: a.device_id,
-    method: { id: a.method_id, versionId: a.method_version_id, code: a.method_code, version: a.method_version, name: a.method_name, rfWindows: a.rf_windows },
+    method: a.method_id
+      ? { id: a.method_id, versionId: a.method_version_id, code: a.method_code, version: a.method_version, name: a.method_name, rfWindows: a.rf_windows }
+      : null,
     name: a.name,
     department: a.department,
     projectStatus: a.project_status,
@@ -384,6 +389,14 @@ async function usableDevice(id: unknown): Promise<DeviceInfo> {
   return d;
 }
 
+async function approvedMethod(versionId: unknown) {
+  const method = (await ctx.methods.effective('TLC')).find((m) => m.versionId === versionId);
+  if (!method) throw new ModuleError(400, 'Choose an approved TLC method.', 'methodVersionId');
+  const { windows, problems } = parseRfWindows(method.parameters);
+  if (problems.length) throw new ModuleError(409, `The method's Rf windows cannot be used: ${problems.join(' ')}`, 'methodVersionId');
+  return { method, windows };
+}
+
 function parseTracks(input: unknown): TrackInput[] {
   if (!Array.isArray(input)) throw new ModuleError(400, 'Tracks must be a list.', 'tracks');
   return input.map((t: { label?: unknown; role?: unknown; spots?: unknown }) => ({
@@ -408,6 +421,7 @@ async function editable(tx: ModuleTx, req: ModuleRequest, id: string, what: stri
 
 /** Camera settings from the analysis' method version (the parameters as approved). */
 async function methodCamera(a: AnalysisRow): Promise<{ settings: CameraSettingsInput; problems: string[] }> {
+  if (!a.method_version_id) return parseCameraSettings([]);
   const [mv] = await ctx.db.query<{ parameters: { name: string; value: string; unit: string }[] }>('SELECT parameters FROM method_versions WHERE id = $1', [a.method_version_id]);
   return parseCameraSettings(mv?.parameters ?? []);
 }
@@ -417,6 +431,7 @@ async function methodCamera(a: AnalysisRow): Promise<{ settings: CameraSettingsI
  * connected, else the only camera connected; null when it cannot be decided.
  */
 async function deviceCameraSerial(a: AnalysisRow, cameras: { serial: string }[]): Promise<string | null> {
+  if (!a.device_id) return cameras.length === 1 ? cameras[0].serial : null;
   const [d] = await ctx.db.query<{ serial_number: string | null }>('SELECT serial_number FROM devices WHERE id = $1', [a.device_id]);
   const own = cameras.find((c) => d?.serial_number && c.serial === d.serial_number);
   if (own) return own.serial;
@@ -445,6 +460,8 @@ const TlcModule: NxGenModule = {
       authorOf: async (tx, id) => (await load(tx, id)).analyzed_by,
       beforeSubmit: async (tx, id) => {
         const a = await load(tx, id);
+        if (!a.device_id) return 'Choose the TLC instrument for this analysis before submitting.';
+        if (!a.method_version_id) return 'Choose the approved TLC method for this analysis before submitting.';
         if (!(await images(tx, id)).length) return 'Add at least one plate image before submitting.';
         if (a.current_evaluation_id) {
           const e = await loadEvaluation(tx, a.current_evaluation_id);
@@ -479,12 +496,12 @@ const TlcModule: NxGenModule = {
       path: '/analyses',
       permission: 'tlc.view',
       async handler() {
-        const rows = await ctx.db.query<AnalysisRow & { device_code: string; thumbnail: string | null; image_count: string }>(
+        const rows = await ctx.db.query<AnalysisRow & { device_code: string | null; thumbnail: string | null; image_count: string }>(
           `SELECT a.*, u.full_name AS analyzed_by_name, d.code AS device_code,
                   (SELECT i.id FROM tlc_images i WHERE i.analysis_id = a.id ORDER BY i.uploaded_at LIMIT 1) AS thumbnail,
                   (SELECT count(*) FROM tlc_images i WHERE i.analysis_id = a.id) AS image_count
              FROM tlc_analyses a
-             LEFT JOIN users u ON u.id = a.analyzed_by JOIN devices d ON d.id = a.device_id
+             LEFT JOIN users u ON u.id = a.analyzed_by LEFT JOIN devices d ON d.id = a.device_id
             WHERE NOT a.is_deleted ORDER BY a.created_at DESC LIMIT 200`,
         );
         return Promise.all(
@@ -505,11 +522,9 @@ const TlcModule: NxGenModule = {
       permission: 'tlc.analyze',
       async handler(req: ModuleRequest) {
         const b = (req.body ?? {}) as Record<string, unknown>;
-        const device = await usableDevice(b.deviceId);
-        const method = (await ctx.methods.effective('TLC')).find((m) => m.versionId === b.methodVersionId);
-        if (!method) throw new ModuleError(400, 'Choose an approved TLC method.', 'methodVersionId');
-        const { windows, problems } = parseRfWindows(method.parameters);
-        if (problems.length) throw new ModuleError(409, `The method's Rf windows cannot be used: ${problems.join(' ')}`, 'methodVersionId');
+        // Both optional here; chosen later on the draft, required before submitting.
+        const device = b.deviceId ? await usableDevice(b.deviceId) : null;
+        const chosen = b.methodVersionId ? await approvedMethod(b.methodVersionId) : null;
         if (b.type !== undefined && b.type !== 'ROUTINE_ANALYSIS') throw new ModuleError(400, 'Only routine analyses are available; reaction monitoring comes later.', 'type');
         const f = {
           name: text(b.name, 'name', 'project name', 1, 100),
@@ -532,7 +547,8 @@ const TlcModule: NxGenModule = {
                                        sample_id, batch, plate_type, plate_lot, mobile_phase, remarks, analyzed_by,
                                        name, department, project_status, stationary_phase, staining)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id`,
-            [code, device.id, method.methodId, method.versionId, method.code, method.versionNumber, method.name, JSON.stringify(windows),
+            [code, device?.id ?? null, chosen?.method.methodId ?? null, chosen?.method.versionId ?? null, chosen?.method.code ?? null,
+             chosen?.method.versionNumber ?? null, chosen?.method.name ?? null, JSON.stringify(chosen?.windows ?? []),
              f.sampleId, f.batch, f.plateType, f.plateLot, f.mobilePhase, f.remarks, req.principal.userId,
              f.name, f.department, f.projectStatus, f.stationaryPhase, f.staining],
           );
@@ -544,9 +560,60 @@ const TlcModule: NxGenModule = {
           result: 'SUCCESS',
           principal: req.principal,
           recordId: id,
-          details: { device: device.code, method: `${method.code} v${method.versionNumber}`, name: f.name, sampleId: f.sampleId },
+          details: {
+            device: device?.code ?? null,
+            method: chosen ? `${chosen.method.code} v${chosen.method.versionNumber}` : null,
+            name: f.name,
+            sampleId: f.sampleId,
+          },
         });
         return view(await load(ctx.db, id));
+      },
+    });
+
+    /**
+     * Instrument and method of a draft (chosen at creation or later), by its analyst. Choosing another
+     * method replaces the Rf windows, so an existing evaluation no longer counts: evaluate again.
+     */
+    ctx.http.route({
+      method: 'PUT',
+      path: '/analyses/:id/setup',
+      permission: 'tlc.analyze',
+      async handler(req) {
+        const b = (req.body ?? {}) as { deviceId?: unknown; methodVersionId?: unknown };
+        const device = b.deviceId === undefined ? undefined : b.deviceId ? await usableDevice(b.deviceId) : null;
+        const chosen = b.methodVersionId === undefined ? undefined : b.methodVersionId ? await approvedMethod(b.methodVersionId) : null;
+        const change = await ctx.db.transaction(req.principal, 'TLC analysis instrument / method chosen', req.origin, async (tx) => {
+          const a = await editable(tx, req, req.params.id, 'choose its instrument and method');
+          const deviceId = device === undefined ? a.device_id : (device?.id ?? null);
+          const methodChanged = chosen !== undefined && (chosen?.method.versionId ?? null) !== a.method_version_id;
+          if (methodChanged) {
+            await tx.query(
+              `UPDATE tlc_analyses SET device_id = $2, method_id = $3, method_version_id = $4, method_code = $5, method_version = $6, method_name = $7,
+                      rf_windows = $8, results = '{}'::jsonb, conclusion = 'INCOMPLETE', current_evaluation_id = NULL WHERE id = $1`,
+              [a.id, deviceId, chosen?.method.methodId ?? null, chosen?.method.versionId ?? null, chosen?.method.code ?? null,
+               chosen?.method.versionNumber ?? null, chosen?.method.name ?? null, JSON.stringify(chosen?.windows ?? [])],
+            );
+          } else if (deviceId !== a.device_id) {
+            await tx.query('UPDATE tlc_analyses SET device_id = $2 WHERE id = $1', [a.id, deviceId]);
+          }
+          return { methodChanged, deviceChanged: deviceId !== a.device_id, evaluationCleared: methodChanged && !!a.current_evaluation_id };
+        });
+        const a = await load(ctx.db, req.params.id);
+        if (change.methodChanged || change.deviceChanged)
+          await ctx.audit.record({
+            action: 'TLC_ANALYSIS_SETUP_CHANGED',
+            result: 'SUCCESS',
+            principal: req.principal,
+            recordId: a.id,
+            details: {
+              code: a.code,
+              device: change.deviceChanged ? (device?.code ?? null) : null,
+              method: change.methodChanged ? (chosen ? `${chosen.method.code} v${chosen.method.versionNumber}` : 'none') : null,
+              evaluationCleared: change.evaluationCleared,
+            },
+          });
+        return view(a);
       },
     });
 
@@ -599,7 +666,7 @@ const TlcModule: NxGenModule = {
         );
         return {
           ...view(a),
-          device: await ctx.devices.get(a.device_id),
+          device: a.device_id ? await ctx.devices.get(a.device_id) : null,
           images: imgs.map(imageView),
           plate: plate ? plateView(plate) : null,
           evaluations: evaluations.map((e) => evaluationView(e, false)),
@@ -683,6 +750,8 @@ const TlcModule: NxGenModule = {
         if (!ILLUMINATIONS.includes(illumination)) throw new ModuleError(400, 'Choose the illumination: white, UV 254 or UV 366.', 'illumination');
         const a = await load(ctx.db, req.params.id);
         if (a.analyzed_by !== req.principal.userId) throw new ModuleError(403, 'Only the analyst who created the analysis can add images.');
+        // A camera capture is tied to the lamp box instrument (and its check); uploads need none.
+        if (!a.device_id) throw new ModuleError(409, 'Choose the TLC instrument (lamp box) for this analysis before capturing, or upload an image instead.', 'deviceId');
         await usableDevice(a.device_id);
         const { settings, problems } = await methodCamera(a);
         if (problems.length) throw new ModuleError(409, `The method's camera settings are not usable: ${problems.join(' ')}`);
