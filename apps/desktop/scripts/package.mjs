@@ -7,7 +7,7 @@
 import { execFileSync } from 'child_process';
 import { build as esbuild } from 'esbuild';
 import { build as electronBuilder } from 'electron-builder';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { basename, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -76,7 +76,8 @@ if (target === 'win') {
   step('Camera helper');
   const helperSrc = join(repo, 'tools', 'camera-helper');
   const exe = join(helperSrc, 'dist', 'nxgen-camera.exe');
-  if (!existsSync(exe)) {
+  // Rebuild when the helper changed since the last build (or it was never built).
+  if (!existsSync(exe) || statSync(join(helperSrc, 'nxgen_camera.py')).mtimeMs > statSync(exe).mtimeMs) {
     try {
       run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(helperSrc, 'build.ps1')], helperSrc);
     } catch {

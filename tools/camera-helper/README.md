@@ -45,7 +45,9 @@ quality gate behave as with the real camera.
 
 ## Image processing
 
-- Pixel format: the best raw Bayer format the camera offers (BayerRG12 → 10 → 8).
+- Pixel format: the best raw Bayer format the camera offers (12 → 10 → 8 bit). IDS packed formats are
+  supported: the U3-34L0XCP offers only `BayerRG12g24IDS` and `BayerRG10g40IDS`; frames are converted by
+  IDS peak IPL, or unpacked by the helper (`unpack_ids`, tested in `test_nxgen_camera.py`).
 - Stills: bilinear demosaic of the raw frame, white balance on the host (exact and recorded),
   scaled to 16 bits and written as a lossless PNG with its SHA-256.
 - Live view: 2 × 2 colour cells, subsampled to ≤ 960 px, about 5 frames/s (JPEG with Pillow,

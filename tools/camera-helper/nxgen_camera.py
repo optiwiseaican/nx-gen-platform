@@ -50,7 +50,7 @@ import traceback
 import zlib
 
 PROTOCOL_VERSION = 1
-HELPER_VERSION = "1.0.0"
+HELPER_VERSION = "1.0.1"
 
 _out_lock = threading.Lock()
 
@@ -243,7 +243,43 @@ class SimCamera:
 # IDS peak camera
 # ---------------------------------------------------------------------------
 
-BAYER_PREFERENCE = [f"Bayer{p}{b}" for b in (12, 10, 8) for p in ("RG", "GR", "GB", "BG")]
+# Raw Bayer formats, best first. Many IDS cameras (e.g. the U3-34L0XCP) offer the 10/12-bit data only
+# in IDS packed layouts: BayerXX12g24IDS (2 pixels in 3 bytes) and BayerXX10g40IDS (4 pixels in 5 bytes).
+BAYER_PATTERNS = ("RG", "GR", "GB", "BG")
+BAYER_PREFERENCE = (
+    [f"Bayer{p}12{s}" for s in ("", "g24IDS") for p in BAYER_PATTERNS]
+    + [f"Bayer{p}10{s}" for s in ("", "g40IDS") for p in BAYER_PATTERNS]
+    + [f"Bayer{p}8" for p in BAYER_PATTERNS]
+)
+
+
+def bayer_format(name: str):
+    """'BayerRG12g24IDS' -> ('RG', 12, 'g24IDS'); None for anything else."""
+    import re
+
+    m = re.fullmatch(r"Bayer(RG|GR|GB|BG)(8|10|12)(g24IDS|g40IDS)?", name)
+    return (m.group(1), int(m.group(2)), m.group(3) or "") if m else None
+
+
+def unpack_ids(np, data, n: int, packing: str):
+    """
+    IDS packed raw data -> uint16 pixel values (n pixels).
+      g24IDS (12 bit, 2 px / 3 bytes): byte0 = px0 bits 11..4, byte1 = px1 bits 11..4,
+                                       byte2 = px0 bits 3..0 (low nibble) | px1 bits 3..0 (high nibble)
+      g40IDS (10 bit, 4 px / 5 bytes): bytes0..3 = px0..3 bits 9..2, byte4 = bits 1..0 of px0..3 (px0 lowest)
+    """
+    out = np.empty(n, dtype=np.uint16)
+    if packing == "g24IDS":
+        b = data[: (n // 2) * 3].reshape(-1, 3).astype(np.uint16)
+        out[0::2] = (b[:, 0] << 4) | (b[:, 2] & 0x0F)
+        out[1::2] = (b[:, 1] << 4) | (b[:, 2] >> 4)
+    elif packing == "g40IDS":
+        b = data[: (n // 4) * 5].reshape(-1, 5).astype(np.uint16)
+        for i in range(4):
+            out[i::4] = (b[:, i] << 2) | ((b[:, 4] >> (2 * i)) & 0x03)
+    else:
+        raise CameraError(f"Unknown packed format {packing}.")
+    return out
 
 
 class IdsCamera:
@@ -275,8 +311,8 @@ class IdsCamera:
         for node in ("ExposureAuto", "GainAuto", "BalanceWhiteAuto"):
             self._try(lambda n=node: self._enum(n, "Off"))
         self.pixel_format = self._choose_pixel_format()
-        self.bits = int(self.pixel_format[-2:]) if self.pixel_format[-2:].isdigit() else 8
-        self.pattern = self.pixel_format[5:7]
+        self.pattern, self.bits, self.packing = bayer_format(self.pixel_format)
+        self.unpacked_by = None  # "ipl" or "numpy", reported once in the log
         self.stream = self.device.DataStreams()[0].OpenDataStream()
         self._start()
 
@@ -359,12 +395,37 @@ class IdsCamera:
         try:
             img = self.ext.BufferToImage(buf)
             w, h = img.Width(), img.Height()
+            if self.packing:
+                return self._unpacked(img, w, h)
             data = np.array(img.get_numpy_1D(), copy=True)
         finally:
             self.stream.QueueBuffer(buf)
         if self.bits > 8:
             return data.view("<u2")[: w * h].reshape(h, w)
         return data[: w * h].reshape(h, w)
+
+    def _unpacked(self, img, w, h):
+        """A packed IDS frame as h x w uint16: IDS peak IPL converts it; numpy unpacks it if that fails."""
+        np = self.np
+        try:
+            from ids_peak_ipl import ids_peak_ipl as ipl  # type: ignore
+
+            target = getattr(ipl, f"PixelFormatName_Bayer{self.pattern}{self.bits}")
+            try:
+                conv = img.ConvertTo(target)
+            except TypeError:
+                conv = img.ConvertTo(ipl.PixelFormat(target))
+            data = np.array(conv.get_numpy_1D(), copy=True).view("<u2")[: w * h]
+            if self.unpacked_by != "ipl":
+                self.unpacked_by = "ipl"
+                emit({"event": "log", "message": f"Camera {self.serial}: {self.pixel_format} converted by IDS peak IPL"})
+            return data.reshape(h, w)
+        except Exception as e:  # noqa: BLE001
+            data = np.array(img.get_numpy_1D(), copy=True)
+            if self.unpacked_by != "numpy":
+                self.unpacked_by = "numpy"
+                emit({"event": "log", "message": f"Camera {self.serial}: {self.pixel_format} unpacked by the helper ({e})"})
+            return unpack_ids(np, data, w * h, self.packing).reshape(h, w)
 
     def grab(self, exposure_us, gain):
         self.configure(exposure_us, gain)
