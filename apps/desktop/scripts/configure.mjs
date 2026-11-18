@@ -19,11 +19,19 @@ const target = windows
   ? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'NxGen')
   : join(homedir(), 'Library', 'Application Support', 'NxGen');
 mkdirSync(target, { recursive: true, mode: 0o700 });
+// Values in single quotes: the service reads this file with util.parseEnv, which turns "\n" inside
+// double quotes into a line break (C:\nxgen\... would break) but takes single-quoted text literally.
+const quote = (value) => {
+  if (/[\r\n]/.test(value)) throw new Error('A setting cannot contain a line break');
+  if (!value.includes("'")) return `'${value}'`;
+  if (/\\/.test(value)) throw new Error(`Cannot write a value with both ' and \\: ${value}`);
+  return JSON.stringify(value);
+};
 const lines = [
-  `DATABASE_URL=${JSON.stringify(env.DATABASE_URL)}`,
+  `DATABASE_URL=${quote(env.DATABASE_URL)}`,
   `DEPLOYMENT_MODE=${env.DEPLOYMENT_MODE ?? 'STANDALONE'}`,
   // The same data folder as this checkout: it holds the licence binding and the installed modules.
-  `NXGEN_DATA_DIR=${JSON.stringify(join(repo, 'apps', 'server', '.nxgen-data'))}`,
+  `NXGEN_DATA_DIR=${quote(join(repo, 'apps', 'server', '.nxgen-data'))}`,
 ];
 // The lamp box camera: the real IDS camera on Windows unless .env says otherwise
 // (a local build runs in development mode, which would otherwise pick the simulator).
@@ -33,7 +41,7 @@ const ca = join(repo, 'apps', 'server', 'config', 'database-ca.pem');
 if (existsSync(ca)) {
   const copy = join(target, 'database-ca.pem');
   copyFileSync(ca, copy);
-  lines.push(`DATABASE_CA_CERT=${JSON.stringify(copy)}`);
+  lines.push(`DATABASE_CA_CERT=${quote(copy)}`);
 }
 const file = join(target, 'nxgen.env');
 writeFileSync(file, `${lines.join('\n')}\n`, { mode: 0o600 });
