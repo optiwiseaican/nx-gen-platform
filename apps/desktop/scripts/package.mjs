@@ -90,6 +90,18 @@ if (target === 'win') {
   cpSync(join(helperSrc, 'sim'), join(cameraHelper, 'sim'), { recursive: true });
 }
 
+// The built-in database (PostgreSQL 16): always in the Windows app; a Mac build carries it only when asked
+// (NXGEN_BUNDLE_POSTGRES=1), since Mac test builds normally use the server named in their settings.
+let postgres = null;
+if (target === 'win' || process.env.NXGEN_BUNDLE_POSTGRES === '1') {
+  step('Built-in database');
+  const pkg = { win: 'windows-x64', mac: 'darwin-arm64' }[target];
+  const native = join(repo, 'node_modules', '@embedded-postgres', pkg, 'native');
+  if (!existsSync(join(native, 'bin'))) throw new Error(`PostgreSQL binaries not found: ${native} (run npm install)`);
+  postgres = join(stage, 'postgres');
+  for (const dir of ['bin', 'lib', 'share']) cpSync(join(native, dir), join(postgres, dir), { recursive: true, verbatimSymlinks: true });
+}
+
 step('App window');
 const appDir = join(stage, 'app');
 await esbuild({
@@ -115,6 +127,7 @@ const copyResources = (resources) => {
   cpSync(join(stage, 'web'), join(resources, 'web'), { recursive: true });
   cpSync(join(server, 'config'), join(resources, 'config'), { recursive: true });
   if (cameraHelper) cpSync(cameraHelper, join(resources, 'camera-helper'), { recursive: true });
+  if (postgres) cpSync(postgres, join(resources, 'postgres'), { recursive: true, verbatimSymlinks: true });
 };
 const platformConfig =
   target === 'mac'
@@ -132,8 +145,11 @@ const platformConfig =
         nsis: {
           artifactName: 'NxGen-Setup-${version}.${ext}',
           oneClick: false,
-          perMachine: false, // installs for this user: no administrator rights needed
+          // For all users of the lab PC (asks for administrator rights once): one database and data folder in
+          // C:\ProgramData\NxGen, which installer.nsh opens to every user of the computer.
+          perMachine: true,
           allowToChangeInstallationDirectory: true,
+          include: join(desktop, 'build', 'installer.nsh'),
           createDesktopShortcut: true,
           createStartMenuShortcut: true,
           shortcutName: 'NxGen',

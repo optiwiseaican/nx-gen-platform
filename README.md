@@ -84,10 +84,17 @@ npm run dev:desktop    # Electron window loading the web app
 
 ## Desktop app (local builds)
 
-`npm run package:mac` (on a Mac) or `npm run package:win` (on the Windows PC) writes this computer's settings from
-`.env` and builds the app into `apps/desktop/release/`. Windows gets `NxGen-Setup-2.0.0.exe`, which installs for the
-current user with Start menu and desktop shortcuts. Build the Windows installer on the lab PC itself: it bundles
-`nxgen-camera.exe`, which `tools/camera-helper/build.ps1` builds there against IDS peak.
+`npm run package:win` (on the Windows PC) builds `apps\desktop\release\NxGen-Setup-2.0.0.exe`. It installs NxGen
+for all users of the PC (administrator rights once) with Start menu and desktop shortcuts, and it carries everything
+NxGen needs: the service, the screens, the IDS camera helper and a **built-in PostgreSQL 16 database**. On first start
+NxGen creates that database itself (random password, listening on 127.0.0.1:47811 only) in `C:\ProgramData\NxGen`,
+which also holds the data folder (licence binding, installed modules). Every Windows user of the PC sees the same
+NxGen data; uninstalling NxGen keeps that folder. Windows installations always use the built-in database: there is no
+setting for an external server. Build the installer on the lab PC itself: it bundles `nxgen-camera.exe`, which
+`tools/camera-helper/build.ps1` builds there against IDS peak.
+
+`npm run package:mac` builds a Mac test app that uses the database server named in `.env` (e.g. the Aiven test
+database); `NXGEN_BUNDLE_POSTGRES=1` gives it the built-in database instead.
 
 Windows lab PC, one time:
 
@@ -95,13 +102,16 @@ Windows lab PC, one time:
    Cockpit, then close Cockpit. Turn on **Developer Mode** (Settings → System → For developers): electron-builder
    unpacks its Windows tools from an archive with symbolic links, which Windows only allows in Developer Mode or as
    administrator ("Cannot create symbolic link : A required privilege is not held by the client").
-2. `git clone …` and `npm install`. Copy the files git does not carry from the development Mac into the same places
-   (USB stick, not email: they hold the database password and private signing keys):
-   `.env`, `apps/server/config/database-ca.pem`, `apps/server/config/trusted-license-keys.dev.json`,
-   `tools/license-authority/keys/`, and the module packages in `dist-modules/` (e.g. `nxgen-tlc-1.2.1.nxmod`).
-3. `npm run build -w @crescent/shared -w @crescent/licensing -w @crescent/module-sdk`, then `npm run dev:license -w @crescent/server`; keep the
+2. `git clone …` (not into OneDrive) and `npm install`. Copy the files git does not carry from the development Mac
+   into the same places (USB stick, not email: they hold private signing keys):
+   `apps/server/config/trusted-license-keys.dev.json`, `tools/license-authority/keys/`, and the module packages in
+   `dist-modules/` (e.g. `nxgen-tlc-1.2.1.nxmod`).
+3. `npm run build -w @crescent/shared -w @crescent/licensing -w @crescent/module-sdk`, then `npm run package:win`
+   and run `apps\desktop\release\NxGen-Setup-2.0.0.exe`.
+4. Simulated installation record and dev licence for that data folder (PowerShell):
+   `$env:NXGEN_DATA_DIR="C:\ProgramData\NxGen\data"; npm.cmd run dev:license -w @crescent/server`; keep the
    activation code it prints.
-4. `npm run package:win`, then run `apps\desktop\release\NxGen-Setup-2.0.0.exe`.
-5. Open NxGen and enter the activation code. Install the TLC module under **Modules → Choose .nxmod package** from
-   `dist-modules\`. The settings (`%APPDATA%\NxGen\nxgen.env`) use the real camera (`NXGEN_CAMERA=ids`) unless `.env`
-   sets `NXGEN_CAMERA`; the service log is `%APPDATA%\NxGen\logs\service.log`.
+5. Open NxGen, enter the activation code, create the first administrator, and install the TLC module under
+   **Modules → Choose .nxmod package** from `dist-modules\`. The real camera is used (`NXGEN_CAMERA=ids`); to test
+   without one put `NXGEN_CAMERA=simulator` in `C:\ProgramData\NxGen\nxgen.env`. Logs: service
+   `%APPDATA%\NxGen\logs\service.log`, database `C:\ProgramData\NxGen\database\postgres.log`.

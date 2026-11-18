@@ -1,9 +1,10 @@
 import { app, BrowserWindow, dialog } from 'electron';
 import type { ChildProcess } from 'child_process';
-import { writeFileSync } from 'fs';
+import { existsSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import { checkLicense, loadShellTrustedKeys, ShellLicenseResult } from './license-check';
-import { readServiceSettings, SERVICE_ENV_FILE, startService } from './service';
+import { LocalDatabase } from './local-database';
+import { databaseChoice, machineDirectory, readServiceSettings, SERVICE_ENV_FILE, startService } from './service';
 
 // In development the shell loads the Next.js dev server and talks to the API on :4000.
 // In packaged standalone builds the local NestJS service serves both UI and API.
@@ -94,18 +95,42 @@ function guardNavigation(win: BrowserWindow) {
 async function bootService(win: BrowserWindow): Promise<boolean> {
   if (!app.isPackaged || service) return true;
   const userData = app.getPath('userData');
-  const settings = readServiceSettings(userData);
-  if (!settings) {
-    await win.loadURL(
-      shellPage(
-        'NxGen is not set up on this computer',
-        `<p>The database settings were not found.</p><p>Expected: <code>${escapeHtml(path.join(userData, SERVICE_ENV_FILE))}</code></p>`,
-        'fail',
-      ),
-    );
-    return false;
+  const machineDir = machineDirectory(userData);
+  const settings = readServiceSettings([path.join(machineDir, SERVICE_ENV_FILE), path.join(userData, SERVICE_ENV_FILE)]);
+
+  // The built-in database (always, except a Mac test build pointed at an external server).
+  let databaseUrl: string | undefined;
+  if (databaseChoice(settings) === 'built-in') {
+    const binariesDir = path.join(process.resourcesPath, 'postgres');
+    if (!LocalDatabase.available(binariesDir)) {
+      await win.loadURL(
+        shellPage(
+          'NxGen is not set up on this computer',
+          `<p>This build has no built-in database and no database settings.</p><p>Expected: <code>${escapeHtml(path.join(userData, SERVICE_ENV_FILE))}</code></p>`,
+          'fail',
+        ),
+      );
+      return false;
+    }
+    localDatabase = new LocalDatabase({ binariesDir, dir: path.join(machineDir, 'database') });
+    if (!existsSync(path.join(localDatabase.dataDir, 'PG_VERSION'))) {
+      await win.loadURL(shellPage('Preparing NxGen…', '<p>Creating the NxGen database on this computer. This happens once.</p>', 'info'));
+    }
+    try {
+      databaseUrl = await localDatabase.start();
+    } catch (err) {
+      await win.loadURL(
+        shellPage(
+          'NxGen could not start its database',
+          `<p>${escapeHtml(err instanceof Error ? err.message : String(err))}</p><p>Details: <code>${escapeHtml(localDatabase.logFile)}</code></p>`,
+          'fail',
+        ),
+      );
+      return false;
+    }
   }
-  const started = startService({ resourcesPath: process.resourcesPath, userDataPath: userData, port: SERVICE_PORT, localBuild: LOCAL_BUILD }, settings);
+
+  const started = startService({ resourcesPath: process.resourcesPath, userDataPath: userData, port: SERVICE_PORT, localBuild: LOCAL_BUILD, machineDir, databaseUrl }, settings);
   service = started.child;
   serviceLog = started.logFile;
   service.on('exit', () => {
@@ -119,6 +144,9 @@ function stopService() {
   service?.kill();
   service = null;
 }
+
+let localDatabase: LocalDatabase | null = null;
+let shuttingDown = false;
 
 async function createWindow(): Promise<void> {
   const smokeShot = SMOKE_TEST ? process.env.NXGEN_SHELL_SMOKE_SHOT : undefined;
@@ -146,7 +174,7 @@ async function createWindow(): Promise<void> {
   licenseResult = await waitForLicenseService(win);
   if (serviceStopped && licenseResult.kind === 'SERVICE_UNAVAILABLE') {
     await win.loadURL(
-      shellPage('NxGen could not start', `<p>The NxGen service stopped while starting. Check that this computer can reach the database.</p><p>Details: <code>${escapeHtml(serviceLog)}</code></p>`, 'fail'),
+      shellPage('NxGen could not start', `<p>The NxGen service stopped while starting.</p><p>Details: <code>${escapeHtml(serviceLog)}</code></p>`, 'fail'),
     );
     if (SMOKE_TEST) app.quit();
     return;
@@ -185,7 +213,15 @@ app.on('second-instance', () => {
     win.focus();
   }
 });
-app.on('will-quit', stopService);
+// Quit in order: the service first, then the built-in database it was using.
+app.on('before-quit', (event) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopService();
+  if (!localDatabase) return;
+  event.preventDefault();
+  void localDatabase.stop().finally(() => app.exit(0));
+});
 
 app.whenReady().then(() => {
   if (!onlyInstance) return;

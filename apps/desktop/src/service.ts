@@ -9,16 +9,39 @@ export interface ServiceOptions {
   port: number;
   /** Local builds trust the same keys as a development install; release builds run in production mode. */
   localBuild: boolean;
+  /** See machineDirectory(): the service's data folder is <machineDir>/data unless the settings name one. */
+  machineDir: string;
+  /** The built-in database's address; absent when a Mac test build uses DATABASE_URL from its settings. */
+  databaseUrl?: string;
 }
 
 export const SERVICE_ENV_FILE = 'nxgen.env';
 
-/** The settings a machine keeps outside the app: the database password never ships inside it. */
-export function readServiceSettings(userDataPath: string): Record<string, string> | null {
-  const file = join(userDataPath, SERVICE_ENV_FILE);
-  if (!existsSync(file)) return null;
-  const settings = parseEnv(readFileSync(file, 'utf8')) as Record<string, string>;
-  return settings.DATABASE_URL ? settings : null;
+/**
+ * The folder NxGen keeps for the whole computer: the built-in database, the data folder (licence binding,
+ * installed modules) and optional machine settings. Windows: C:\ProgramData\NxGen, shared by every Windows
+ * user of the lab PC. Elsewhere (Mac test builds; Linux until its installer exists) the user's app folder.
+ */
+export function machineDirectory(userDataPath: string, platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string {
+  if (platform === 'win32') return join(env.ProgramData || env.ALLUSERSPROFILE || 'C:\\ProgramData', 'NxGen');
+  return userDataPath;
+}
+
+/** Optional settings files (machine first, then this user's), merged; later files win. */
+export function readServiceSettings(files: string[]): Record<string, string> {
+  const settings: Record<string, string> = {};
+  for (const file of files) {
+    if (existsSync(file)) Object.assign(settings, parseEnv(readFileSync(file, 'utf8')));
+  }
+  return settings;
+}
+
+/**
+ * Which database the service uses. Installations (Windows, Linux) always use the built-in one: an external
+ * server is only for Mac test builds, from DATABASE_URL in the settings file.
+ */
+export function databaseChoice(settings: Record<string, string>, platform: NodeJS.Platform = process.platform): 'external' | 'built-in' {
+  return platform === 'darwin' && settings.DATABASE_URL ? 'external' : 'built-in';
 }
 
 export function serviceEnvironment(options: ServiceOptions, settings: Record<string, string>, base: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
@@ -26,6 +49,7 @@ export function serviceEnvironment(options: ServiceOptions, settings: Record<str
   const env: NodeJS.ProcessEnv = {
     ...base,
     ...settings,
+    NXGEN_DATA_DIR: settings.NXGEN_DATA_DIR || join(options.machineDir, 'data'),
     ELECTRON_RUN_AS_NODE: '1',
     PORT: String(options.port),
     HOST: '127.0.0.1',
@@ -34,13 +58,21 @@ export function serviceEnvironment(options: ServiceOptions, settings: Record<str
   };
   if (options.localBuild) delete env.NODE_ENV;
   else env.NODE_ENV = 'production';
-  // The lamp box camera: the server runs the camera helper shipped in the app. IDS peak has no
+  // The database: the built-in one's address, or (Mac test builds only) the external one from the settings.
+  if (options.databaseUrl) {
+    env.DATABASE_URL = options.databaseUrl;
+    delete env.DATABASE_CA_CERT;
+  } else if (databaseChoice(settings, platform) !== 'external') {
+    delete env.DATABASE_URL;
+  }
+  // The lamp box camera: the server runs the camera helper shipped in the app; the real IDS camera on
+  // Windows and Linux (NXGEN_CAMERA=simulator in the settings to test without one). IDS peak has no
   // macOS build, so cameras are off there unless the settings file asks for the simulator.
   if (!env.NXGEN_CAMERA_HELPER) {
     const helper = cameraHelperPath(options.resourcesPath, platform);
     if (helper) env.NXGEN_CAMERA_HELPER = helper;
   }
-  if (!env.NXGEN_CAMERA && platform === 'darwin') env.NXGEN_CAMERA = 'off';
+  if (!env.NXGEN_CAMERA) env.NXGEN_CAMERA = platform === 'darwin' ? 'off' : 'ids';
   return env;
 }
 

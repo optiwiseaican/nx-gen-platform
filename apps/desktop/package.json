@@ -8,7 +8,6 @@
     "dev": "tsc -p tsconfig.json && electron .",
     "test": "jest",
     "configure:mac": "node scripts/configure.mjs",
-    "configure:win": "node scripts/configure.mjs",
     "package:mac": "node scripts/package.mjs mac",
     "package:win": "node scripts/package.mjs win"
   },
@@ -28,5 +27,10 @@
     "transform": {
       "^.+\\.ts$": "ts-jest"
     }
+  },
+  "optionalDependencies": {
+    "@embedded-postgres/windows-x64": "16.15.0-beta.19",
+    "@embedded-postgres/linux-x64": "16.15.0-beta.19",
+    "@embedded-postgres/darwin-arm64": "16.15.0-beta.19"
   }
 }

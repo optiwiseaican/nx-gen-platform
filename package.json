@@ -14,7 +14,7 @@
     "dev:server": "npm run start:dev -w @crescent/server",
     "dev:desktop": "npm run dev -w @crescent/desktop",
     "package:mac": "npm run configure:mac -w @crescent/desktop && npm run package:mac -w @crescent/desktop",
-    "package:win": "npm run configure:win -w @crescent/desktop && npm run package:win -w @crescent/desktop",
+    "package:win": "npm run package:win -w @crescent/desktop",
     "build": "npm run build -w @crescent/shared -w @crescent/licensing && npm run build -w @crescent/license-authority -w @crescent/server -w @crescent/web -w @crescent/desktop",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run build:modules && npm run test -w @crescent/licensing -w @crescent/module-ph -w @crescent/module-tlc -w @crescent/server -w @crescent/desktop",
