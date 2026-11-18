@@ -92,7 +92,9 @@ current user with Start menu and desktop shortcuts. Build the Windows installer 
 Windows lab PC, one time:
 
 1. Install Node.js 22, Git, Python 3.10+ (tick "Add python.exe to PATH") and IDS peak; check the camera in IDS peak
-   Cockpit, then close Cockpit.
+   Cockpit, then close Cockpit. Turn on **Developer Mode** (Settings → System → For developers): electron-builder
+   unpacks its Windows tools from an archive with symbolic links, which Windows only allows in Developer Mode or as
+   administrator ("Cannot create symbolic link : A required privilege is not held by the client").
 2. `git clone …` and `npm install`. Copy the files git does not carry from the development Mac into the same places
    (USB stick, not email: they hold the database password and private signing keys):
    `.env`, `apps/server/config/database-ca.pem`, `apps/server/config/trusted-license-keys.dev.json`,
