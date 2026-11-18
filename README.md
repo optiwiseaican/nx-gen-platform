@@ -97,7 +97,7 @@ Windows lab PC, one time:
    (USB stick, not email: they hold the database password and private signing keys):
    `.env`, `apps/server/config/database-ca.pem`, `apps/server/config/trusted-license-keys.dev.json`,
    `tools/license-authority/keys/`, and the module packages in `dist-modules/` (e.g. `nxgen-tlc-1.2.1.nxmod`).
-3. `npm run build -w @crescent/shared -w @crescent/licensing`, then `npm run dev:license -w @crescent/server`; keep the
+3. `npm run build -w @crescent/shared -w @crescent/licensing -w @crescent/module-sdk`, then `npm run dev:license -w @crescent/server`; keep the
    activation code it prints.
 4. `npm run package:win`, then run `apps\desktop\release\NxGen-Setup-2.0.0.exe`.
 5. Open NxGen and enter the activation code. Install the TLC module under **Modules → Choose .nxmod package** from
