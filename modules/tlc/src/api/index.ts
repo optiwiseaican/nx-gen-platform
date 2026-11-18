@@ -750,9 +750,8 @@ const TlcModule: NxGenModule = {
         if (!ILLUMINATIONS.includes(illumination)) throw new ModuleError(400, 'Choose the illumination: white, UV 254 or UV 366.', 'illumination');
         const a = await load(ctx.db, req.params.id);
         if (a.analyzed_by !== req.principal.userId) throw new ModuleError(403, 'Only the analyst who created the analysis can add images.');
-        // A camera capture is tied to the lamp box instrument (and its check); uploads need none.
-        if (!a.device_id) throw new ModuleError(409, 'Choose the TLC instrument (lamp box) for this analysis before capturing, or upload an image instead.', 'deviceId');
-        await usableDevice(a.device_id);
+        // The instrument may still be open (it is required before submitting); when chosen it must be usable.
+        if (a.device_id) await usableDevice(a.device_id);
         const { settings, problems } = await methodCamera(a);
         if (problems.length) throw new ModuleError(409, `The method's camera settings are not usable: ${problems.join(' ')}`);
         let cameras: Awaited<ReturnType<ModuleContext['cameras']['list']>>;

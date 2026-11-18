@@ -1262,11 +1262,7 @@ describeDb(
       await expect(act('analyst', workflow.id, 'SUBMIT')).rejects.toMatchObject({
         response: { code: 'NX-WF-INCOMPLETE', message: 'Choose the TLC instrument for this analysis before submitting.' },
       });
-      // Camera capture is tied to the instrument; without one the analyst is told to choose it (uploads need none).
-      await expect(call('analyst', 'POST', `/analyses/${a.id}/capture`, { illumination: 'WHITE' })).rejects.toMatchObject({
-        status: 409,
-        field: 'deviceId',
-      });
+      // Images can be taken before the instrument is chosen (capture or upload); submitting still needs it.
 
       // Only the analyst, only approved methods and usable instruments.
       await expect(call('analyst2', 'PUT', `/analyses/${a.id}/setup`, { deviceId })).rejects.toMatchObject({ status: 403 });

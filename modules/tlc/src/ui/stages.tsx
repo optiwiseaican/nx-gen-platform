@@ -295,6 +295,11 @@ export function PictureStage({
                   </button>
                 </div>
               )}
+              {cam && error && (
+                <p role="alert" className="text-sm font-semibold text-fail">
+                  {error}
+                </p>
+              )}
             </div>
             <input ref={fileRef} id="plate-image" type="file" accept="image/png,image/jpeg" className="sr-only" onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])} />
             <button className={`${cam ? secondary : strong} w-full`} onClick={() => fileRef.current?.click()} disabled={busy || capturing}>
@@ -377,8 +382,26 @@ const fmtExposure = (us: number) => (us >= 1_000_000 ? `${fmt(us / 1e6, 2)} s` :
 function LivePreview({ serial, simulated, exposureUs, gain, whiteBalance, illumination }: { serial: string; simulated: boolean; exposureUs: number; gain: number; whiteBalance: [number, number, number]; illumination: Illumination }) {
   const ref = useRef<HTMLImageElement>(null);
   const [failed, setFailed] = useState(false);
+  const [reason, setReason] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const src = `/api/cameras/${encodeURIComponent(serial)}/preview?exposureUs=${exposureUs}&gain=${gain}&wb=${whiteBalance.join(",")}&n=${attempt}`;
+  /** An <img> cannot read an error answer: ask the server once more, without keeping the stream. */
+  const onFailed = () => {
+    setFailed(true);
+    setReason(null);
+    const ctrl = new AbortController();
+    fetch(`${src}&probe=1`, { credentials: "include", signal: ctrl.signal })
+      .then(async (res) => {
+        if (res.ok) {
+          ctrl.abort(); // it streams now: the earlier break was momentary
+          setReason("The stream was interrupted. Reconnect to continue.");
+        } else {
+          const body = (await res.json().catch(() => null)) as { message?: string } | null;
+          setReason(body?.message ?? `The server answered ${res.status}.`);
+        }
+      })
+      .catch(() => undefined);
+  };
   useEffect(() => {
     const img = ref.current;
     return () => {
@@ -390,13 +413,14 @@ function LivePreview({ serial, simulated, exposureUs, gain, whiteBalance, illumi
     <div className="flex h-full min-h-[18rem] items-center justify-center lg:absolute lg:inset-0">
       <div className="relative">
         {!failed ? (
-          <img ref={ref} src={src} alt="Live camera image" className="block h-auto w-full max-w-full lg:h-[calc(100vh-11rem)] lg:w-auto" onError={() => setFailed(true)} />
+          <img ref={ref} src={src} alt="Live camera image" className="block h-auto w-full max-w-full lg:h-[calc(100vh-11rem)] lg:w-auto" onError={onFailed} />
         ) : (
           <div className="p-8 text-center text-sm text-white/80">
             The live image stopped.
-            <button type="button" className="ml-2 font-semibold text-white underline" onClick={() => (setFailed(false), setAttempt(attempt + 1))}>
+            <button type="button" className="ml-2 font-semibold text-white underline" onClick={() => (setFailed(false), setReason(null), setAttempt(attempt + 1))}>
               Reconnect
             </button>
+            {reason && <span className="mt-3 block max-w-xl text-xs text-red-200">{reason}</span>}
           </div>
         )}
         {!failed && (
