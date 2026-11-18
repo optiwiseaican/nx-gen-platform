@@ -5,6 +5,8 @@
  * E011–E015 are extensions needed for conditions the PRD describes but does not
  * number (hardware change §41, version scope §22, pre-activation gate §9/§16,
  * code/package mismatch §14, platform identity integrity §19 step 2).
+ * E016–E018 cover online activation through the AICAN License Portal (master
+ * specification §11): portal unreachable, key not recognised, key used up.
  *
  * Messages follow PRD §34: what happened, whether data is safe, what to do.
  * They must never contain cryptographic detail or stack traces.
@@ -25,6 +27,9 @@ export const LicenseErrorCode = {
   INSTALLATION_NOT_VERIFIED: 'NX-LIC-E013',
   CODE_MISMATCH: 'NX-LIC-E014',
   PLATFORM_IDENTITY_INVALID: 'NX-LIC-E015',
+  PORTAL_UNREACHABLE: 'NX-LIC-E016',
+  KEY_NOT_RECOGNISED: 'NX-LIC-E017',
+  KEY_DEVICE_LIMIT: 'NX-LIC-E018',
 } as const;
 
 export type LicenseErrorCode = (typeof LicenseErrorCode)[keyof typeof LicenseErrorCode];
@@ -112,5 +117,22 @@ export const LICENSE_ERRORS: Record<LicenseErrorCode, LicenseErrorInfo> = {
     title: 'Platform Identity Invalid',
     message: `The NxGen Platform identity on this computer could not be verified. ${DATA_SAFE}`,
     action: 'Contact NxGen Support. A repair installation may be required.',
+  },
+  'NX-LIC-E016': {
+    title: 'License Portal Not Reachable',
+    message: `NxGen could not reach the AICAN License Portal to activate this computer. ${DATA_SAFE}`,
+    action:
+      'Check the internet connection and try again, or activate offline: save the activation request, ' +
+      'upload it on the AICAN License Portal from any computer, then select the license file you receive.',
+  },
+  'NX-LIC-E017': {
+    title: 'Activation Key Not Recognised',
+    message: `The AICAN License Portal does not recognise this activation key, or it has been withdrawn. ${DATA_SAFE}`,
+    action: 'Check the key exactly as supplied, or contact AICAN.',
+  },
+  'NX-LIC-E018': {
+    title: 'Activation Key Already Used',
+    message: `This activation key has already been used on the number of computers it allows. ${DATA_SAFE}`,
+    action: 'Contact AICAN for an additional key or to move the license to this computer.',
   },
 };

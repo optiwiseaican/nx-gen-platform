@@ -1,0 +1,29 @@
+{
+  "name": "@crescent/license-portal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VENDOR-ONLY AICAN License Portal: online and offline activation of NxGen installations. Holds the signing key. Never package into customer builds.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "keys": "node dist/cli.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@crescent/licensing": "0.1.0",
+    "express": "5.2.1",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/pg": "^8.11.10"
+  },
+  "jest": {
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "testEnvironment": "node",
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    }
+  }
+}

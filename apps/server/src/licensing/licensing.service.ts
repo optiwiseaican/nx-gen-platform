@@ -1,3 +1,4 @@
+import { existsSync, readFileSync, rmSync } from 'fs';
 import {
   ConflictException,
   Inject,
@@ -46,6 +47,8 @@ export interface ActivationOutcome {
   error?: LicenseErrorInfo;
   /** Screen 1 should offer "Select License File" (PRD §15). */
   licensePackageRequired?: boolean;
+  /** The License Portal could not be reached: offer the offline route (save request → licence file). */
+  offlineActivation?: boolean;
   /** Inline activation-code validation failure (PRD §16). */
   inputError?: 'EMPTY' | 'FORMAT' | 'CHECKSUM';
 }
@@ -67,7 +70,16 @@ export interface LicensingStatus {
     error: LicenseErrorInfo | null;
   };
   warnings: LicenseErrorCode[];
+  activation: {
+    /** Activation key the installer saved, while it has not been used successfully. */
+    pendingActivationCode: string | null;
+    /** The License Portal's offline page, for activating a computer without internet. */
+    portalUrl: string | null;
+  };
 }
+
+/** How long online activation waits for the License Portal before offering the offline route. */
+const PORTAL_TIMEOUT_MS = 15_000;
 
 /** States in which a failed re-activation attempt must not overwrite the current state. */
 const STICKY_STATES: LicenseState[] = [
@@ -131,6 +143,78 @@ export class LicensingService implements OnApplicationBootstrap {
       );
     }
     await this.validateStoredLicense();
+    await this.activateWithInstallerKey();
+  }
+
+  /** The activation key typed into the installer: activates once, at the first start, without any screen. */
+  private pendingActivationCode(): string | null {
+    const file = this.config.activationKeyFile;
+    if (!file || !existsSync(file)) return null;
+    try {
+      const parsed = parseActivationCode(readFileSync(file, 'utf8'));
+      return parsed.valid ? parsed.code : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async activateWithInstallerKey(): Promise<void> {
+    if (this.state !== LicenseState.NOT_ACTIVATED) return;
+    const code = this.pendingActivationCode();
+    if (!code) return;
+    this.logger.log(`Activating with the key from the installer (${code})`);
+    const outcome = await this.activate(code);
+    if (!outcome.ok)
+      this.logger.warn(
+        `Activation with the installer key did not complete (${outcome.errorCode ?? outcome.inputError}); the activation screen offers it again`,
+      );
+  }
+
+  /** Once activated, the saved key has done its job. */
+  private forgetInstallerKey(code: string): void {
+    const file = this.config.activationKeyFile;
+    if (file && this.pendingActivationCode() === code) rmSync(file, { force: true });
+  }
+
+  /**
+   * Online activation (master specification §11 steps 3–8 without carrying files): send this computer's
+   * activation request with the key to the AICAN License Portal and receive the licence bound to it.
+   */
+  private async requestFromPortal(
+    code: string,
+  ): Promise<
+    | { text: string }
+    | { refused: LicenseErrorCode }
+    | { unreachable: string }
+  > {
+    const { identity } = this.platform.getIdentity();
+    const request = createActivationRequest({
+      platform: identity!,
+      platformVersion: this.config.platformVersion,
+      fingerprint: await this.fingerprint(),
+    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.config.licensePortalUrl}/api/v1/activate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activationCode: code, request, channel: 'ONLINE' }),
+        signal: AbortSignal.timeout(PORTAL_TIMEOUT_MS),
+      });
+    } catch (err) {
+      return { unreachable: (err as Error).message };
+    }
+    let body: { license?: unknown; errorCode?: unknown } = {};
+    try {
+      body = (await res.json()) as typeof body;
+    } catch {
+      /* not the portal answering */
+    }
+    if (res.ok && typeof body.license === 'string') return { text: body.license };
+    const errorCode = body.errorCode as LicenseErrorCode;
+    if (res.status >= 400 && res.status < 500 && errorCode in LICENSE_ERRORS)
+      return { refused: errorCode };
+    return { unreachable: `HTTP ${res.status}` };
   }
 
   private context(
@@ -388,6 +472,46 @@ export class LicensingService implements OnApplicationBootstrap {
       });
     } else {
       text = this.store.findProvisioned(code) ?? undefined;
+      if (!text && this.config.licensePortalUrl) {
+        await this.event({
+          action: 'LICENSE_PORTAL_REQUESTED',
+          result: 'INFO',
+          licenseReference: code,
+          details: { portal: this.config.licensePortalUrl },
+        });
+        const portal = await this.requestFromPortal(code);
+        if ('text' in portal) {
+          text = portal.text;
+          await this.event({
+            action: 'LICENSE_ISSUED_BY_PORTAL',
+            result: 'SUCCESS',
+            licenseReference: code,
+          });
+        } else if ('refused' in portal) {
+          await this.event({
+            action: 'LICENSE_PORTAL_REFUSED',
+            result: 'FAILURE',
+            licenseReference: code,
+            errorCode: portal.refused,
+          });
+          return await gateFailure(portal.refused, 'LICENSE');
+        } else {
+          // Not an activation error: stay on Screen 1 with the offline route.
+          this.state = previousState;
+          await this.event({
+            action: 'LICENSE_PORTAL_UNREACHABLE',
+            result: 'FAILURE',
+            licenseReference: code,
+            errorCode: LicenseErrorCode.PORTAL_UNREACHABLE,
+            details: { reason: portal.unreachable.slice(0, 200) },
+          });
+          return this.failure(
+            LicenseErrorCode.PORTAL_UNREACHABLE,
+            checksFailingAt(null, 'PLATFORM_INSTANCE'),
+            { licensePackageRequired: true, offlineActivation: true },
+          );
+        }
+      }
       if (!text) {
         // Remain on Screen 1 and offer "Select License File" — not an activation error.
         this.state = previousState;
@@ -506,6 +630,7 @@ export class LicensingService implements OnApplicationBootstrap {
     }
 
     mark('FINALIZED', 'PASS');
+    this.forgetInstallerKey(code);
     this.setState(LicenseState.ACTIVE, license, null, {
       text,
       fingerprint: result.fingerprint ?? null,
@@ -659,6 +784,14 @@ export class LicensingService implements OnApplicationBootstrap {
         error: this.lastErrorCode ? LICENSE_ERRORS[this.lastErrorCode] : null,
       },
       warnings: this.warnings,
+      activation: {
+        pendingActivationCode: this.isActive()
+          ? null
+          : this.pendingActivationCode(),
+        portalUrl: this.config.licensePortalUrl
+          ? `${this.config.licensePortalUrl}/`
+          : null,
+      },
     };
   }
 }

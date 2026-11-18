@@ -13,7 +13,12 @@ export interface ServiceOptions {
   machineDir: string;
   /** The built-in database's address; absent when a Mac test build uses DATABASE_URL from its settings. */
   databaseUrl?: string;
+  /** AICAN License Portal set when the app was built (NXGEN_LICENSE_PORTAL_URL); settings may override it. */
+  licensePortalUrl?: string;
 }
+
+/** Where the installer saves the activation key typed during setup (used once by the service). */
+export const ACTIVATION_KEY_FILE = 'activation-key.txt';
 
 export const SERVICE_ENV_FILE = 'nxgen.env';
 
@@ -50,12 +55,15 @@ export function serviceEnvironment(options: ServiceOptions, settings: Record<str
     ...base,
     ...settings,
     NXGEN_DATA_DIR: settings.NXGEN_DATA_DIR || join(options.machineDir, 'data'),
+    NXGEN_ACTIVATION_KEY_FILE: join(options.machineDir, ACTIVATION_KEY_FILE),
     ELECTRON_RUN_AS_NODE: '1',
     PORT: String(options.port),
     HOST: '127.0.0.1',
     NXGEN_WEB_DIR: join(options.resourcesPath, 'web'),
     NXGEN_WEB_URL: origin,
   };
+  const portal = settings.NXGEN_LICENSE_PORTAL_URL || options.licensePortalUrl;
+  if (portal) env.NXGEN_LICENSE_PORTAL_URL = portal;
   if (options.localBuild) delete env.NODE_ENV;
   else env.NODE_ENV = 'production';
   // The database: the built-in one's address, or (Mac test builds only) the external one from the settings.
@@ -98,4 +106,24 @@ export function startService(options: ServiceOptions, settings: Record<string, s
     stdio: ['ignore', log, log],
   });
   return { child, logFile };
+}
+
+/**
+ * The Smart Installer step (service: dist/installer/main.js) with the service's environment: creates the
+ * Platform Instance identity and installation record on first start, re-verifies after an update.
+ */
+export function runSmartInstaller(options: ServiceOptions, settings: Record<string, string>): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(options.resourcesPath, 'server', 'dist', 'installer', 'main.js')], {
+      cwd: join(options.resourcesPath, 'server'),
+      env: serviceEnvironment(options, settings, process.env),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let output = '';
+    child.stdout?.on('data', (d) => (output += d));
+    child.stderr?.on('data', (d) => (output += d));
+    child.on('error', (err) => resolve({ ok: false, output: `${output}${err.message}` }));
+    child.on('exit', (code) => resolve({ ok: code === 0, output }));
+  });
 }

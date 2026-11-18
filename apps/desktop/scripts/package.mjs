@@ -112,7 +112,11 @@ await esbuild({
   format: 'cjs',
   target: 'node22',
   external: ['electron'],
-  define: { 'process.env.NXGEN_LOCAL_BUILD': '"1"' },
+  define: {
+    'process.env.NXGEN_LOCAL_BUILD': '"1"',
+    // The AICAN License Portal this build activates against (key-only activation); empty → licence files only.
+    'process.env.NXGEN_BUILD_PORTAL_URL': JSON.stringify(process.env.NXGEN_LICENSE_PORTAL_URL ?? ''),
+  },
   logLevel: 'warning',
 });
 const electronVersion = JSON.parse(readFileSync(join(repo, 'node_modules', 'electron', 'package.json'), 'utf8')).version;

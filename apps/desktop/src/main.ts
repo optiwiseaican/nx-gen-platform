@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from 'fs';
 import * as path from 'path';
 import { checkLicense, loadShellTrustedKeys, ShellLicenseResult } from './license-check';
 import { LocalDatabase } from './local-database';
-import { databaseChoice, machineDirectory, readServiceSettings, SERVICE_ENV_FILE, startService } from './service';
+import { databaseChoice, machineDirectory, readServiceSettings, runSmartInstaller, SERVICE_ENV_FILE, startService } from './service';
 
 // In development the shell loads the Next.js dev server and talks to the API on :4000.
 // In packaged standalone builds the local NestJS service serves both UI and API.
@@ -130,7 +130,32 @@ async function bootService(win: BrowserWindow): Promise<boolean> {
     }
   }
 
-  const started = startService({ resourcesPath: process.resourcesPath, userDataPath: userData, port: SERVICE_PORT, localBuild: LOCAL_BUILD, machineDir, databaseUrl }, settings);
+  const options = {
+    resourcesPath: process.resourcesPath,
+    userDataPath: userData,
+    port: SERVICE_PORT,
+    localBuild: LOCAL_BUILD,
+    machineDir,
+    databaseUrl,
+    licensePortalUrl: process.env.NXGEN_BUILD_PORTAL_URL || undefined,
+  };
+
+  // Smart Installer step: identity and installation verification (first start, and after an update).
+  const installed = await runSmartInstaller(options, settings);
+  console.log(installed.output.trim());
+  if (!installed.ok) {
+    const report = path.join(settings.NXGEN_DATA_DIR || path.join(machineDir, 'data'), 'platform', 'installation-report.json');
+    await win.loadURL(
+      shellPage(
+        'NxGen installation could not be verified',
+        `<pre style="white-space:pre-wrap">${escapeHtml(installed.output.trim())}</pre><p>Report: <code>${escapeHtml(report)}</code></p>`,
+        'fail',
+      ),
+    );
+    return false;
+  }
+
+  const started = startService(options, settings);
   service = started.child;
   serviceLog = started.logFile;
   service.on('exit', () => {

@@ -96,22 +96,25 @@ setting for an external server. Build the installer on the lab PC itself: it bun
 `npm run package:mac` builds a Mac test app that uses the database server named in `.env` (e.g. the Aiven test
 database); `NXGEN_BUNDLE_POSTGRES=1` gives it the built-in database instead.
 
-Windows lab PC, one time:
+Activation (master specification §11): the installer asks for the **activation key** from AICAN and saves it in
+`C:\ProgramData\NxGen\activation-key.txt`. At the first start NxGen records its installation (Smart Installer step:
+Platform Instance identity, checks, `data\platform\installation-report.json`), sends the key with this computer's
+activation request to the **AICAN License Portal** (`tools/license-portal`, address set at build time with
+`NXGEN_LICENSE_PORTAL_URL`), receives the licence bound to this computer and activates; then it runs offline.
+Without internet the activation screen offers the offline route (save request → portal page → licence file).
+
+Building the Windows installer (on the lab PC, one time):
 
 1. Install Node.js 22, Git, Python 3.10+ (tick "Add python.exe to PATH") and IDS peak; check the camera in IDS peak
    Cockpit, then close Cockpit. Turn on **Developer Mode** (Settings → System → For developers): electron-builder
    unpacks its Windows tools from an archive with symbolic links, which Windows only allows in Developer Mode or as
    administrator ("Cannot create symbolic link : A required privilege is not held by the client").
-2. `git clone …` (not into OneDrive) and `npm install`. Copy the files git does not carry from the development Mac
-   into the same places (USB stick, not email: they hold private signing keys):
-   `apps/server/config/trusted-license-keys.dev.json`, `tools/license-authority/keys/`, and the module packages in
-   `dist-modules/` (e.g. `nxgen-tlc-1.2.1.nxmod`).
-3. `npm run build -w @crescent/shared -w @crescent/licensing -w @crescent/module-sdk`, then `npm run package:win`
-   and run `apps\desktop\release\NxGen-Setup-2.0.0.exe`.
-4. Simulated installation record and dev licence for that data folder (PowerShell):
-   `$env:NXGEN_DATA_DIR="C:\ProgramData\NxGen\data"; npm.cmd run dev:license -w @crescent/server`; keep the
-   activation code it prints.
-5. Open NxGen, enter the activation code, create the first administrator, and install the TLC module under
-   **Modules → Choose .nxmod package** from `dist-modules\`. The real camera is used (`NXGEN_CAMERA=ids`); to test
-   without one put `NXGEN_CAMERA=simulator` in `C:\ProgramData\NxGen\nxgen.env`. Logs: service
-   `%APPDATA%\NxGen\logs\service.log`, database `C:\ProgramData\NxGen\database\postgres.log`.
+2. `git clone …` (not into OneDrive), `npm install`, and copy `apps/server/config/trusted-license-keys.dev.json` from
+   the development Mac (it holds the public key the portal signs with).
+3. `npm run build -w @crescent/shared -w @crescent/licensing -w @crescent/module-sdk`, then
+   `$env:NXGEN_LICENSE_PORTAL_URL="https://…"; npm run package:win` → `apps\desktop\release\NxGen-Setup-2.0.0.exe`.
+
+Installing: run the setup, enter the activation key, finish; open NxGen → it activates by itself → create the first
+administrator → install the TLC module under **Modules → Choose .nxmod package**. The real camera is used
+(`NXGEN_CAMERA=ids`); to test without one put `NXGEN_CAMERA=simulator` in `C:\ProgramData\NxGen\nxgen.env`. Logs:
+service `%APPDATA%\NxGen\logs\service.log`, database `C:\ProgramData\NxGen\database\postgres.log`.

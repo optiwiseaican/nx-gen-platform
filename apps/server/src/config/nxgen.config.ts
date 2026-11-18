@@ -86,6 +86,10 @@ export interface NxGenConfig {
   platformVersion: string;
   trustedKeys: TrustedKey[];
   clockRollbackToleranceMs: number;
+  /** AICAN License Portal for activation with the key alone (NXGEN_LICENSE_PORTAL_URL); null → files only. */
+  licensePortalUrl?: string | null;
+  /** Activation key the installer saved (NXGEN_ACTIVATION_KEY_FILE): used once, automatically, at start. */
+  activationKeyFile?: string | null;
 }
 
 /** apps/server/config — same relative depth from src/config and dist/config. */
@@ -194,5 +198,9 @@ export function loadConfig(): NxGenConfig {
       process.env.NXGEN_CLOCK_ROLLBACK_TOLERANCE_MS ??
         DEFAULT_CLOCK_ROLLBACK_TOLERANCE_MS,
     ),
+    licensePortalUrl:
+      process.env.NXGEN_LICENSE_PORTAL_URL?.trim().replace(/\/+$/, '') ||
+      null,
+    activationKeyFile: process.env.NXGEN_ACTIVATION_KEY_FILE?.trim() || null,
   };
 }

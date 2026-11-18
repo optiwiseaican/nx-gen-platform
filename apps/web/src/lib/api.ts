@@ -25,6 +25,12 @@ export interface LicensingStatus {
     error: LicenseErrorInfo | null;
   };
   warnings: string[];
+  activation?: {
+    /** Activation key saved by the installer, not yet used successfully. */
+    pendingActivationCode: string | null;
+    /** AICAN License Portal page for offline activation; null when this build has no portal. */
+    portalUrl: string | null;
+  };
 }
 
 export type CheckStatus = "PASS" | "FAIL" | "NOT_RUN";
@@ -41,6 +47,8 @@ export interface ActivationOutcome {
   errorCode?: string;
   error?: LicenseErrorInfo;
   licensePackageRequired?: boolean;
+  /** The License Portal could not be reached: offer saving the activation request and a licence file. */
+  offlineActivation?: boolean;
   inputError?: "EMPTY" | "FORMAT" | "CHECKSUM";
 }
 
@@ -400,6 +408,9 @@ export const licensingApi = {
   systemInformation: () => call<SystemInformation>("/licensing/system-information"),
   activate: (body: { activationCode: string; licenseFile?: string; licenseFileName?: string }) =>
     call<ActivationOutcome>("/licensing/activate", { method: "POST", body: JSON.stringify(body) }),
+  /** This computer's activation request (.nxreq), for activating without internet. */
+  request: () =>
+    call<{ requestCode: string; fileName: string; fileContent: string }>("/licensing/request", { method: "POST" }),
 };
 
 /** Shown when the local License Service itself cannot be reached (NX-LIC-E010). */

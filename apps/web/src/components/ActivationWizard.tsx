@@ -61,6 +61,7 @@ export function ActivationWizard() {
   const [code, setCode] = useState("");
   const [inputError, setInputError] = useState<string | null>(null);
   const [packageRequired, setPackageRequired] = useState(false);
+  const [offline, setOffline] = useState(false);
   const [licenseFile, setLicenseFile] = useState<{ name: string; text: string } | null>(null);
   const [checks, setChecks] = useState<VerificationCheck[]>(PENDING_CHECKS);
   const [revealed, setRevealed] = useState(0);
@@ -73,6 +74,9 @@ export function ActivationWizard() {
       const s = await licensingApi.status();
       setStatus(s);
       setLoadError(false);
+      // The key typed into the installer (if its automatic activation did not complete).
+      const pending = s.activation?.pendingActivationCode;
+      if (pending) setCode((current) => current || pending);
       if (s.license.state === "ACTIVE") {
         // Once setup is complete, the activation summary is no longer the entry point.
         const setup = await authApi.setupStatus().catch(() => null);
@@ -136,6 +140,7 @@ export function ActivationWizard() {
     }
     if (outcome.licensePackageRequired) {
       setScreen("activate");
+      setOffline(!!outcome.offlineActivation);
       setPackageRequired(true);
       setLicenseFile(null);
       return;
@@ -172,8 +177,23 @@ export function ActivationWizard() {
       const selected = { name: f.name, text };
       setLicenseFile(selected);
       setPackageRequired(false);
+      setOffline(false);
       void runActivation(selected);
     });
+  }
+
+  /** Offline activation: the request file to upload on the AICAN License Portal from another computer. */
+  async function saveActivationRequest() {
+    try {
+      const req = await licensingApi.request();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([req.fileContent], { type: "application/json" }));
+      a.download = req.fileName;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    } catch {
+      setInputError("The activation request could not be created. Restart NxGen and try again.");
+    }
   }
 
   function returnToStart() {
@@ -220,8 +240,10 @@ export function ActivationWizard() {
                 }}
                 inputError={inputError}
                 packageRequired={packageRequired}
+                offline={offline}
                 licenseFile={licenseFile}
                 onSelectFile={() => fileInput.current?.click()}
+                onSaveRequest={() => void saveActivationRequest()}
                 onSubmit={() => void runActivation()}
                 codeInputRef={codeInput}
               />
@@ -328,13 +350,16 @@ function ActivateScreen(props: {
   onCode: (v: string) => void;
   inputError: string | null;
   packageRequired: boolean;
+  offline: boolean;
   licenseFile: { name: string } | null;
   onSelectFile: () => void;
+  onSaveRequest: () => void;
   onSubmit: () => void;
   codeInputRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const { status, installationPassed } = props;
   const license = status.license;
+  const portalUrl = status.activation?.portalUrl ?? null;
   return (
     <div className="space-y-6">
       <div>
@@ -423,19 +448,42 @@ function ActivateScreen(props: {
               </p>
             ) : (
               <p id="code-help" className="mt-2 text-sm text-muted">
-                Make sure you have the valid NxGen activation code and the signed license package available on this computer.
+                {portalUrl
+                  ? "Enter the activation key you received from AICAN. NxGen gets its license from the AICAN License Portal (an internet connection is needed once)."
+                  : "Make sure you have the valid NxGen activation code and the signed license package available on this computer."}
               </p>
             )}
           </div>
 
-          {props.packageRequired && (
+          {props.packageRequired && props.offline ? (
+            <Callout tone="warn" title="No connection to the AICAN License Portal">
+              <p>Activate without internet on this computer:</p>
+              <ol className="mt-1 list-decimal space-y-1 pl-5">
+                <li>Save this computer&apos;s activation request.</li>
+                <li>
+                  On any computer with internet, open{" "}
+                  <span className="font-mono text-ink">{portalUrl ?? "the AICAN License Portal"}</span>, enter the activation
+                  key and upload the request. You receive a license file (.nxlic).
+                </li>
+                <li>Bring the license file here and select it.</li>
+              </ol>
+              <div className="mt-3 flex flex-wrap gap-3">
+                <Button type="button" variant="secondary" onClick={props.onSaveRequest}>
+                  Save Activation Request
+                </Button>
+                <Button type="button" variant="secondary" onClick={props.onSelectFile}>
+                  Select License File
+                </Button>
+              </div>
+            </Callout>
+          ) : props.packageRequired ? (
             <Callout tone="warn" title="License Package Required">
               <p>The signed NxGen license package for this activation could not be found.</p>
               <Button type="button" variant="secondary" className="mt-3" onClick={props.onSelectFile}>
                 Select License File
               </Button>
             </Callout>
-          )}
+          ) : null}
           {props.licenseFile && !props.packageRequired && (
             <p className="text-sm text-muted">
               License file: <span className="font-medium text-ink">{props.licenseFile.name}</span>
