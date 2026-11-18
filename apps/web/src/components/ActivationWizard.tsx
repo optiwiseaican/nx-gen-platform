@@ -234,6 +234,7 @@ export function ActivationWizard() {
                 instanceId={status.platform.instanceId}
                 onRetry={() => void runActivation()}
                 onReturn={returnToStart}
+                onSignIn={() => router.push("/login/?next=/")}
               />
             ) : (
               <CompleteScreen status={status} onContinue={() => router.push("/setup/")} />
@@ -460,8 +461,10 @@ function ActivatingScreen(props: {
   instanceId: string | null;
   onRetry: () => void;
   onReturn: () => void;
+  onSignIn: () => void;
 }) {
   const { checks, revealed, failure } = props;
+  const signInNeeded = failure?.code === "NX-AUTH-REQUIRED" || failure?.code === "NX-AUTH-FORBIDDEN";
   return (
     <div className="space-y-6">
       <div>
@@ -533,7 +536,11 @@ function ActivatingScreen(props: {
             <Button variant="secondary" onClick={props.onReturn}>
               Return
             </Button>
-            <Button onClick={props.onRetry}>Try Again</Button>
+            {signInNeeded ? (
+              <Button onClick={props.onSignIn}>Sign In</Button>
+            ) : (
+              <Button onClick={props.onRetry}>Try Again</Button>
+            )}
           </div>
         </div>
       )}

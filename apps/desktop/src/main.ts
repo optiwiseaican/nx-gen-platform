@@ -15,8 +15,11 @@ const SMOKE_TEST = process.env.NXGEN_SHELL_SMOKE_TEST === '1';
 /** Set at build time for a build meant only for the machine it was made on. */
 const LOCAL_BUILD = process.env.NXGEN_LOCAL_BUILD === '1';
 
-/** Routes usable without a shell-verified license: activation and system information. */
-const OPEN_ROUTES = new Set(['/', '/system/']);
+/**
+ * Routes usable without a shell-verified license: activation, system information, and sign-in
+ * (re-activating once administrators exist needs an IT or Super Administrator session).
+ */
+const OPEN_ROUTES = new Set(['/', '/system/', '/login/', '/change-password/']);
 
 // Trusted PUBLIC keys ship inside the app resources in packaged builds.
 const CONFIG_DIR = app.isPackaged
