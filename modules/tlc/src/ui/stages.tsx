@@ -33,7 +33,7 @@ import {
 } from "../engine";
 import type { Channel, GrayImage, QcCheck } from "../engine";
 import type { EvaluationInput, ImageQc } from "../api/pipeline";
-import { Evaluation, ILLUMINATIONS, Illumination, RfWindow, TrackRole, evaluateRf } from "../shared/tlc";
+import { CAMERA_LIMITS, Evaluation, FrameStats, ILLUMINATIONS, Illumination, RfWindow, TrackRole, autoExposureUs, autoWhiteBalance, evaluateRf } from "../shared/tlc";
 import { Badge, CONCLUSION, Callout, ILLUMINATION_LABEL, Tone, card, field, fmtDate, mod, optionBox, panelLabel, panelTitle, primary, request, secondary, send, small, strong, toolToggle } from "./lib";
 import { EvaluationFull, FitBox, ImageMeta, PlateMeta, RfTable, clamp, fmt, loadPixels, svgPoint } from "./plate";
 import { CHART_MODES, ChartMode, ChartTool, DensitogramPlot, FULL_VIEW, PlotBand, PlotColors, PlotTrack, TRACK_PALETTE, Viewport, normalizeToMax } from "./densitogram";
@@ -141,13 +141,65 @@ export function PictureStage({
   }, [editable, loadCamera]);
   const cam = camera?.cameras.find((c) => c.serial === camera.preferredSerial) ?? (camera?.cameras.length === 1 ? camera.cameras[0] : null);
   const camSettings = camera?.settings ?? null;
+  const locked = camSettings?.fromMethod ?? { exposure: !!camSettings?.fixed, gain: false, whiteBalance: false };
+
+  // Exposure, gain and white balance in use: the method's where it sets them, else the analyst's
+  // (remembered per camera on this computer), else the defaults.
+  const [values, setValues] = useState<CameraValues | null>(null);
+  const [adjusted, setAdjusted] = useState(false);
+  useEffect(() => {
+    if (!cam || !camSettings) return;
+    const mine = rememberedCamera(cam.serial);
+    setValues({
+      exposureUs: !locked.exposure && typeof mine.exposureUs === "number" ? mine.exposureUs : camSettings.exposureUs,
+      gain: !locked.gain && typeof mine.gain === "number" ? mine.gain : camSettings.gain,
+      whiteBalance: !locked.whiteBalance && Array.isArray(mine.whiteBalance) && mine.whiteBalance.length === 3 ? (mine.whiteBalance as [number, number, number]) : camSettings.whiteBalance,
+    });
+    setAdjusted(Object.keys(mine).length > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cam?.serial, camSettings?.exposureUs, camSettings?.gain, camSettings?.whiteBalance.join("/")]);
+  // The live view restarts with new settings, so follow the controls after a short pause.
+  const [previewValues, setPreviewValues] = useState<CameraValues | null>(null);
+  useEffect(() => {
+    const t = setTimeout(() => setPreviewValues(values), previewValues ? 450 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [values]);
+  const liveImg = useRef<HTMLImageElement | null>(null);
+  function change(v: CameraValues) {
+    setValues(v);
+    setAdjusted(true);
+    if (cam)
+      try {
+        localStorage.setItem(CAMERA_STORE(cam.serial), JSON.stringify(v));
+      } catch {
+        /* storage unavailable: the values still apply to this session */
+      }
+  }
+  function autoAdjust(kind: "exposure" | "whiteBalance") {
+    const stats = frameStats(liveImg.current);
+    if (!values || !stats) return setError("No live image yet. Wait for the live view, then try again.");
+    setError(null);
+    change(kind === "exposure" ? { ...values, exposureUs: autoExposureUs(stats, values.exposureUs) } : { ...values, whiteBalance: autoWhiteBalance(stats, values.whiteBalance) });
+  }
+  function resetCamera() {
+    if (!camSettings) return;
+    if (cam)
+      try {
+        localStorage.removeItem(CAMERA_STORE(cam.serial));
+      } catch {
+        /* ignore */
+      }
+    setValues({ exposureUs: camSettings.exposureUs, gain: camSettings.gain, whiteBalance: camSettings.whiteBalance });
+    setAdjusted(false);
+  }
 
   async function capture() {
     if (!cam) return;
     setCapturing(true);
     setError(null);
     try {
-      const out = await mod<{ id: string; sha256: string; qc: ImageQc | null; camera: { exposureUs: number; attempts: unknown[] } }>(`/analyses/${analysisId}/capture`, send({ illumination, serial: cam.serial }));
+      const out = await mod<{ id: string; sha256: string; qc: ImageQc | null; camera: { exposureUs: number; attempts: unknown[] } }>(`/analyses/${analysisId}/capture`, send({ illumination, serial: cam.serial, settings: adjusted && values ? values : undefined }));
       setLive(false);
       const retakes = out.camera.attempts.length - 1;
       await onUploaded(
@@ -185,8 +237,16 @@ export function PictureStage({
   return (
     <div className={STAGE_GRID}>
       <div className="relative min-h-[18rem] overflow-hidden rounded-2xl bg-black lg:min-h-0">
-        {live && cam && camSettings ? (
-          <LivePreview serial={cam.serial} simulated={cam.simulated} exposureUs={camSettings.exposureUs} gain={camSettings.gain} whiteBalance={camSettings.whiteBalance} illumination={illumination} />
+        {live && cam && (previewValues ?? camSettings) ? (
+          <LivePreview
+            serial={cam.serial}
+            simulated={cam.simulated}
+            exposureUs={(previewValues ?? camSettings)!.exposureUs}
+            gain={(previewValues ?? camSettings)!.gain}
+            whiteBalance={(previewValues ?? camSettings)!.whiteBalance}
+            illumination={illumination}
+            imgRef={liveImg}
+          />
         ) : image ? (
           <>
             <img src={`/api/modules/tlc/api/images/${image.id}`} alt={`${ILLUMINATION_LABEL[image.illumination]} plate image`} className="max-h-[42rem] w-full object-contain lg:absolute lg:inset-0 lg:h-full lg:max-h-none" />
@@ -270,11 +330,22 @@ export function PictureStage({
                     {cam.model} · <span className="font-mono">{cam.serial}</span>
                     {cam.simulated && <Badge tone="warn">Simulated</Badge>}
                   </p>
-                  {camSettings && (
+                  {values && (
                     <p className="text-xs text-muted">
-                      Exposure {fmtExposure(camSettings.exposureUs)} · gain {fmt(camSettings.gain, 1)} · white balance {camSettings.whiteBalance.map((v) => fmt(v, 2)).join("/")} ·{" "}
-                      {camSettings.fixed ? "set by the method" : "exposure corrected automatically (no exposure in the method)"}
+                      Exposure {fmtExposure(values.exposureUs)} · gain {fmt(values.gain, 2)} · white balance {values.whiteBalance.map((v) => fmt(v, 2)).join("/")} ·{" "}
+                      {locked.exposure ? "exposure set by the method" : adjusted ? "as set here (recorded with the image)" : "exposure corrected automatically when capturing"}
                     </p>
+                  )}
+                  {values && (
+                    <CameraControls
+                      values={values}
+                      locked={locked}
+                      live={live}
+                      onChange={change}
+                      onAutoExposure={() => autoAdjust("exposure")}
+                      onAutoWhiteBalance={() => autoAdjust("whiteBalance")}
+                      onReset={resetCamera}
+                    />
                   )}
                   {camera.problems.length > 0 && <Callout tone="fail">{camera.problems.join(" ")}</Callout>}
                   {cam.simulated && <p className="text-xs text-warn">Development server: the simulated camera photographs a stored plate. Real captures need the lab PC with the IDS camera.</p>}
@@ -367,9 +438,168 @@ export function PictureStage({
 interface CameraOverview {
   status: { mode: "OFF" | "SIMULATOR" | "IDS"; helper: string; simulated: boolean; error: string | null };
   cameras: { serial: string; model: string; vendor?: string; openable: boolean; simulated: boolean }[];
-  settings: { exposureUs: number; gain: number; whiteBalance: [number, number, number]; fixed: boolean } | null;
+  settings: {
+    exposureUs: number;
+    gain: number;
+    whiteBalance: [number, number, number];
+    fixed: boolean;
+    fromMethod?: { exposure: boolean; gain: boolean; whiteBalance: boolean };
+  } | null;
   problems: string[];
   preferredSerial: string | null;
+}
+
+interface CameraValues {
+  exposureUs: number;
+  gain: number;
+  whiteBalance: [number, number, number];
+}
+
+const CAMERA_STORE = (serial: string) => `nxgen.tlc.camera.${serial}`;
+
+/** The analyst's last camera settings for this camera on this computer (a convenience; captures record what was used). */
+function rememberedCamera(serial: string): Partial<CameraValues> {
+  try {
+    const v = JSON.parse(localStorage.getItem(CAMERA_STORE(serial)) ?? "null") as Partial<CameraValues> | null;
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Channel means of the live frame (central 60 %), from the <img> showing the stream. */
+function frameStats(img: HTMLImageElement | null): FrameStats | null {
+  if (!img || !img.naturalWidth || !img.naturalHeight) return null;
+  const scale = Math.min(1, 320 / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const g2d = canvas.getContext("2d", { willReadFrequently: true });
+  if (!g2d) return null;
+  g2d.drawImage(img, 0, 0, w, h);
+  const x0 = Math.floor(w * 0.2);
+  const y0 = Math.floor(h * 0.2);
+  const d = g2d.getImageData(x0, y0, Math.max(1, Math.floor(w * 0.6)), Math.max(1, Math.floor(h * 0.6))).data;
+  let r = 0, g = 0, b = 0, n = 0, saturated = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (Math.max(d[i], d[i + 1], d[i + 2]) >= 250) {
+      saturated++;
+      continue;
+    }
+    r += d[i];
+    g += d[i + 1];
+    b += d[i + 2];
+    n++;
+  }
+  const total = d.length / 4;
+  if (!n) return { r: 255, g: 255, b: 255, luma: 255, saturated: 1 };
+  return { r: r / n, g: g / n, b: b / n, luma: (0.299 * r + 0.587 * g + 0.114 * b) / n, saturated: saturated / total };
+}
+
+/**
+ * Exposure, gain and white balance for the live view and the capture, as in IDS peak Cockpit, with
+ * "Auto exposure" and "Auto white balance" taken once from the live frame. Settings the method fixes are
+ * shown but locked.
+ */
+function CameraControls({
+  values,
+  locked,
+  live,
+  onChange,
+  onAutoExposure,
+  onAutoWhiteBalance,
+  onReset,
+}: {
+  values: CameraValues;
+  locked: { exposure: boolean; gain: boolean; whiteBalance: boolean };
+  live: boolean;
+  onChange: (v: CameraValues) => void;
+  onAutoExposure: () => void;
+  onAutoWhiteBalance: () => void;
+  onReset: () => void;
+}) {
+  const ms = values.exposureUs / 1000;
+  // Exposure on a log slider: 0.1 ms – 2 s.
+  const toSlider = (v: number) => Math.round(Math.log10(Math.max(0.1, v)) * 100);
+  const fromSlider = (x: number) => Math.round(10 ** (x / 100) * 1000);
+  const wbNames = ["Red", "Green", "Blue"];
+  const lockNote = <span className="text-[11px] font-normal text-muted"> · set by the method</span>;
+  return (
+    <div className="space-y-2.5 rounded-lg bg-canvas p-2.5">
+      <label className="block text-xs font-semibold">
+        Exposure (ms){locked.exposure && lockNote}
+        <span className="mt-1 flex items-center gap-2">
+          <input type="range" min={-100} max={330} value={toSlider(ms)} disabled={locked.exposure} onChange={(e) => onChange({ ...values, exposureUs: fromSlider(Number(e.target.value)) })} className="flex-1" />
+          <input
+            type="number"
+            min={0.031}
+            max={2000}
+            step={0.1}
+            value={Math.round(ms * 100) / 100}
+            disabled={locked.exposure}
+            onChange={(e) => Number(e.target.value) > 0 && onChange({ ...values, exposureUs: Math.round(Math.min(CAMERA_LIMITS.exposureUs[1], Math.max(CAMERA_LIMITS.exposureUs[0], Number(e.target.value) * 1000))) })}
+            className="w-20 rounded-md border border-line bg-white px-1.5 py-1 text-right font-mono text-xs"
+          />
+        </span>
+      </label>
+      <label className="block text-xs font-semibold">
+        Gain{locked.gain && lockNote}
+        <span className="mt-1 flex items-center gap-2">
+          <input type="range" min={1} max={16} step={0.01} value={values.gain} disabled={locked.gain} onChange={(e) => onChange({ ...values, gain: Number(e.target.value) })} className="flex-1" />
+          <input
+            type="number"
+            min={1}
+            max={16}
+            step={0.1}
+            value={values.gain}
+            disabled={locked.gain}
+            onChange={(e) => Number(e.target.value) >= 1 && onChange({ ...values, gain: Math.min(16, Number(e.target.value)) })}
+            className="w-20 rounded-md border border-line bg-white px-1.5 py-1 text-right font-mono text-xs"
+          />
+        </span>
+      </label>
+      <fieldset className="text-xs font-semibold">
+        <legend>White balance{locked.whiteBalance && lockNote}</legend>
+        <div className="mt-1 grid grid-cols-3 gap-1.5">
+          {values.whiteBalance.map((v, i) => (
+            <label key={i} className="block text-[11px] font-normal text-muted">
+              {wbNames[i]}
+              <input
+                type="number"
+                min={0.1}
+                max={8}
+                step={0.01}
+                value={v}
+                disabled={locked.whiteBalance}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (!(n >= 0.1 && n <= 8)) return;
+                  const wb = [...values.whiteBalance] as [number, number, number];
+                  wb[i] = n;
+                  onChange({ ...values, whiteBalance: wb });
+                }}
+                className="mt-0.5 w-full rounded-md border border-line bg-white px-1.5 py-1 text-right font-mono text-xs text-ink"
+              />
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <div className="grid grid-cols-3 gap-1.5">
+        <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onAutoExposure} disabled={!live || locked.exposure} title={live ? "Set the exposure from the live image" : "Start the live view first"}>
+          Auto exposure
+        </button>
+        <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onAutoWhiteBalance} disabled={!live || locked.whiteBalance} title={live ? "Point the camera at the plate or a white card under white light" : "Start the live view first"}>
+          Auto white balance
+        </button>
+        <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onReset}>
+          Reset
+        </button>
+      </div>
+      {!live && <p className="text-[11px] text-muted">Start the live view to see the effect and to use the automatic buttons.</p>}
+    </div>
+  );
 }
 
 const fmtExposure = (us: number) => (us >= 1_000_000 ? `${fmt(us / 1e6, 2)} s` : us >= 1000 ? `${fmt(us / 1000, us >= 10_000 ? 0 : 1)} ms` : `${Math.round(us)} µs`);
@@ -379,8 +609,25 @@ const fmtExposure = (us: number) => (us >= 1_000_000 ? `${fmt(us / 1e6, 2)} s` :
  * plate guide: the plate should sit inside the dashed frame with its bottom (baseline) towards the
  * red edge. Removing the component closes the stream, which stops the preview on the server.
  */
-function LivePreview({ serial, simulated, exposureUs, gain, whiteBalance, illumination }: { serial: string; simulated: boolean; exposureUs: number; gain: number; whiteBalance: [number, number, number]; illumination: Illumination }) {
-  const ref = useRef<HTMLImageElement>(null);
+function LivePreview({
+  serial,
+  simulated,
+  exposureUs,
+  gain,
+  whiteBalance,
+  illumination,
+  imgRef,
+}: {
+  serial: string;
+  simulated: boolean;
+  exposureUs: number;
+  gain: number;
+  whiteBalance: [number, number, number];
+  illumination: Illumination;
+  /** Receives the <img> showing the stream, for Auto exposure / Auto white balance. */
+  imgRef?: React.MutableRefObject<HTMLImageElement | null>;
+}) {
+  const ref = useRef<HTMLImageElement | null>(null);
   const [failed, setFailed] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -413,7 +660,12 @@ function LivePreview({ serial, simulated, exposureUs, gain, whiteBalance, illumi
     <div className="flex h-full min-h-[18rem] items-center justify-center lg:absolute lg:inset-0">
       <div className="relative">
         {!failed ? (
-          <img ref={ref} src={src} alt="Live camera image" className="block h-auto w-full max-w-full lg:h-[calc(100vh-11rem)] lg:w-auto" onError={onFailed} />
+          <img
+            ref={(el) => {
+              ref.current = el;
+              if (imgRef) imgRef.current = el;
+            }}
+            src={src} alt="Live camera image" className="block h-auto w-full max-w-full lg:h-[calc(100vh-11rem)] lg:w-auto" onError={onFailed} />
         ) : (
           <div className="p-8 text-center text-sm text-white/80">
             The live image stopped.

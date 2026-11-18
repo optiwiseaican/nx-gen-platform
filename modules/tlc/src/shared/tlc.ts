@@ -76,15 +76,101 @@ export function parseRfWindows(parameters: { name: string; value: string; unit: 
   return { windows, problems };
 }
 
-/** Camera settings for a capture. `fixed` = the method sets the exposure, so it is not adjusted. */
+/**
+ * Camera settings for a capture. `fixed` = the exposure is set (by the method or the analyst), so the
+ * capture does not correct it automatically. `fromMethod` = which settings the method sets: those are
+ * used as approved and cannot be changed on the Picture stage.
+ */
 export interface CameraSettingsInput {
   exposureUs: number;
   gain: number;
   whiteBalance: [number, number, number];
   fixed: boolean;
+  fromMethod?: { exposure: boolean; gain: boolean; whiteBalance: boolean };
 }
 
 export const DEFAULT_CAMERA: CameraSettingsInput = { exposureUs: 20000, gain: 1, whiteBalance: [1, 1, 1], fixed: false };
+
+/** Limits of the lamp box camera settings (exposure µs, gain factor, white balance factors). */
+export const CAMERA_LIMITS = { exposureUs: [31, 2_000_000], gain: [1, 16], whiteBalance: [0.1, 8] } as const;
+
+export interface CameraAdjustment {
+  exposureUs?: number;
+  gain?: number;
+  whiteBalance?: [number, number, number];
+}
+
+/**
+ * The settings a capture uses: the method's where it sets them, otherwise what the analyst chose on
+ * the Picture stage. An exposure chosen by the analyst is used as is (no automatic correction).
+ */
+export function applyCameraAdjustment(base: CameraSettingsInput, adjustment: unknown): { settings: CameraSettingsInput; problems: string[]; adjusted: string[] } {
+  const from = base.fromMethod ?? { exposure: base.fixed, gain: false, whiteBalance: false };
+  const s: CameraSettingsInput = { ...base, whiteBalance: [...base.whiteBalance] as [number, number, number], fromMethod: from };
+  const problems: string[] = [];
+  const adjusted: string[] = [];
+  if (!adjustment || typeof adjustment !== 'object') return { settings: s, problems, adjusted };
+  const a = adjustment as Record<string, unknown>;
+  const [eMin, eMax] = CAMERA_LIMITS.exposureUs;
+  const [gMin, gMax] = CAMERA_LIMITS.gain;
+  const [wMin, wMax] = CAMERA_LIMITS.whiteBalance;
+  if (a.exposureUs !== undefined && !from.exposure) {
+    const n = Number(a.exposureUs);
+    if (!(n >= eMin && n <= eMax)) problems.push('Exposure must be 31 µs to 2 s.');
+    else if (Math.round(n) !== s.exposureUs || !s.fixed) {
+      s.exposureUs = Math.round(n);
+      s.fixed = true;
+      adjusted.push('exposure');
+    }
+  }
+  if (a.gain !== undefined && !from.gain) {
+    const n = Number(a.gain);
+    if (!(n >= gMin && n <= gMax)) problems.push('Gain must be 1 to 16.');
+    else if (n !== s.gain) {
+      s.gain = Math.round(n * 100) / 100;
+      adjusted.push('gain');
+    }
+  }
+  if (a.whiteBalance !== undefined && !from.whiteBalance) {
+    const w = a.whiteBalance;
+    if (!Array.isArray(w) || w.length !== 3 || !w.every((x) => Number(x) >= wMin && Number(x) <= wMax)) problems.push('White balance must be three factors from 0.1 to 8.');
+    else {
+      const wb = w.map((x) => Math.round(Number(x) * 1000) / 1000) as [number, number, number];
+      if (wb.some((x, i) => x !== s.whiteBalance[i])) {
+        s.whiteBalance = wb;
+        adjusted.push('whiteBalance');
+      }
+    }
+  }
+  return { settings: s, problems, adjusted };
+}
+
+/** Channel means of a preview frame, 0–255, over its unsaturated pixels; `saturated` is a fraction. */
+export interface FrameStats {
+  r: number;
+  g: number;
+  b: number;
+  luma: number;
+  saturated: number;
+}
+
+/**
+ * Auto exposure (once): the exposure that brings the frame's mean brightness to about 45 %, at most
+ * 8× brighter or darker per press; with more than 2 % of pixels saturated it halves the exposure.
+ */
+export function autoExposureUs(stats: FrameStats, currentUs: number): number {
+  const [min, max] = CAMERA_LIMITS.exposureUs;
+  let factor = stats.saturated > 0.02 ? 0.5 : (0.45 * 255) / Math.max(1, stats.luma);
+  factor = Math.min(8, Math.max(0.125, factor));
+  return Math.round(Math.min(max, Math.max(min, currentUs * factor)));
+}
+
+/** Auto white balance (once, grey world): red and blue scaled so their means match green. */
+export function autoWhiteBalance(stats: FrameStats, current: [number, number, number]): [number, number, number] {
+  const [min, max] = CAMERA_LIMITS.whiteBalance;
+  const clamp = (v: number) => Math.round(Math.min(max, Math.max(min, v)) * 1000) / 1000;
+  return [clamp(current[0] * (stats.g / Math.max(1, stats.r))), current[1], clamp(current[2] * (stats.g / Math.max(1, stats.b)))];
+}
 
 /**
  * Camera settings from a TLC method's parameters, as the tablet keeps them on the method so every
@@ -96,7 +182,11 @@ export const DEFAULT_CAMERA: CameraSettingsInput = { exposureUs: 20000, gain: 1,
  * method exposure the capture adjusts the exposure automatically (the tablet's auto retake).
  */
 export function parseCameraSettings(parameters: { name: string; value: string; unit: string }[]): { settings: CameraSettingsInput; problems: string[] } {
-  const s: CameraSettingsInput = { ...DEFAULT_CAMERA, whiteBalance: [...DEFAULT_CAMERA.whiteBalance] as [number, number, number] };
+  const s: CameraSettingsInput = {
+    ...DEFAULT_CAMERA,
+    whiteBalance: [...DEFAULT_CAMERA.whiteBalance] as [number, number, number],
+    fromMethod: { exposure: false, gain: false, whiteBalance: false },
+  };
   const problems: string[] = [];
   for (const p of parameters) {
     const name = p.name.trim().toLowerCase();
@@ -109,15 +199,22 @@ export function parseCameraSettings(parameters: { name: string; value: string; u
       else {
         s.exposureUs = Math.round(n * k);
         s.fixed = true;
+        s.fromMethod!.exposure = true;
       }
     } else if (name === 'camera gain') {
       const n = Number(value);
       if (!(n >= 1 && n <= 16) || !(unit === '' || unit === 'x' || unit === '×')) problems.push(`Camera gain must be a factor from 1 to 16: ${p.value} ${p.unit}`);
-      else s.gain = n;
+      else {
+        s.gain = n;
+        s.fromMethod!.gain = true;
+      }
     } else if (name === 'camera white balance') {
       const parts = value.split('/').map(Number);
       if (parts.length !== 3 || !parts.every((x) => x >= 0.1 && x <= 8)) problems.push(`Camera white balance must be "red/green/blue" factors between 0.1 and 8: ${p.value}`);
-      else s.whiteBalance = parts as [number, number, number];
+      else {
+        s.whiteBalance = parts as [number, number, number];
+        s.fromMethod!.whiteBalance = true;
+      }
     }
   }
   return { settings: s, problems };

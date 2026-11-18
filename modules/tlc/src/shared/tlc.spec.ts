@@ -64,3 +64,41 @@ describe('TLC', () => {
     expect(imageType(new TextEncoder().encode('<svg onload=alert(1)>'))).toBeNull();
   });
 });
+
+import { applyCameraAdjustment, autoExposureUs, autoWhiteBalance, DEFAULT_CAMERA, parseCameraSettings } from './tlc';
+
+describe('camera settings on the Picture stage', () => {
+  const method = (params: { name: string; value: string; unit: string }[]) => parseCameraSettings(params).settings;
+
+  it('the analyst sets exposure, gain and white balance when the method does not', () => {
+    const { settings, problems, adjusted } = applyCameraAdjustment(method([]), { exposureUs: 110_000, gain: 4.38, whiteBalance: [1.9, 1, 1.6] });
+    expect(problems).toEqual([]);
+    expect(adjusted).toEqual(['exposure', 'gain', 'whiteBalance']);
+    expect(settings).toMatchObject({ exposureUs: 110_000, gain: 4.38, whiteBalance: [1.9, 1, 1.6], fixed: true });
+  });
+
+  it('settings from the method win and cannot be changed', () => {
+    const base = method([
+      { name: 'Camera exposure', value: '25', unit: 'ms' },
+      { name: 'Camera white balance', value: '1.6/1.0/1.9', unit: '' },
+    ]);
+    const { settings, adjusted } = applyCameraAdjustment(base, { exposureUs: 500_000, gain: 2, whiteBalance: [1, 1, 1] });
+    expect(adjusted).toEqual(['gain']);
+    expect(settings).toMatchObject({ exposureUs: 25_000, gain: 2, whiteBalance: [1.6, 1, 1.9], fixed: true });
+  });
+
+  it('out-of-range values are refused; nothing given keeps automatic exposure', () => {
+    expect(applyCameraAdjustment(DEFAULT_CAMERA, { exposureUs: 5, gain: 40, whiteBalance: [9, 1, 1] }).problems).toHaveLength(3);
+    expect(applyCameraAdjustment(DEFAULT_CAMERA, undefined).settings.fixed).toBe(false);
+  });
+
+  it('auto exposure brings a dark frame up, a saturated one down, in bounded steps', () => {
+    expect(autoExposureUs({ r: 8, g: 12, b: 8, luma: 10, saturated: 0 }, 20_000)).toBe(160_000); // 11.5× wanted, capped at 8×
+    expect(autoExposureUs({ r: 60, g: 60, b: 60, luma: 57.375, saturated: 0 }, 20_000)).toBe(40_000); // 45 % of 255 = 114.75 = 2 × 57.375
+    expect(autoExposureUs({ r: 200, g: 200, b: 200, luma: 200, saturated: 0.1 }, 100_000)).toBe(50_000);
+  });
+
+  it('auto white balance (grey world) removes a green cast', () => {
+    expect(autoWhiteBalance({ r: 40, g: 80, b: 50, luma: 65, saturated: 0 }, [1, 1, 1])).toEqual([2, 1, 1.6]);
+  });
+});

@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import type { DeviceInfo, ModuleContext, ModuleFileResponse, ModuleRequest, ModuleTx, NxGenModule } from '@crescent/module-sdk';
 import { ModuleError } from '@crescent/module-sdk';
 import { autoRetakeEv, Channel, PlateGeometry, Point, PostProcessing, RgbImage, validatePostProcessing } from '../engine';
-import { CameraSettingsInput, DEFAULT_CAMERA, evaluate, ILLUMINATIONS, Illumination, imageType, parseCameraSettings, parseRfWindows, RfWindow, TrackInput, validatePlate } from '../shared/tlc';
+import { applyCameraAdjustment, CameraSettingsInput, DEFAULT_CAMERA, evaluate, ILLUMINATIONS, Illumination, imageType, parseCameraSettings, parseRfWindows, RfWindow, TrackInput, validatePlate } from '../shared/tlc';
 import { decodeImage, encodePng, pixelBytes } from './images';
 import {
   ENGINE_VERSION,
@@ -745,15 +745,18 @@ const TlcModule: NxGenModule = {
       path: '/analyses/:id/capture',
       permission: 'tlc.analyze',
       async handler(req) {
-        const body = (req.body ?? {}) as { illumination?: string; serial?: string };
+        const body = (req.body ?? {}) as { illumination?: string; serial?: string; settings?: unknown };
         const illumination = body.illumination as Illumination;
         if (!ILLUMINATIONS.includes(illumination)) throw new ModuleError(400, 'Choose the illumination: white, UV 254 or UV 366.', 'illumination');
         const a = await load(ctx.db, req.params.id);
         if (a.analyzed_by !== req.principal.userId) throw new ModuleError(403, 'Only the analyst who created the analysis can add images.');
         // The instrument may still be open (it is required before submitting); when chosen it must be usable.
         if (a.device_id) await usableDevice(a.device_id);
-        const { settings, problems } = await methodCamera(a);
-        if (problems.length) throw new ModuleError(409, `The method's camera settings are not usable: ${problems.join(' ')}`);
+        const fromMethod = await methodCamera(a);
+        if (fromMethod.problems.length) throw new ModuleError(409, `The method's camera settings are not usable: ${fromMethod.problems.join(' ')}`);
+        // What the analyst set on the Picture stage, where the method does not set it.
+        const { settings, problems: adjustProblems, adjusted } = applyCameraAdjustment(fromMethod.settings, body.settings);
+        if (adjustProblems.length) throw new ModuleError(400, adjustProblems.join(' '), 'settings');
         let cameras: Awaited<ReturnType<ModuleContext['cameras']['list']>>;
         try {
           cameras = await ctx.cameras.list();
@@ -793,7 +796,8 @@ const TlcModule: NxGenModule = {
           sourceBits: still.sourceBits,
           temperatureC: still.temperatureC,
           saturatedFraction: still.saturatedFraction,
-          settingsFromMethod: settings.fixed,
+          settingsFromMethod: settings.fromMethod ?? null,
+          settingsSetByAnalyst: adjusted,
           attempts,
           capturedAt: still.capturedAt,
         };
@@ -823,6 +827,8 @@ const TlcModule: NxGenModule = {
             simulated: still.simulated,
             exposureUs: still.exposureUs,
             gain: still.gain,
+            whiteBalance: still.whiteBalance.join('/'),
+            setByAnalyst: adjusted.join(',') || null,
             attempts: attempts.length,
             qcVerdict: qc?.verdict ?? null,
           },

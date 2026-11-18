@@ -1286,5 +1286,21 @@ describeDb(
         response: { message: 'Add at least one plate image before submitting.' },
       });
     });
+
+    it('captures with the exposure, gain and white balance set on the Picture stage, and records them', async () => {
+      const a = (await call('analyst', 'POST', '/analyses', { name: 'Camera controls' })) as { id: string };
+      await expect(
+        call('analyst', 'POST', `/analyses/${a.id}/capture`, { illumination: 'WHITE', settings: { exposureUs: 5, gain: 40, whiteBalance: [9, 1, 1] } }),
+      ).rejects.toMatchObject({ status: 400, field: 'settings' });
+      const shot = (await call('analyst', 'POST', `/analyses/${a.id}/capture`, {
+        illumination: 'WHITE',
+        settings: { exposureUs: 30_000, gain: 2, whiteBalance: [1.5, 1, 1.4] },
+      })) as { camera: { exposureUs: number; gain: number; whiteBalance: number[]; settingsSetByAnalyst: string[]; attempts: unknown[] } };
+      expect(shot.camera).toMatchObject({ exposureUs: 30_000, gain: 2, whiteBalance: [1.5, 1, 1.4], settingsSetByAnalyst: ['exposure', 'gain', 'whiteBalance'] });
+      // An exposure the analyst chose is used as is: no automatic retakes.
+      expect(shot.camera.attempts).toHaveLength(1);
+      const [captured] = await audit.list({ action: 'TLC_IMAGE_CAPTURED' });
+      expect(captured.details).toMatchObject({ exposureUs: 30_000, gain: 2, whiteBalance: '1.5/1/1.4', setByAnalyst: 'exposure,gain,whiteBalance' });
+    });
   },
 );
