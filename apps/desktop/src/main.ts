@@ -95,7 +95,7 @@ async function bootService(win: BrowserWindow): Promise<boolean> {
   if (!settings) {
     await win.loadURL(
       shellPage(
-        'NxGen is not set up on this Mac',
+        'NxGen is not set up on this computer',
         `<p>The database settings were not found.</p><p>Expected: <code>${escapeHtml(path.join(userData, SERVICE_ENV_FILE))}</code></p>`,
         'fail',
       ),
@@ -143,7 +143,7 @@ async function createWindow(): Promise<void> {
   licenseResult = await waitForLicenseService(win);
   if (serviceStopped && licenseResult.kind === 'SERVICE_UNAVAILABLE') {
     await win.loadURL(
-      shellPage('NxGen could not start', `<p>The NxGen service stopped while starting. Check that this Mac can reach the database.</p><p>Details: <code>${escapeHtml(serviceLog)}</code></p>`, 'fail'),
+      shellPage('NxGen could not start', `<p>The NxGen service stopped while starting. Check that this computer can reach the database.</p><p>Details: <code>${escapeHtml(serviceLog)}</code></p>`, 'fail'),
     );
     if (SMOKE_TEST) app.quit();
     return;

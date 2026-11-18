@@ -7,8 +7,10 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json && electron .",
     "test": "jest",
-    "configure:mac": "node scripts/configure-mac.mjs",
-    "package:mac": "node scripts/package-mac.mjs"
+    "configure:mac": "node scripts/configure.mjs",
+    "configure:win": "node scripts/configure.mjs",
+    "package:mac": "node scripts/package.mjs mac",
+    "package:win": "node scripts/package.mjs win"
   },
   "devDependencies": {
     "electron": "^36.0.0",

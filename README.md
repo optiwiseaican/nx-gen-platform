@@ -81,3 +81,25 @@ npm run dev:server     # http://localhost:4000
 npm run dev:web        # http://localhost:3000
 npm run dev:desktop    # Electron window loading the web app
 ```
+
+## Desktop app (local builds)
+
+`npm run package:mac` (on a Mac) or `npm run package:win` (on the Windows PC) writes this computer's settings from
+`.env` and builds the app into `apps/desktop/release/`. Windows gets `NxGen-Setup-2.0.0.exe`, which installs for the
+current user with Start menu and desktop shortcuts. Build the Windows installer on the lab PC itself: it bundles
+`nxgen-camera.exe`, which `tools/camera-helper/build.ps1` builds there against IDS peak.
+
+Windows lab PC, one time:
+
+1. Install Node.js 22, Git, Python 3.10+ (tick "Add python.exe to PATH") and IDS peak; check the camera in IDS peak
+   Cockpit, then close Cockpit.
+2. `git clone …` and `npm install`. Copy the files git does not carry from the development Mac into the same places
+   (USB stick, not email: they hold the database password and private signing keys):
+   `.env`, `apps/server/config/database-ca.pem`, `apps/server/config/trusted-license-keys.dev.json`,
+   `tools/license-authority/keys/`, and the module packages in `dist-modules/` (e.g. `nxgen-tlc-1.2.1.nxmod`).
+3. `npm run build -w @crescent/shared -w @crescent/licensing`, then `npm run dev:license -w @crescent/server`; keep the
+   activation code it prints.
+4. `npm run package:win`, then run `apps\desktop\release\NxGen-Setup-2.0.0.exe`.
+5. Open NxGen and enter the activation code. Install the TLC module under **Modules → Choose .nxmod package** from
+   `dist-modules\`. The settings (`%APPDATA%\NxGen\nxgen.env`) use the real camera (`NXGEN_CAMERA=ids`) unless `.env`
+   sets `NXGEN_CAMERA`; the service log is `%APPDATA%\NxGen\logs\service.log`.

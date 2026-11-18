@@ -1,5 +1,6 @@
-// Writes this Mac's settings for the packaged app from the repository .env.
+// Writes this computer's settings for the packaged app from the repository .env.
 // They live outside the app so the database password is never inside it.
+// Usage: npm run configure:mac (macOS) or npm run configure:win (Windows).
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
@@ -12,7 +13,11 @@ if (!existsSync(envFile)) throw new Error(`Not found: ${envFile}`);
 const env = parseEnv(readFileSync(envFile, 'utf8'));
 if (!env.DATABASE_URL) throw new Error('.env has no DATABASE_URL');
 
-const target = join(homedir(), 'Library', 'Application Support', 'NxGen');
+// Electron's userData folder for the product "NxGen".
+const windows = process.platform === 'win32';
+const target = windows
+  ? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'NxGen')
+  : join(homedir(), 'Library', 'Application Support', 'NxGen');
 mkdirSync(target, { recursive: true, mode: 0o700 });
 const lines = [
   `DATABASE_URL=${JSON.stringify(env.DATABASE_URL)}`,
@@ -20,6 +25,10 @@ const lines = [
   // The same data folder as this checkout: it holds the licence binding and the installed modules.
   `NXGEN_DATA_DIR=${JSON.stringify(join(repo, 'apps', 'server', '.nxgen-data'))}`,
 ];
+// The lamp box camera: the real IDS camera on Windows unless .env says otherwise
+// (a local build runs in development mode, which would otherwise pick the simulator).
+const camera = env.NXGEN_CAMERA ?? (windows ? 'ids' : undefined);
+if (camera) lines.push(`NXGEN_CAMERA=${camera}`);
 const ca = join(repo, 'apps', 'server', 'config', 'database-ca.pem');
 if (existsSync(ca)) {
   const copy = join(target, 'database-ca.pem');
