@@ -61,7 +61,7 @@ import traceback
 import zlib
 
 PROTOCOL_VERSION = 2
-HELPER_VERSION = "1.1.0"
+HELPER_VERSION = "1.1.1"
 
 _out_lock = threading.Lock()
 
@@ -228,6 +228,9 @@ class SimCamera:
     def auto_camera(self, features, target):
         return None  # the simulator has no camera-side auto features: the host does it
 
+    def auto_afl(self, features, target):
+        return None
+
     def describe(self) -> dict:
         return {"serial": self.serial, "model": "Simulated U3-34L0XCP-C", "vendor": "NxGen simulator", "openable": True}
 
@@ -368,6 +371,8 @@ class IdsCamera:
         except Exception as e:  # noqa: BLE001
             raise CameraError(f"Camera {self.serial} could not be opened (is another program using it?): {e}")
         self.nm = self.device.RemoteDevice().NodeMaps()[0]
+        # Let IDS peak re-attach the camera after a USB hiccup (ids-peak-examples: reconnect).
+        self._try(lambda: self.device.ParentInterface().ParentSystem().NodeMaps()[0].FindNode("ReconnectEnable").SetValue(True))
         self._try(lambda: self._enum("UserSetSelector", "Default"))
         self._try(lambda: (self.nm.FindNode("UserSetLoad").Execute(), self.nm.FindNode("UserSetLoad").WaitUntilDone()))
         for node in ("ExposureAuto", "GainAuto", "BalanceWhiteAuto"):
@@ -417,7 +422,8 @@ class IdsCamera:
 
     # -- acquisition --
     def _start(self):
-        payload = self.nm.FindNode("PayloadSize").Value()
+        # The data stream knows the payload size on newer transport layers (ids-peak-examples).
+        payload = self.stream.PayloadSize() if self._try(lambda: self.stream.DefinesPayloadSize()) else self.nm.FindNode("PayloadSize").Value()
         for _ in range(max(3, self.stream.NumBuffersAnnouncedMinRequired())):
             self.stream.QueueBuffer(self.stream.AllocAndAnnounceBuffer(payload))
         self.nm.FindNode("TLParamsLocked").SetValue(1)
@@ -438,6 +444,9 @@ class IdsCamera:
         key = (round(float(exposure_us), 1), round(float(gain), 3))
         if key == self.applied:
             return
+        # A camera-side auto feature left on makes these nodes read-only (ids-peak-examples): turn it off.
+        if not self._writable("ExposureTime"):
+            self._try(lambda: self._enum("ExposureAuto", "Off"))
         exposure = self._float("ExposureTime", exposure_us)
         # Long exposures need a lower frame rate; keep it just below 1 / exposure (and under the
         # frame rate limit set through `apply`, if any).
@@ -445,18 +454,38 @@ class IdsCamera:
         if self.frame_rate_limit:
             wanted = min(wanted, float(self.frame_rate_limit))
         self._try(lambda: self._float("AcquisitionFrameRate", min(self.nm.FindNode("AcquisitionFrameRate").Maximum(), wanted)))
-        self._try(lambda: self._enum("GainSelector", "AnalogAll"))
-        self._try(lambda: self._float("Gain", gain))
+        if self._gain_select("analog"):
+            if not self._writable("Gain"):
+                self._try(lambda: self._enum("GainAuto", "Off"))
+            self._try(lambda: self._float("Gain", gain))
         self.applied = key
         # Frames already in flight were exposed with the old settings: drop them.
         for _ in range(2):
             self._raw(timeout_ms=int(exposure / 1000.0) * 3 + 2000)
 
     # -- advanced parameters and auto features --
+    def _gain_select(self, kind: str) -> bool:
+        """
+        Selects the camera's gain to address, as IDS's examples do: the first entry the camera has
+        among the preferred ones ('analog' -> AnalogAll, All; 'digital' -> DigitalAll; or a colour ->
+        DigitalRed, AnalogRed, Red). False when the camera has none.
+        """
+        wanted = {"analog": ["AnalogAll", "All"], "digital": ["DigitalAll"]}.get(kind) or [f"Digital{kind}", f"Analog{kind}", kind]
+        have = self._entries("GainSelector")
+        for e in wanted:
+            if e in have:
+                return self._try(lambda e=e: self._enum("GainSelector", e)) is not None
+        return False
+
+    def _writable(self, name) -> bool:
+        return bool(self._try(lambda: self.nm.FindNode(name).IsWriteable()))
+
     def _entries(self, name):
         """Symbolic entries of an enumeration node the camera offers, [] when it has none."""
         try:
             node = self.nm.FindNode(name)
+            if hasattr(node, "AvailableEntries"):
+                return [e.SymbolicValue() for e in node.AvailableEntries()]
             out = []
             for e in node.Entries():
                 try:
@@ -485,9 +514,8 @@ class IdsCamera:
             on_camera.append("whiteBalance")
         params = {}
         params["frameRate"] = self._range("AcquisitionFrameRate")
-        self._try(lambda: self._enum("GainSelector", "DigitalAll"))
-        params["digitalGain"] = self._range("Gain") if "DigitalAll" in self._entries("GainSelector") else None
-        self._try(lambda: self._enum("GainSelector", "AnalogAll"))
+        params["digitalGain"] = self._range("Gain") if self._gain_select("digital") else None
+        self._gain_select("analog")
         entries = self._entries("BlackLevelAuto")
         params["blackLevelAuto"] = entries or None
         params["blackLevel"] = self._range("BlackLevel")
@@ -506,7 +534,8 @@ class IdsCamera:
                     self.applied = None  # re-apply the frame rate with the next frame
                     ok = self._range("AcquisitionFrameRate") is not None
                 elif key == "digitalGain":
-                    ok = self._try(lambda: (self._enum("GainSelector", "DigitalAll"), self._float("Gain", float(value)), self._enum("GainSelector", "AnalogAll"))) is not None
+                    ok = self._gain_select("digital") and self._try(lambda: self._float("Gain", float(value))) is not None
+                    self._gain_select("analog")
                 elif key == "blackLevelAuto":
                     ok = self._try(lambda: self._enum("BlackLevelAuto", "Continuous" if str(value) in ("Continuous", "On", "1", "true", "True") else "Off")) is not None
                 elif key == "blackLevel":
@@ -580,20 +609,101 @@ class IdsCamera:
             if wanted["exposure"]:
                 out["exposureUs"] = float(self._value("ExposureTime"))
             if wanted["gain"]:
-                self._try(lambda: self._enum("GainSelector", "AnalogAll"))
+                self._gain_select("analog")
                 out["gain"] = float(self._value("Gain"))
             if wanted["whiteBalance"]:
                 # Read the camera's balance ratios, then put them back to 1: white balance stays a
                 # host operation so it is exact and recorded with every image.
-                ratios = []
-                for ch in ("Red", "Green", "Blue"):
-                    self._enum("BalanceRatioSelector", ch)
-                    ratios.append(float(self._value("BalanceRatio", 1.0)))
-                    self._try(lambda: self._float("BalanceRatio", 1.0))
-                g = ratios[1] or 1.0
-                out["whiteBalance"] = [round(ratios[0] / g, 3), 1.0, round(ratios[2] / g, 3)]
+                out["whiteBalance"] = self._take_camera_white_balance()
             self.applied = None  # exposure / gain changed under us: configure() re-applies next time
             return out
+
+    def _take_camera_white_balance(self):
+        """
+        The white balance the camera arrived at, as host factors (green = 1), and the camera's own
+        colour gains put back to 1 so white balance stays a recorded host operation. uEye+ cameras
+        keep it in per-colour gains (GainSelector DigitalRed/…; ids-peak-examples "camera color
+        gains"), others in BalanceRatio.
+        """
+        ratios = []
+        if "BalanceRatioSelector" in [n for n in ("BalanceRatioSelector",) if self._try(lambda: self.nm.FindNode("BalanceRatioSelector")) is not None]:
+            for ch in ("Red", "Green", "Blue"):
+                self._try(lambda ch=ch: self._enum("BalanceRatioSelector", ch))
+                ratios.append(float(self._value("BalanceRatio", 1.0)))
+                self._try(lambda: self._float("BalanceRatio", 1.0))
+        else:
+            for ch in ("Red", "Green", "Blue"):
+                if self._gain_select(ch):
+                    ratios.append(float(self._value("Gain", 1.0)))
+                    self._try(lambda: self._float("Gain", 1.0))
+                else:
+                    ratios.append(1.0)
+            self._gain_select("analog")
+        g = ratios[1] or 1.0
+        return [round(ratios[0] / g, 3), 1.0, round(ratios[2] / g, 3)]
+
+    def auto_afl(self, features, target):
+        """
+        IDS's own host auto features (ids_peak_afl 2 + the ids_peak_icv pipeline, as in
+        ids-peak-examples/python/gui_kivy_pipeline): auto brightness (exposure / gain policy) and
+        auto white balance fed with live frames for a moment, then switched off; the camera's
+        exposure / gain and the pipeline's colour gains are the result. None when the libraries are
+        missing or anything fails (the helper's own algorithm then runs).
+        """
+        try:
+            from ids_peak_afl.pipeline import BasicAutoFeatures  # type: ignore
+            from ids_peak_afl.pipeline.modules import ControllerMode  # type: ignore
+            from ids_peak_afl.pipeline.modules.controllers.basic_auto_brightness import AutoBrightnessPolicy  # type: ignore
+            from ids_peak_icv.pipeline import DefaultPipeline  # type: ignore
+        except Exception:  # noqa: BLE001
+            return None
+        want_b = "exposure" in features or "gain" in features
+        want_wb = "whiteBalance" in features
+        try:
+            with self.lock:
+                afl = BasicAutoFeatures(self.device)
+                pipe = DefaultPipeline()
+                pipe.autofeature_module = afl
+                if want_wb and not getattr(afl, "has_auto_white_balance", True):
+                    want_wb = False
+                if not want_b and not want_wb:
+                    return None
+                if want_b:
+                    both = "exposure" in features and "gain" in features
+                    afl.auto_brightness.policy = AutoBrightnessPolicy.EXPOSURE_AND_GAIN if both else (AutoBrightnessPolicy.GAIN_ONLY if "gain" in features else AutoBrightnessPolicy.EXPOSURE_ONLY)
+                    self._try(lambda: setattr(afl.auto_brightness, "target", float(target) * 255.0))
+                    afl.auto_brightness.mode = ControllerMode.CONTINUOUS
+                if want_wb:
+                    afl.auto_white_balance.mode = ControllerMode.CONTINUOUS
+                try:
+                    deadline = time.monotonic() + 4.0
+                    frames = 0
+                    while time.monotonic() < deadline and frames < 40:
+                        buf = self.stream.WaitForFinishedBuffer(3000)
+                        try:
+                            pipe.process(buf.ToImageView())
+                        finally:
+                            self.stream.QueueBuffer(buf)
+                        frames += 1
+                finally:
+                    if want_b:
+                        afl.auto_brightness.mode = ControllerMode.OFF
+                    if want_wb:
+                        afl.auto_white_balance.mode = ControllerMode.OFF
+                out = {"by": "ids-afl"}
+                if "exposure" in features:
+                    out["exposureUs"] = float(self._value("ExposureTime"))
+                if "gain" in features:
+                    self._gain_select("analog")
+                    out["gain"] = float(self._value("Gain"))
+                if want_wb:
+                    g = float(pipe.gain.green) or 1.0
+                    out["whiteBalance"] = [round(float(pipe.gain.red) / g, 3), 1.0, round(float(pipe.gain.blue) / g, 3)]
+                self.applied = None
+                return out
+        except Exception as e:  # noqa: BLE001
+            emit({"event": "log", "message": f"Camera {self.serial}: IDS peak AFL auto features not used ({e})"})
+            return None
 
     def _raw(self, timeout_ms: int):
         np = self.np
@@ -605,7 +715,7 @@ class IdsCamera:
             img = self.ext.BufferToImage(buf)
             w, h = img.Width(), img.Height()
             if self.packing:
-                return self._unpacked(img, w, h)
+                return self._unpacked(buf, img, w, h)
             data = np.array(img.get_numpy_1D(), copy=True)
         finally:
             self.stream.QueueBuffer(buf)
@@ -613,9 +723,22 @@ class IdsCamera:
             return data.view("<u2")[: w * h].reshape(h, w)
         return data[: w * h].reshape(h, w)
 
-    def _unpacked(self, img, w, h):
-        """A packed IDS frame as h x w uint16: IDS peak IPL converts it; numpy unpacks it if that fails."""
+    def _unpacked(self, buf, img, w, h):
+        """A packed IDS frame as h x w uint16: IDS peak IPL converts it, else IDS peak ICV, else numpy unpacks it."""
         np = self.np
+        try:
+            from ids_peak_icv import Image  # type: ignore
+            from ids_peak_common import PixelFormat  # type: ignore
+
+            target = getattr(PixelFormat, f"BAYER_{self.pattern}_{self.bits}")
+            conv = Image.create_from_image_view(buf.ToImageView()).convert_pixel_format(target)
+            data = np.asarray(conv.to_numpy_array()).reshape(-1).view("<u2")[: w * h] if np.asarray(conv.to_numpy_array()).dtype != np.uint16 else np.asarray(conv.to_numpy_array()).reshape(-1)[: w * h]
+            if self.unpacked_by != "icv":
+                self.unpacked_by = "icv"
+                emit({"event": "log", "message": f"Camera {self.serial}: {self.pixel_format} converted by IDS peak ICV"})
+            return np.array(data, copy=True).reshape(h, w)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from ids_peak_ipl import ids_peak_ipl as ipl  # type: ignore
 
@@ -901,14 +1024,14 @@ class Helper:
         e_min, e_max = limits["exposureUs"] or [31.0, 2_000_000.0]
         g_min, g_max = limits["gain"] or [1.0, 16.0]
         result = {"exposureUs": float(exposure_us), "gain": float(gain), "whiteBalance": list(wb), "by": "host"}
-        done = cam.auto_camera(features, target)
+        done = cam.auto_camera(features, target) or cam.auto_afl(features, target)
         remaining = list(features)
         if done:
             for k in ("exposureUs", "gain", "whiteBalance"):
                 if k in done:
                     result[k] = done[k]
             remaining = [f for f in features if (f == "exposure" and "exposureUs" not in done) or (f == "gain" and "gain" not in done) or (f == "whiteBalance" and "whiteBalance" not in done)]
-            result["by"] = "camera" if not remaining else "camera+host"
+            result["by"] = done["by"] if not remaining else f"{done['by']}+host"
         stats = None
         if "exposure" in remaining or "gain" in remaining:
             e, g = result["exposureUs"], result["gain"]

@@ -7,5 +7,5 @@ cd "$(dirname "$0")"
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt pyinstaller
-.venv/bin/pyinstaller --onefile --name nxgen-camera --add-data "sim:sim" --collect-all ids_peak --collect-all ids_peak_ipl nxgen_camera.py
+.venv/bin/pyinstaller --onefile --name nxgen-camera --add-data "sim:sim" --collect-all ids_peak --collect-all ids_peak_ipl --collect-all ids_peak_common --collect-all ids_peak_icv --collect-all ids_peak_afl nxgen_camera.py
 echo "Built dist/nxgen-camera. Check it with: echo '{\"id\":1,\"cmd\":\"list\"}' | dist/nxgen-camera"

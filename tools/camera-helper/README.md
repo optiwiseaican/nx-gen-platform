@@ -43,6 +43,12 @@ quality gate behave as with the real camera.
    on the camera box, e.g. 4110027723) so captures are tied to it.
 5. Close IDS peak Cockpit before capturing: only one program can open the camera.
 
+## Reference
+
+The SDK calls follow IDS's own Python examples, https://github.com/ids-imaging/ids-peak-examples
+(`python/gui_kivy_pipeline/camera.py` for acquisition, gain selectors and reconnect, `main.py` for the
+AFL host auto features, `record_video` / `node_polling` for writability and auto nodes).
+
 ## Image processing
 
 - Pixel format: the best raw Bayer format the camera offers (12 → 10 → 8 bit). IDS packed formats are

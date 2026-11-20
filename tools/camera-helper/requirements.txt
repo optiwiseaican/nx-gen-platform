@@ -1,6 +1,9 @@
-# Real cameras (Windows / Linux, with the IDS peak SDK installed first).
-# The simulator (--simulate) needs none of these.
-ids_peak>=1.17
-ids_peak_ipl>=1.17
+# Real cameras (Windows / Linux, with the IDS peak SDK installed first). Versions as in IDS's own
+# examples (github.com/ids-imaging/ids-peak-examples, python/). The simulator (--simulate) needs none.
+ids_peak>=1.13
+ids_peak_ipl>=1.17.1
+ids_peak_common>=2.0.0
+ids_peak_icv>=1.4.0     # packed-format conversion (second path) and the AFL image pipeline
+ids_peak_afl>=2.0.0     # IDS's host auto features (auto brightness / white balance), optional path
 numpy>=1.24
 Pillow>=10.0   # optional: JPEG live preview (PNG is used without it)
