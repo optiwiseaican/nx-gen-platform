@@ -250,6 +250,8 @@ export interface ModuleContext {
     info(serial: string | null): Promise<CameraInfo>;
     /** One still, audited as CAMERA_CAPTURE by the core. Camera problems throw an Error named CameraError. */
     still(principal: ModulePrincipal, request: CameraStillRequest, origin: RequestOrigin): Promise<CameraStill>;
+    /** The camera's auto features run once (on the camera where it has them, else on the host). */
+    auto(request: CameraAutoRequest): Promise<CameraAutoResult>;
   };
 }
 
@@ -281,7 +283,55 @@ export interface CameraInfo extends Omit<CameraDescriptor, 'simulated'> {
   temperatureC: number | null;
   sensor: { width: number; height: number; pixelFormat: string; bits: number; shutter: string };
   limits: { exposureUs: [number, number] | null; gain: [number, number] | null };
+  /** What this camera can do beyond exposure / gain / white balance (IDS peak nodes it offers). */
+  capabilities?: CameraCapabilities;
   simulated: boolean;
+}
+
+export type CameraAutoFeature = 'exposure' | 'gain' | 'whiteBalance';
+
+export interface CameraCapabilities {
+  /** Auto features the camera runs itself ("Once"); the rest are done on the host from raw frames. */
+  autoOnCamera: CameraAutoFeature[];
+  autoOnHost: CameraAutoFeature[];
+  /** Advanced parameters with their range (null = the camera has no such node). */
+  parameters: {
+    frameRate: [number, number] | null;
+    digitalGain: [number, number] | null;
+    blackLevelAuto: string[] | null;
+    blackLevel: [number, number] | null;
+    throughputLimit: [number, number] | null;
+  };
+}
+
+/** Advanced camera parameters (IDS peak), applied before a preview or a still. */
+export interface CameraParameters {
+  /** Upper limit for the acquisition frame rate (fps); the exposure still caps it. */
+  frameRate?: number;
+  digitalGain?: number;
+  blackLevelAuto?: 'Off' | 'Continuous';
+  blackLevel?: number;
+  throughputLimit?: number;
+}
+
+export interface CameraAutoRequest {
+  serial?: string;
+  features: CameraAutoFeature[];
+  /** Starting point (and the values kept for features not requested). */
+  exposureUs: number;
+  gain?: number;
+  whiteBalance?: [number, number, number];
+  /** Mean brightness aimed at, 0–1 of full scale (default 0.45). */
+  target?: number;
+}
+
+export interface CameraAutoResult {
+  serial: string;
+  exposureUs: number;
+  gain: number;
+  whiteBalance: [number, number, number];
+  by: 'camera' | 'host' | 'camera+host';
+  stats: { r: number; g: number; b: number; luma: number; saturated: number };
 }
 
 export interface CameraStillRequest {
@@ -291,6 +341,8 @@ export interface CameraStillRequest {
   gain?: number;
   /** Red, green, blue factors applied on the host (exact and recorded). */
   whiteBalance?: [number, number, number];
+  /** Advanced parameters applied on the camera before the still (recorded with it). */
+  parameters?: CameraParameters;
   /** Recorded in the audit trail, e.g. "TLC-0003 plate image". */
   purpose?: string;
 }

@@ -4,6 +4,7 @@ import { evaluate, Evaluation, RfWindow, TrackInput, validatePlate } from "../sh
 import { Badge, CONCLUSION, Callout, HttpError, ILLUMINATION_LABEL, Tone, api, card, field, fmtDate, mod, panelTitle, primary, request, secondary, send, session, strong } from "./lib";
 import { EvaluationFull, EvaluationSnapshot, EvaluationSummary, ImageMeta, PlateMeta, RfTable } from "./plate";
 import { CropStage, EvaluationStage, PictureStage, PlateStage, Stage, StageBar, useWorkbench } from "./stages";
+import { CameraSettingsPage } from "./settings";
 import logo from "./tlc-logo.png";
 import "./styles.css";
 
@@ -178,7 +179,9 @@ const Svg = ({ d, className = "h-6 w-6" }: { d: string; className?: string }) =>
 );
 
 /** The tablet's projects screen sidebar: logo and name, navigation, the account box at the bottom. */
-function Sidebar({ web, principal, active }: { web: string; principal: Principal; active: "ALL" | "NEW" | "INSTRUMENT" }) {
+type ActivePage = "ALL" | "NEW" | "INSTRUMENT" | "SETTINGS";
+
+function Sidebar({ web, principal, active }: { web: string; principal: Principal; active: ActivePage }) {
   const item = (href: string, label: string, d: string, selected = false, enabled = true) => (
     <a
       href={enabled ? href : undefined}
@@ -206,6 +209,7 @@ function Sidebar({ web, principal, active }: { web: string; principal: Principal
         {item(`${web}/tasks/`, "My Tasks", ICON.tasks)}
         {item(`${web}/methods/`, "Methods", ICON.rule)}
         {item(`${web}/devices/`, "Instruments", ICON.instrument, active === "INSTRUMENT")}
+        {item("/modules/tlc/?settings=camera", "Camera settings", ICON.settings, active === "SETTINGS")}
         {can("users.manage") && item(`${web}/users/`, "Users & Roles", ICON.group)}
         {can("audit.view") && item(`${web}/audit/`, "Audit Trail", ICON.history)}
         {item(`${web}/settings/`, "Settings", ICON.settings, false, can("settings.manage") || can("modules.manage"))}
@@ -235,7 +239,7 @@ function SessionLine() {
   return <span className={`block text-[13px] ${warning ? "font-semibold text-accent" : "text-muted"}`}>Session ends in {clock(left)}</span>;
 }
 
-function Shell({ web, principal, active, children }: { web: string; principal: Principal; active: "ALL" | "NEW" | "INSTRUMENT"; children: React.ReactNode }) {
+function Shell({ web, principal, active, children }: { web: string; principal: Principal; active: ActivePage; children: React.ReactNode }) {
   return (
     <div className="min-h-screen lg:flex">
       <Sidebar web={web} principal={principal} active={active} />
@@ -1307,10 +1311,17 @@ function App() {
   const q = new URLSearchParams(location.search);
   const analysis = q.get("analysis");
   const device = q.get("device");
+  const settings = q.get("settings");
   if (analysis) return <AnalysisPage id={analysis} principal={boot.principal} web={boot.web} />;
   return (
-    <Shell web={boot.web} principal={boot.principal} active={q.get("new") ? "NEW" : device ? "INSTRUMENT" : "ALL"}>
-      {device ? <InstrumentCheck deviceId={device} web={boot.web} /> : <Home principal={boot.principal} web={boot.web} newOpen={q.get("new") === "1"} />}
+    <Shell web={boot.web} principal={boot.principal} active={settings ? "SETTINGS" : q.get("new") ? "NEW" : device ? "INSTRUMENT" : "ALL"}>
+      {settings ? (
+        <CameraSettingsPage principal={boot.principal} />
+      ) : device ? (
+        <InstrumentCheck deviceId={device} web={boot.web} />
+      ) : (
+        <Home principal={boot.principal} web={boot.web} newOpen={q.get("new") === "1"} />
+      )}
     </Shell>
   );
 }

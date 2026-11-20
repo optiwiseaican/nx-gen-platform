@@ -1302,5 +1302,53 @@ describeDb(
       const [captured] = await audit.list({ action: 'TLC_IMAGE_CAPTURED' });
       expect(captured.details).toMatchObject({ exposureUs: 30_000, gain: 2, whiteBalance: '1.5/1/1.4', setByAnalyst: 'exposure,gain,whiteBalance' });
     });
+
+    it('camera settings (Advanced settings): saved per camera with a reason, used as the starting point of a capture', async () => {
+      const before = (await call('analyst', 'GET', '/camera-settings')) as { settings: unknown[]; builtIn: { exposureUs: number } };
+      expect(before.settings).toEqual([]);
+      expect(before.builtIn.exposureUs).toBe(20000);
+      // Needs the permission and a reason; values are validated.
+      await expect(call('analyst', 'PUT', '/camera-settings/*', { exposureUs: 50_000, reason: 'Lamp box LB-2 values' })).rejects.toMatchObject({ status: 403 });
+      await expect(call('manager', 'PUT', '/camera-settings/*', { exposureUs: 50_000 })).rejects.toMatchObject({ status: 400, field: 'reason' });
+      await expect(call('manager', 'PUT', '/camera-settings/*', { exposureUs: 5, reason: 'Lamp box LB-2 values' })).rejects.toMatchObject({ status: 400 });
+      const saved = (await call('manager', 'PUT', '/camera-settings/*', {
+        exposureUs: 50_000,
+        gain: 1.5,
+        whiteBalance: [1.4, 1, 1.2],
+        digitalGain: 1.2,
+        blackLevelAuto: false,
+        blackLevel: 8,
+        autoTarget: 0.5,
+        note: 'Lamp box LB-2',
+        reason: 'Lamp box LB-2 values measured under white light',
+      })) as { exposureUs: number; blackLevelAuto: boolean };
+      expect(saved).toMatchObject({ cameraSerial: '*', exposureUs: 50_000, gain: 1.5, whiteBalance: [1.4, 1, 1.2], digitalGain: 1.2, blackLevelAuto: false, blackLevel: 8, autoTarget: 0.5 });
+      const [changed] = await audit.list({ action: 'TLC_CAMERA_SETTINGS_CHANGED' });
+      expect(changed.details).toMatchObject({ camera: '*', exposureUs: 50_000, blackLevel: 8 });
+      expect(changed.reason).toBe('Lamp box LB-2 values measured under white light');
+
+      // The Picture stage starts from them (no method), with the camera's parameters and capabilities.
+      const a = (await call('analyst', 'POST', '/analyses', { name: 'Defaults' })) as { id: string };
+      const overview = (await call('analyst', 'GET', '/camera', undefined, { analysis: a.id })) as {
+        settings: { exposureUs: number; gain: number; whiteBalance: number[]; fixed: boolean };
+        defaults: { cameraSerial: string };
+        parameters: Record<string, unknown>;
+        capabilities: { autoOnHost: string[] } | null;
+      };
+      expect(overview.settings).toMatchObject({ exposureUs: 50_000, gain: 1.5, whiteBalance: [1.4, 1, 1.2], fixed: false });
+      expect(overview.defaults.cameraSerial).toBe('*');
+      expect(overview.parameters).toEqual({ digitalGain: 1.2, blackLevelAuto: 'Off', blackLevel: 8 });
+      expect(overview.capabilities?.autoOnHost).toEqual(['exposure', 'gain', 'whiteBalance']);
+      // A capture without analyst changes uses them and records the parameters it applied.
+      const shot = (await call('analyst', 'POST', `/analyses/${a.id}/capture`, { illumination: 'WHITE' })) as {
+        camera: { gain: number; whiteBalance: number[]; parameters: Record<string, unknown>; settingsSetByAnalyst: string[] };
+      };
+      expect(shot.camera).toMatchObject({ gain: 1.5, whiteBalance: [1.4, 1, 1.2], parameters: { digitalGain: 1.2, blackLevelAuto: 'Off', blackLevel: 8 }, settingsSetByAnalyst: [] });
+      // The analyst's advanced override for one capture wins over the saved parameters.
+      const shot2 = (await call('analyst', 'POST', `/analyses/${a.id}/capture`, { illumination: 'UV254', parameters: { blackLevelAuto: 'Continuous', digitalGain: '' } })) as {
+        camera: { parameters: Record<string, unknown> };
+      };
+      expect(shot2.camera.parameters).toEqual({ blackLevelAuto: 'Continuous' });
+    });
   },
 );

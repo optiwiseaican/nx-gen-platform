@@ -33,7 +33,7 @@ import {
 } from "../engine";
 import type { Channel, GrayImage, QcCheck } from "../engine";
 import type { EvaluationInput, ImageQc } from "../api/pipeline";
-import { CAMERA_LIMITS, Evaluation, FrameStats, ILLUMINATIONS, Illumination, RfWindow, TrackRole, autoExposureUs, autoWhiteBalance, evaluateRf } from "../shared/tlc";
+import { CAMERA_LIMITS, CameraDefaults, CameraParametersInput, Evaluation, FrameStats, ILLUMINATIONS, Illumination, RfWindow, TrackRole, autoExposureUs, autoWhiteBalance, evaluateRf } from "../shared/tlc";
 import { Badge, CONCLUSION, Callout, ILLUMINATION_LABEL, Tone, card, field, fmtDate, mod, optionBox, panelLabel, panelTitle, primary, request, secondary, send, small, strong, toolToggle } from "./lib";
 import { EvaluationFull, FitBox, ImageMeta, PlateMeta, RfTable, clamp, fmt, loadPixels, svgPoint } from "./plate";
 import { CHART_MODES, ChartMode, ChartTool, DensitogramPlot, FULL_VIEW, PlotBand, PlotColors, PlotTrack, TRACK_PALETTE, Viewport, normalizeToMax } from "./densitogram";
@@ -158,17 +158,29 @@ export function PictureStage({
     setAdjusted(Object.keys(mine).length > 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cam?.serial, camSettings?.exposureUs, camSettings?.gain, camSettings?.whiteBalance.join("/")]);
-  // The live view restarts with new settings, so follow the controls after a short pause.
-  const [previewValues, setPreviewValues] = useState<CameraValues | null>(null);
+  // Advanced parameters (digital gain, black level, frame rate): the saved defaults, changed here
+  // for this session; applied to the live view and recorded with the capture.
+  const [parameters, setParameters] = useState<CameraParametersInput>({});
   useEffect(() => {
-    const t = setTimeout(() => setPreviewValues(values), previewValues ? 450 : 0);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values]);
+    if (camera?.parameters) setParameters(camera.parameters);
+  }, [camera?.parameters]);
+  // The running live view takes new settings in place (PUT /api/cameras/<serial>/preview): no
+  // reconnection. Changes are sent a moment after the last one.
   const liveImg = useRef<HTMLImageElement | null>(null);
+  const liveSerial = useRef<string | null>(null);
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function pushLive(v: CameraValues | null, p: CameraParametersInput) {
+    const serial = liveSerial.current;
+    if (!serial || !v) return;
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(() => {
+      void request(`/api/cameras/${encodeURIComponent(serial)}/preview`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...v, parameters: p }) }).catch((e: Error) => setError(e.message));
+    }, 150);
+  }
   function change(v: CameraValues) {
     setValues(v);
     setAdjusted(true);
+    pushLive(v, parameters);
     if (cam)
       try {
         localStorage.setItem(CAMERA_STORE(cam.serial), JSON.stringify(v));
@@ -176,11 +188,40 @@ export function PictureStage({
         /* storage unavailable: the values still apply to this session */
       }
   }
-  function autoAdjust(kind: "exposure" | "whiteBalance") {
-    const stats = frameStats(liveImg.current);
-    if (!values || !stats) return setError("No live image yet. Wait for the live view, then try again.");
+  function changeParameters(p: CameraParametersInput) {
+    setParameters(p);
+    pushLive(values, p);
+  }
+  const [autoBusy, setAutoBusy] = useState(false);
+  /** Exposure or white balance found once: on the camera where it can, else on the host from raw frames. */
+  async function autoAdjust(kind: "exposure" | "whiteBalance") {
+    if (!cam || !values) return;
+    setAutoBusy(true);
     setError(null);
-    change(kind === "exposure" ? { ...values, exposureUs: autoExposureUs(stats, values.exposureUs) } : { ...values, whiteBalance: autoWhiteBalance(stats, values.whiteBalance) });
+    try {
+      const r = await request(`/api/cameras/${encodeURIComponent(cam.serial)}/auto`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ features: [kind], ...values, target: camera?.defaults?.autoTarget ?? 0.45 }),
+      });
+      const out = (await r.json()) as { exposureUs: number; gain: number; whiteBalance: [number, number, number]; by: string };
+      const v: CameraValues = kind === "exposure" ? { ...values, exposureUs: Math.round(out.exposureUs), gain: out.gain } : { ...values, whiteBalance: out.whiteBalance };
+      setValues(v);
+      setAdjusted(true);
+      if (cam)
+        try {
+          localStorage.setItem(CAMERA_STORE(cam.serial), JSON.stringify(v));
+        } catch {
+          /* ignore */
+        }
+    } catch (e) {
+      // The server could not do it: fall back to the live image in the browser.
+      const stats = frameStats(liveImg.current);
+      if (!stats) return setError((e as Error).message);
+      change(kind === "exposure" ? { ...values, exposureUs: autoExposureUs(stats, values.exposureUs) } : { ...values, whiteBalance: autoWhiteBalance(stats, values.whiteBalance) });
+    } finally {
+      setAutoBusy(false);
+    }
   }
   function resetCamera() {
     if (!camSettings) return;
@@ -199,7 +240,7 @@ export function PictureStage({
     setCapturing(true);
     setError(null);
     try {
-      const out = await mod<{ id: string; sha256: string; qc: ImageQc | null; camera: { exposureUs: number; attempts: unknown[] } }>(`/analyses/${analysisId}/capture`, send({ illumination, serial: cam.serial, settings: adjusted && values ? values : undefined }));
+      const out = await mod<{ id: string; sha256: string; qc: ImageQc | null; camera: { exposureUs: number; attempts: unknown[] } }>(`/analyses/${analysisId}/capture`, send({ illumination, serial: cam.serial, settings: adjusted && values ? values : undefined, parameters }));
       setLive(false);
       const retakes = out.camera.attempts.length - 1;
       await onUploaded(
@@ -237,15 +278,21 @@ export function PictureStage({
   return (
     <div className={STAGE_GRID}>
       <div className="relative min-h-[18rem] overflow-hidden rounded-2xl bg-black lg:min-h-0">
-        {live && cam && (previewValues ?? camSettings) ? (
+        {live && cam && (values ?? camSettings) ? (
           <LivePreview
             serial={cam.serial}
             simulated={cam.simulated}
-            exposureUs={(previewValues ?? camSettings)!.exposureUs}
-            gain={(previewValues ?? camSettings)!.gain}
-            whiteBalance={(previewValues ?? camSettings)!.whiteBalance}
+            exposureUs={(values ?? camSettings)!.exposureUs}
+            gain={(values ?? camSettings)!.gain}
+            whiteBalance={(values ?? camSettings)!.whiteBalance}
             illumination={illumination}
             imgRef={liveImg}
+            onOpen={(serial) => {
+              liveSerial.current = serial;
+              // The stream opened with the values of that moment; send the current ones in case they moved.
+              pushLive(values, parameters);
+            }}
+            onClose={() => (liveSerial.current = null)}
           />
         ) : image ? (
           <>
@@ -341,10 +388,14 @@ export function PictureStage({
                       values={values}
                       locked={locked}
                       live={live}
+                      busy={autoBusy}
                       onChange={change}
-                      onAutoExposure={() => autoAdjust("exposure")}
-                      onAutoWhiteBalance={() => autoAdjust("whiteBalance")}
+                      onAutoExposure={() => void autoAdjust("exposure")}
+                      onAutoWhiteBalance={() => void autoAdjust("whiteBalance")}
                       onReset={resetCamera}
+                      parameters={parameters}
+                      capabilities={camera?.capabilities ?? null}
+                      onParameters={changeParameters}
                     />
                   )}
                   {camera.problems.length > 0 && <Callout tone="fail">{camera.problems.join(" ")}</Callout>}
@@ -447,6 +498,14 @@ interface CameraOverview {
   } | null;
   problems: string[];
   preferredSerial: string | null;
+  /** The saved Advanced settings for the preferred camera, and what it can do. */
+  defaults?: CameraDefaults;
+  parameters?: CameraParametersInput;
+  capabilities?: {
+    autoOnCamera: ("exposure" | "gain" | "whiteBalance")[];
+    autoOnHost: ("exposure" | "gain" | "whiteBalance")[];
+    parameters: { frameRate: [number, number] | null; digitalGain: [number, number] | null; blackLevelAuto: string[] | null; blackLevel: [number, number] | null; throughputLimit: [number, number] | null };
+  } | null;
 }
 
 interface CameraValues {
@@ -507,19 +566,30 @@ function CameraControls({
   values,
   locked,
   live,
+  busy,
   onChange,
   onAutoExposure,
   onAutoWhiteBalance,
   onReset,
+  parameters,
+  capabilities,
+  onParameters,
 }: {
   values: CameraValues;
   locked: { exposure: boolean; gain: boolean; whiteBalance: boolean };
   live: boolean;
+  busy?: boolean;
   onChange: (v: CameraValues) => void;
   onAutoExposure: () => void;
   onAutoWhiteBalance: () => void;
   onReset: () => void;
+  parameters: CameraParametersInput;
+  capabilities: CameraOverview["capabilities"];
+  onParameters: (p: CameraParametersInput) => void;
 }) {
+  const [advanced, setAdvanced] = useState(false);
+  const caps = capabilities?.parameters;
+  const autoWhere = (f: "exposure" | "whiteBalance") => (capabilities?.autoOnCamera.includes(f) ? "on the camera" : "on the host");
   const ms = values.exposureUs / 1000;
   // Exposure on a log slider: 0.1 ms – 2 s.
   const toSlider = (v: number) => Math.round(Math.log10(Math.max(0.1, v)) * 100);
@@ -587,17 +657,77 @@ function CameraControls({
         </div>
       </fieldset>
       <div className="grid grid-cols-3 gap-1.5">
-        <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onAutoExposure} disabled={!live || locked.exposure} title={live ? "Set the exposure from the live image" : "Start the live view first"}>
-          Auto exposure
+        <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onAutoExposure} disabled={busy || locked.exposure} title={`Finds the exposure once (${autoWhere("exposure")})`}>
+          {busy ? "…" : "Auto exposure"}
         </button>
-        <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onAutoWhiteBalance} disabled={!live || locked.whiteBalance} title={live ? "Point the camera at the plate or a white card under white light" : "Start the live view first"}>
-          Auto white balance
+        <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onAutoWhiteBalance} disabled={busy || locked.whiteBalance} title={`Finds the white balance once (${autoWhere("whiteBalance")}); use a white card under white light`}>
+          {busy ? "…" : "Auto white balance"}
         </button>
         <button type="button" className={`${small} h-auto min-h-9 px-1.5 py-1 text-xs leading-tight`} onClick={onReset}>
           Reset
         </button>
       </div>
-      {!live && <p className="text-[11px] text-muted">Start the live view to see the effect and to use the automatic buttons.</p>}
+      {live ? (
+        <p className="text-[11px] text-muted">Changes apply to the live image at once.</p>
+      ) : (
+        <p className="text-[11px] text-muted">Start the live view to see the effect of the settings.</p>
+      )}
+      <button type="button" className="text-xs font-semibold text-brand hover:underline" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
+        {advanced ? "Hide advanced" : "Advanced…"}
+      </button>
+      {advanced && (
+        <div className="space-y-2 border-t border-line pt-2">
+          <label className="block text-xs font-semibold">
+            Digital gain {caps && !caps.digitalGain && <span className="font-normal text-muted">· not on this camera</span>}
+            <input
+              type="number"
+              min={caps?.digitalGain?.[0] ?? 1}
+              max={caps?.digitalGain?.[1] ?? 8}
+              step={0.1}
+              value={parameters.digitalGain ?? ""}
+              placeholder="1"
+              disabled={!!caps && !caps.digitalGain}
+              onChange={(e) => onParameters({ ...parameters, digitalGain: e.target.value === "" ? undefined : Number(e.target.value) })}
+              className="mt-1 w-full rounded-md border border-line bg-white px-1.5 py-1 font-mono text-xs"
+            />
+          </label>
+          <div className="text-xs font-semibold">
+            Black level {caps && !caps.blackLevel && <span className="font-normal text-muted">· not on this camera</span>}
+            <div className="mt-1 flex items-center gap-2">
+              <label className="flex items-center gap-1 text-[11px] font-normal">
+                <input type="checkbox" checked={(parameters.blackLevelAuto ?? "Continuous") === "Continuous"} disabled={!!caps && !caps.blackLevelAuto} onChange={(e) => onParameters({ ...parameters, blackLevelAuto: e.target.checked ? "Continuous" : "Off", ...(e.target.checked ? { blackLevel: undefined } : {}) })} />
+                Automatic
+              </label>
+              <input
+                type="number"
+                min={caps?.blackLevel?.[0] ?? 0}
+                max={caps?.blackLevel?.[1] ?? 4095}
+                step={1}
+                value={parameters.blackLevel ?? ""}
+                placeholder="0"
+                disabled={(parameters.blackLevelAuto ?? "Continuous") === "Continuous" || (!!caps && !caps.blackLevel)}
+                onChange={(e) => onParameters({ ...parameters, blackLevel: e.target.value === "" ? undefined : Number(e.target.value) })}
+                className="w-24 rounded-md border border-line bg-white px-1.5 py-1 font-mono text-xs"
+              />
+            </div>
+          </div>
+          <label className="block text-xs font-semibold">
+            Frame rate limit (fps) {caps && !caps.frameRate && <span className="font-normal text-muted">· not on this camera</span>}
+            <input
+              type="number"
+              min={caps?.frameRate?.[0] ?? 0.1}
+              max={caps?.frameRate?.[1] ?? 60}
+              step={0.1}
+              value={parameters.frameRate ?? ""}
+              placeholder="camera maximum"
+              disabled={!!caps && !caps.frameRate}
+              onChange={(e) => onParameters({ ...parameters, frameRate: e.target.value === "" ? undefined : Number(e.target.value) })}
+              className="mt-1 w-full rounded-md border border-line bg-white px-1.5 py-1 font-mono text-xs"
+            />
+          </label>
+          <p className="text-[11px] text-muted">The exposure always caps the frame rate. Defaults for these live under Camera settings.</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -617,6 +747,8 @@ function LivePreview({
   whiteBalance,
   illumination,
   imgRef,
+  onOpen,
+  onClose,
 }: {
   serial: string;
   simulated: boolean;
@@ -626,12 +758,27 @@ function LivePreview({
   illumination: Illumination;
   /** Receives the <img> showing the stream, for Auto exposure / Auto white balance. */
   imgRef?: React.MutableRefObject<HTMLImageElement | null>;
+  /** The stream is open (or reconnected): later setting changes go through PUT …/preview, not a new stream. */
+  onOpen?: (serial: string) => void;
+  onClose?: () => void;
 }) {
   const ref = useRef<HTMLImageElement | null>(null);
   const [failed, setFailed] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const src = `/api/cameras/${encodeURIComponent(serial)}/preview?exposureUs=${exposureUs}&gain=${gain}&wb=${whiteBalance.join(",")}&n=${attempt}`;
+  // The stream URL carries the settings of the moment it opens; it is not rebuilt when they change.
+  const latest = useRef({ exposureUs, gain, whiteBalance });
+  latest.current = { exposureUs, gain, whiteBalance };
+  const src = useMemo(() => {
+    const s = latest.current;
+    return `/api/cameras/${encodeURIComponent(serial)}/preview?exposureUs=${s.exposureUs}&gain=${s.gain}&wb=${s.whiteBalance.join(",")}&n=${attempt}`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serial, attempt]);
+  useEffect(() => {
+    onOpen?.(serial);
+    return () => onClose?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src]);
   /** An <img> cannot read an error answer: ask the server once more, without keeping the stream. */
   const onFailed = () => {
     setFailed(true);

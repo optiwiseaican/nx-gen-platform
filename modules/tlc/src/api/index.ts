@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import type { DeviceInfo, ModuleContext, ModuleFileResponse, ModuleRequest, ModuleTx, NxGenModule } from '@crescent/module-sdk';
 import { ModuleError } from '@crescent/module-sdk';
 import { autoRetakeEv, Channel, PlateGeometry, Point, PostProcessing, RgbImage, validatePostProcessing } from '../engine';
-import { applyCameraAdjustment, CameraSettingsInput, DEFAULT_CAMERA, evaluate, ILLUMINATIONS, Illumination, imageType, parseCameraSettings, parseRfWindows, RfWindow, TrackInput, validatePlate } from '../shared/tlc';
+import { applyCameraAdjustment, cameraParametersOf, CameraDefaults, CameraSettingsInput, DEFAULT_CAMERA_DEFAULTS, parseCameraDefaults, withCameraDefaults, DEFAULT_CAMERA, evaluate, ILLUMINATIONS, Illumination, imageType, parseCameraSettings, parseRfWindows, RfWindow, TrackInput, validatePlate } from '../shared/tlc';
 import { decodeImage, encodePng, pixelBytes } from './images';
 import {
   ENGINE_VERSION,
@@ -426,6 +426,49 @@ async function methodCamera(a: AnalysisRow): Promise<{ settings: CameraSettingsI
   return parseCameraSettings(mv?.parameters ?? []);
 }
 
+interface CameraDefaultsRow {
+  camera_serial: string;
+  exposure_us: string;
+  gain: string;
+  white_balance: number[];
+  digital_gain: string | null;
+  black_level_auto: boolean;
+  black_level: string | null;
+  frame_rate: string | null;
+  auto_target: string;
+  note: string;
+  modified_at: Date | null;
+  created_at: Date;
+  modified_by: string | null;
+  created_by: string;
+}
+
+function cameraDefaultsView(r: CameraDefaultsRow): CameraDefaults & { changedAt: string; changedBy: string } {
+  return {
+    cameraSerial: r.camera_serial,
+    exposureUs: Number(r.exposure_us),
+    gain: Number(r.gain),
+    whiteBalance: r.white_balance.map(Number) as [number, number, number],
+    digitalGain: r.digital_gain === null ? null : Number(r.digital_gain),
+    blackLevelAuto: r.black_level_auto,
+    blackLevel: r.black_level === null ? null : Number(r.black_level),
+    frameRate: r.frame_rate === null ? null : Number(r.frame_rate),
+    autoTarget: Number(r.auto_target),
+    note: r.note,
+    changedAt: (r.modified_at ?? r.created_at).toISOString(),
+    changedBy: r.modified_by ?? r.created_by,
+  };
+}
+
+/** The saved camera settings for a serial: its own row, else the '*' row, else the built-in defaults. */
+async function cameraDefaults(serial: string | null): Promise<CameraDefaults> {
+  const rows = await ctx.db.query<CameraDefaultsRow>(
+    "SELECT * FROM tlc_camera_settings WHERE NOT is_deleted AND camera_serial IN ($1, '*') ORDER BY (camera_serial = '*') LIMIT 1",
+    [serial ?? '*'],
+  );
+  return rows[0] ? cameraDefaultsView(rows[0]) : { cameraSerial: serial ?? '*', ...DEFAULT_CAMERA_DEFAULTS, whiteBalance: [1, 1, 1] };
+}
+
 /**
  * The camera for this analysis: the one whose serial is the instrument's serial number if it is
  * connected, else the only camera connected; null when it cannot be decided.
@@ -729,8 +772,85 @@ const TlcModule: NxGenModule = {
           const a = await load(ctx.db, req.query.analysis);
           ({ settings, problems } = await methodCamera(a));
           preferred = await deviceCameraSerial(a, cameras);
+        } else if (cameras.length === 1) preferred = cameras[0].serial;
+        // The saved defaults (Advanced settings) under the method, and what the camera can do.
+        const defaults = await cameraDefaults(preferred);
+        settings = withCameraDefaults(settings, defaults);
+        let capabilities: Awaited<ReturnType<ModuleContext['cameras']['info']>>['capabilities'] | null = null;
+        if (preferred) {
+          try {
+            capabilities = (await ctx.cameras.info(preferred)).capabilities ?? null;
+          } catch {
+            capabilities = null;
+          }
         }
-        return { status: { ...ctx.cameras.status(), error: error ?? status.error }, cameras, settings, problems, preferredSerial: preferred };
+        return {
+          status: { ...ctx.cameras.status(), error: error ?? status.error },
+          cameras,
+          settings,
+          problems,
+          preferredSerial: preferred,
+          defaults,
+          parameters: cameraParametersOf(defaults).parameters,
+          capabilities,
+        };
+      },
+    });
+
+    // ------------------------------------------------------------------
+    // Camera settings (the module's "Advanced settings"), per camera serial
+    // ------------------------------------------------------------------
+
+    ctx.http.route({
+      method: 'GET',
+      path: '/camera-settings',
+      permission: 'tlc.view',
+      passive: true,
+      async handler() {
+        const rows = await ctx.db.query<CameraDefaultsRow>("SELECT * FROM tlc_camera_settings WHERE NOT is_deleted ORDER BY (camera_serial = '*') DESC, camera_serial");
+        return { settings: rows.map(cameraDefaultsView), builtIn: { cameraSerial: '*', ...DEFAULT_CAMERA_DEFAULTS } };
+      },
+    });
+
+    ctx.http.route({
+      method: 'PUT',
+      path: '/camera-settings/:serial',
+      permission: 'tlc.settings',
+      async handler(req) {
+        const serial = req.params.serial;
+        if (serial !== '*' && !/^[A-Za-z0-9._-]{1,64}$/.test(serial)) throw new ModuleError(400, 'Unknown camera serial.', 'serial');
+        const { defaults: d, problems } = parseCameraDefaults(req.body, serial);
+        if (problems.length) throw new ModuleError(400, problems.join(' '));
+        const reason = typeof (req.body as { reason?: unknown })?.reason === 'string' ? (req.body as { reason: string }).reason.trim() : '';
+        if (reason.length < 5) throw new ModuleError(400, 'Give the reason for the change (at least 5 characters).', 'reason');
+        await ctx.db.transaction(req.principal, reason, req.origin, async (tx) => {
+          await tx.query(
+            `INSERT INTO tlc_camera_settings (camera_serial, exposure_us, gain, white_balance, digital_gain, black_level_auto, black_level, frame_rate, auto_target, note)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (camera_serial) DO UPDATE SET exposure_us = EXCLUDED.exposure_us, gain = EXCLUDED.gain, white_balance = EXCLUDED.white_balance,
+               digital_gain = EXCLUDED.digital_gain, black_level_auto = EXCLUDED.black_level_auto, black_level = EXCLUDED.black_level,
+               frame_rate = EXCLUDED.frame_rate, auto_target = EXCLUDED.auto_target, note = EXCLUDED.note, is_deleted = false`,
+            [serial, d.exposureUs, d.gain, JSON.stringify(d.whiteBalance), d.digitalGain, d.blackLevelAuto, d.blackLevel, d.frameRate, d.autoTarget, d.note],
+          );
+        });
+        await ctx.audit.record({
+          action: 'TLC_CAMERA_SETTINGS_CHANGED',
+          result: 'SUCCESS',
+          principal: req.principal,
+          reason,
+          details: {
+            camera: serial,
+            exposureUs: d.exposureUs,
+            gain: d.gain,
+            whiteBalance: d.whiteBalance.join('/'),
+            digitalGain: d.digitalGain,
+            blackLevelAuto: d.blackLevelAuto,
+            blackLevel: d.blackLevel,
+            frameRate: d.frameRate,
+            autoTarget: d.autoTarget,
+          },
+        });
+        return (await cameraDefaults(serial === '*' ? null : serial)) as CameraDefaults;
       },
     });
 
@@ -754,9 +874,6 @@ const TlcModule: NxGenModule = {
         if (a.device_id) await usableDevice(a.device_id);
         const fromMethod = await methodCamera(a);
         if (fromMethod.problems.length) throw new ModuleError(409, `The method's camera settings are not usable: ${fromMethod.problems.join(' ')}`);
-        // What the analyst set on the Picture stage, where the method does not set it.
-        const { settings, problems: adjustProblems, adjusted } = applyCameraAdjustment(fromMethod.settings, body.settings);
-        if (adjustProblems.length) throw new ModuleError(400, adjustProblems.join(' '), 'settings');
         let cameras: Awaited<ReturnType<ModuleContext['cameras']['list']>>;
         try {
           cameras = await ctx.cameras.list();
@@ -765,6 +882,13 @@ const TlcModule: NxGenModule = {
         }
         const serial = typeof body.serial === 'string' && body.serial ? body.serial : await deviceCameraSerial(a, cameras);
         if (!serial || !cameras.some((c) => c.serial === serial)) throw new ModuleError(409, 'No camera is connected to this computer. Check the USB 3 cable, or upload an image instead.');
+        // Saved defaults (Advanced settings) under the method, then what the analyst set on the
+        // Picture stage where the method does not set it.
+        const defaults = await cameraDefaults(serial);
+        const { settings, problems: adjustProblems, adjusted } = applyCameraAdjustment(withCameraDefaults(fromMethod.settings, defaults), (body as { settings?: unknown }).settings);
+        if (adjustProblems.length) throw new ModuleError(400, adjustProblems.join(' '), 'settings');
+        const { parameters, problems: parameterProblems } = cameraParametersOf(defaults, (body as { parameters?: unknown }).parameters);
+        if (parameterProblems.length) throw new ModuleError(400, parameterProblems.join(' '), 'parameters');
 
         // The tablet's capture loop: take, check, correct the exposure, retake (≤ 2).
         let exposureUs = settings.exposureUs;
@@ -774,7 +898,11 @@ const TlcModule: NxGenModule = {
         let qc: ImageQc | null;
         for (;;) {
           try {
-            still = await ctx.cameras.still(req.principal, { serial, exposureUs, gain: settings.gain, whiteBalance: settings.whiteBalance, purpose: `${a.code} plate image` }, req.origin);
+            still = await ctx.cameras.still(
+              req.principal,
+              { serial, exposureUs, gain: settings.gain, whiteBalance: settings.whiteBalance, parameters, purpose: `${a.code} plate image` },
+              req.origin,
+            );
           } catch (e) {
             throw new ModuleError(409, (e as Error).message);
           }
@@ -798,6 +926,7 @@ const TlcModule: NxGenModule = {
           saturatedFraction: still.saturatedFraction,
           settingsFromMethod: settings.fromMethod ?? null,
           settingsSetByAnalyst: adjusted,
+          parameters,
           attempts,
           capturedAt: still.capturedAt,
         };

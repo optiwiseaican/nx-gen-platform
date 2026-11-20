@@ -1,7 +1,7 @@
 {
   "id": "tlc",
   "name": "TLC",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "description": "TLC plate analyses: original plate images under white, UV 254 and UV 366 light, plates straightened and evaluated by densitometry (baseline, front, tracks, spots, Rf against approved methods), immutable evaluation snapshots, and signed review and approval.",
   "coreApi": 1,
   "minCoreVersion": "2.0.0",
@@ -9,30 +9,66 @@
   "tablePrefix": "tlc_",
   "apiEntry": "api/index.js",
   "uiEntry": "ui/index.html",
-  "instrumentTypes": [{ "code": "TLC", "label": "TLC scanner" }],
+  "instrumentTypes": [
+    {
+      "code": "TLC",
+      "label": "TLC scanner"
+    }
+  ],
   "permissions": [
     {
       "code": "tlc.view",
       "description": "View TLC analyses, plate images and results",
-      "defaultRoles": ["SUPER_ADMINISTRATOR", "IT_ADMINISTRATOR", "QA_MANAGER", "QA_REVIEWER", "ANALYST", "OPERATOR", "AUDITOR"]
+      "defaultRoles": [
+        "SUPER_ADMINISTRATOR",
+        "IT_ADMINISTRATOR",
+        "QA_MANAGER",
+        "QA_REVIEWER",
+        "ANALYST",
+        "OPERATOR",
+        "AUDITOR"
+      ]
     },
     {
       "code": "tlc.analyze",
       "description": "Create TLC analyses, add plate images and evaluate them",
-      "defaultRoles": ["ANALYST", "OPERATOR"]
+      "defaultRoles": [
+        "ANALYST",
+        "OPERATOR"
+      ]
     },
     {
       "code": "tlc.review",
       "description": "Review TLC analyses (signed)",
-      "defaultRoles": ["QA_REVIEWER", "QA_MANAGER"]
+      "defaultRoles": [
+        "QA_REVIEWER",
+        "QA_MANAGER"
+      ]
     },
     {
       "code": "tlc.approve",
       "description": "Approve, reject and invalidate TLC analyses (signed)",
-      "defaultRoles": ["QA_MANAGER"]
+      "defaultRoles": [
+        "QA_MANAGER"
+      ]
+    },
+    {
+      "code": "tlc.settings",
+      "description": "Change the TLC camera settings (advanced settings)",
+      "defaultRoles": [
+        "SUPER_ADMINISTRATOR",
+        "IT_ADMINISTRATOR",
+        "QA_MANAGER"
+      ]
     }
   ],
-  "menu": [{ "label": "TLC", "path": "/", "permission": "tlc.view" }],
+  "menu": [
+    {
+      "label": "TLC",
+      "path": "/",
+      "permission": "tlc.view"
+    }
+  ],
   "workflows": [
     {
       "code": "TLC_ANALYSIS_APPROVAL",

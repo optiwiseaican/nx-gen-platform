@@ -94,6 +94,43 @@ describeIf('CameraService with the simulated camera', () => {
     expect(a.length).toBe(before);
   });
 
+  it('changes a running preview in place, finds settings automatically, applies parameters', async () => {
+    const frames: PreviewEvent[] = [];
+    const unsubscribe = await cameras.preview('SIM-0001', { exposureUs: 20_000, gain: 1, whiteBalance: [1, 1, 1] }, (e) => frames.push(e));
+    try {
+      await new Promise((r) => setTimeout(r, 600));
+      const before = frames.filter((f) => f.kind === 'frame').length;
+      expect(before).toBeGreaterThan(0);
+      const changed = await cameras.setPreview('SIM-0001', { exposureUs: 80_000, gain: 2 });
+      expect(changed).toMatchObject({ exposureUs: 80_000, gain: 2, whiteBalance: [1, 1, 1] });
+      await new Promise((r) => setTimeout(r, 600));
+      // Same stream: frames continued, nothing ended.
+      expect(frames.filter((f) => f.kind === 'frame').length).toBeGreaterThan(before);
+      expect(frames.some((f) => f.kind === 'end')).toBe(false);
+      // A second viewer with other settings also changes it in place, not by restarting.
+      const seqOf = () => Math.max(...frames.filter((f): f is Extract<PreviewEvent, { kind: 'frame' }> => f.kind === 'frame').map((f) => f.seq));
+      const seqBefore = seqOf();
+      const second = await cameras.preview('SIM-0001', { exposureUs: 30_000, gain: 1, whiteBalance: [1.2, 1, 1.1] }, () => undefined);
+      await new Promise((r) => setTimeout(r, 400));
+      second();
+      expect(seqOf()).toBeGreaterThan(seqBefore);
+
+      const auto = await cameras.auto({ serial: 'SIM-0001', features: ['exposure', 'whiteBalance'], exposureUs: 1000, gain: 1, whiteBalance: [1, 1, 1] });
+      expect(auto.by).toBe('host');
+      expect(auto.exposureUs).toBeGreaterThan(1000);
+      expect(auto.stats.saturated).toBeLessThanOrEqual(0.02);
+      expect(auto.whiteBalance[1]).toBe(1);
+
+      const applied = await cameras.apply('SIM-0001', { digitalGain: 1.5, blackLevelAuto: 'Continuous' });
+      expect(applied).toEqual({ applied: { digitalGain: 1.5, blackLevelAuto: 'Continuous' }, unsupported: [] });
+      const info = await cameras.info('SIM-0001');
+      expect(info.capabilities?.autoOnHost).toEqual(['exposure', 'gain', 'whiteBalance']);
+    } finally {
+      unsubscribe();
+    }
+    await expect(cameras.setPreview('SIM-0001', { gain: 2 })).rejects.toThrow(/No live preview/);
+  });
+
   it('starts the helper again after it crashes', async () => {
     const child = (cameras as unknown as { child: { kill(): void } }).child;
     child.kill();

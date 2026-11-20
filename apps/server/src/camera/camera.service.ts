@@ -12,8 +12,11 @@ import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { createInterface } from 'readline';
 import type {
+  CameraAutoRequest,
+  CameraAutoResult,
   CameraDescriptor,
   CameraInfo,
+  CameraParameters,
   CameraStatus,
   CameraStill,
   CameraStillRequest,
@@ -33,6 +36,7 @@ export interface PreviewSettings {
   exposureUs: number;
   gain: number;
   whiteBalance: [number, number, number];
+  parameters?: CameraParameters;
 }
 
 interface Pending {
@@ -165,7 +169,8 @@ export class CameraService implements OnModuleDestroy {
 
   /**
    * Subscribes to a camera's live preview. The first subscriber starts it, the last one to leave
-   * stops it; viewers asking for other settings restart it with those (the newest request wins).
+   * stops it. A viewer asking for other settings changes the running preview in place (the newest
+   * request wins); the stream itself is never restarted for a settings change.
    */
   async preview(
     serial: string,
@@ -175,18 +180,13 @@ export class CameraService implements OnModuleDestroy {
     if (this.mode === 'OFF') throw new CameraError('Cameras are switched off on this server.');
     const key = JSON.stringify(settings);
     let group = this.previews.get(serial);
-    if (!group || group.key !== key) {
-      await this.command({
-        cmd: 'preview_start',
-        serial,
-        maxSize: 960,
-        fps: 5,
-        ...settings,
-      });
-      if (!group) {
-        group = { serial, key, listeners: new Set() };
-        this.previews.set(serial, group);
-      } else group.key = key;
+    if (!group) {
+      await this.command({ cmd: 'preview_start', serial, maxSize: 960, fps: 5, ...settings });
+      group = { serial, key, listeners: new Set() };
+      this.previews.set(serial, group);
+    } else if (group.key !== key) {
+      await this.command({ cmd: 'preview_set', serial, ...settings });
+      group.key = key;
     }
     group.listeners.add(listener);
     const g = group;
@@ -197,6 +197,64 @@ export class CameraService implements OnModuleDestroy {
         this.command({ cmd: 'preview_stop', serial }).catch(() => undefined);
       }
     };
+  }
+
+  /** Changes the running preview's exposure, gain, white balance or parameters without restarting it. */
+  async setPreview(serial: string, settings: Partial<PreviewSettings>): Promise<PreviewSettings> {
+    const group = this.previews.get(serial);
+    if (!group) throw new CameraError('No live preview is running for this camera.');
+    const r = await this.command({ cmd: 'preview_set', serial, ...settings });
+    const s = r.settings as { exposureUs: number; gain: number; wb: number[] };
+    const current: PreviewSettings = {
+      ...(JSON.parse(group.key) as PreviewSettings),
+      exposureUs: Number(s.exposureUs),
+      gain: Number(s.gain),
+      whiteBalance: s.wb.map(Number) as [number, number, number],
+      ...(settings.parameters ? { parameters: settings.parameters } : {}),
+    };
+    group.key = JSON.stringify(current);
+    return current;
+  }
+
+  /**
+   * The camera's auto features, run once: on the camera (IDS peak ExposureAuto / GainAuto /
+   * BalanceWhiteAuto) where it has them, else on the host from raw frame statistics. A running
+   * preview follows the result.
+   */
+  async auto(request: CameraAutoRequest): Promise<CameraAutoResult> {
+    const features = request.features.filter((f) => ['exposure', 'gain', 'whiteBalance'].includes(f));
+    if (!features.length) throw new CameraError('Choose what to set automatically: exposure, gain or white balance.');
+    const exposureUs = Number(request.exposureUs);
+    if (!(exposureUs >= 10 && exposureUs <= 10_000_000)) throw new CameraError('Exposure must be between 10 µs and 10 s.');
+    const r = await this.command(
+      {
+        cmd: 'auto',
+        serial: request.serial ?? '',
+        features,
+        exposureUs,
+        gain: Number(request.gain ?? 1),
+        whiteBalance: request.whiteBalance ?? [1, 1, 1],
+        target: Math.min(0.9, Math.max(0.05, Number(request.target ?? 0.45))),
+      },
+      60_000,
+    );
+    const result: CameraAutoResult = {
+      serial: String(r.serial),
+      exposureUs: Number(r.exposureUs),
+      gain: Number(r.gain),
+      whiteBalance: (r.whiteBalance as number[]).map(Number) as [number, number, number],
+      by: r.by as CameraAutoResult['by'],
+      stats: r.stats as CameraAutoResult['stats'],
+    };
+    const group = this.previews.get(result.serial);
+    if (group) group.key = JSON.stringify({ ...(JSON.parse(group.key) as PreviewSettings), exposureUs: result.exposureUs, gain: result.gain, whiteBalance: result.whiteBalance });
+    return result;
+  }
+
+  /** Advanced parameters on the camera; returns what it accepted and what it has no node for. */
+  async apply(serial: string, parameters: CameraParameters): Promise<{ applied: CameraParameters; unsupported: string[] }> {
+    const r = await this.command({ cmd: 'apply', serial, parameters });
+    return { applied: r.applied as CameraParameters, unsupported: r.unsupported as string[] };
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -236,6 +294,7 @@ export class CameraService implements OnModuleDestroy {
           exposureUs,
           gain,
           whiteBalance: wb,
+          ...(request.parameters ? { parameters: request.parameters } : {}),
         },
         Math.ceil(exposureUs / 1000) * 3 + 120_000,
       );

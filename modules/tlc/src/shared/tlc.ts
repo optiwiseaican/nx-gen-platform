@@ -94,6 +94,133 @@ export const DEFAULT_CAMERA: CameraSettingsInput = { exposureUs: 20000, gain: 1,
 /** Limits of the lamp box camera settings (exposure µs, gain factor, white balance factors). */
 export const CAMERA_LIMITS = { exposureUs: [31, 2_000_000], gain: [1, 16], whiteBalance: [0.1, 8] } as const;
 
+/** Advanced camera parameters (IDS peak nodes beyond exposure / gain / white balance). */
+export interface CameraParametersInput {
+  digitalGain?: number;
+  blackLevelAuto?: 'Off' | 'Continuous';
+  blackLevel?: number;
+  frameRate?: number;
+}
+
+/**
+ * The module's camera settings ("Advanced settings"): the starting point for the Picture stage and
+ * the capture, per camera serial ('*' = any camera). A method still overrides exposure / gain /
+ * white balance where it sets them.
+ */
+export interface CameraDefaults {
+  cameraSerial: string;
+  exposureUs: number;
+  gain: number;
+  whiteBalance: [number, number, number];
+  digitalGain: number | null;
+  blackLevelAuto: boolean;
+  blackLevel: number | null;
+  frameRate: number | null;
+  /** Mean brightness the automatic exposure aims at, 0.1–0.8 of full scale. */
+  autoTarget: number;
+  note: string;
+}
+
+export const DEFAULT_CAMERA_DEFAULTS: Omit<CameraDefaults, 'cameraSerial'> = {
+  exposureUs: 20000,
+  gain: 1,
+  whiteBalance: [1, 1, 1],
+  digitalGain: null,
+  blackLevelAuto: true,
+  blackLevel: null,
+  frameRate: null,
+  autoTarget: 0.45,
+  note: '',
+};
+
+export function parseCameraDefaults(input: unknown, cameraSerial: string): { defaults: CameraDefaults; problems: string[] } {
+  const o = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const problems: string[] = [];
+  const num = (key: string, label: string, min: number, max: number, fallback: number): number => {
+    const raw = o[key];
+    const n = raw === undefined ? fallback : Number(raw);
+    if (!(n >= min && n <= max)) {
+      problems.push(`${label} must be between ${min} and ${max}.`);
+      return fallback;
+    }
+    return n;
+  };
+  const optional = (key: string, label: string, min: number, max: number): number | null => {
+    const raw = o[key];
+    if (raw === undefined || raw === null || raw === '') return null;
+    const n = Number(raw);
+    if (!(n >= min && n <= max)) {
+      problems.push(`${label} must be between ${min} and ${max}.`);
+      return null;
+    }
+    return n;
+  };
+  const wbRaw = o.whiteBalance;
+  let whiteBalance: [number, number, number] = [1, 1, 1];
+  if (wbRaw !== undefined) {
+    if (!Array.isArray(wbRaw) || wbRaw.length !== 3 || !wbRaw.every((x) => Number(x) >= CAMERA_LIMITS.whiteBalance[0] && Number(x) <= CAMERA_LIMITS.whiteBalance[1]))
+      problems.push('White balance must be three factors from 0.1 to 8.');
+    else whiteBalance = wbRaw.map((x) => Math.round(Number(x) * 1000) / 1000) as [number, number, number];
+  }
+  const defaults: CameraDefaults = {
+    cameraSerial,
+    exposureUs: Math.round(num('exposureUs', 'Exposure (µs)', CAMERA_LIMITS.exposureUs[0], CAMERA_LIMITS.exposureUs[1], 20000)),
+    gain: num('gain', 'Gain', CAMERA_LIMITS.gain[0], CAMERA_LIMITS.gain[1], 1),
+    whiteBalance,
+    digitalGain: optional('digitalGain', 'Digital gain', 1, 64),
+    blackLevelAuto: o.blackLevelAuto === undefined ? true : o.blackLevelAuto === true || o.blackLevelAuto === 'true' || o.blackLevelAuto === 'Continuous',
+    blackLevel: optional('blackLevel', 'Black level', 0, 4095),
+    frameRate: optional('frameRate', 'Frame rate limit', 0.1, 1000),
+    autoTarget: num('autoTarget', 'Auto brightness target', 0.1, 0.8, 0.45),
+    note: typeof o.note === 'string' ? o.note.trim().slice(0, 500) : '',
+  };
+  return { defaults, problems };
+}
+
+/** The camera parameters a capture or preview applies, from the saved defaults (plus any override). */
+export function cameraParametersOf(defaults: Pick<CameraDefaults, 'digitalGain' | 'blackLevelAuto' | 'blackLevel' | 'frameRate'> | null, override?: unknown): { parameters: CameraParametersInput; problems: string[] } {
+  const p: CameraParametersInput = {};
+  const problems: string[] = [];
+  if (defaults) {
+    if (defaults.digitalGain !== null) p.digitalGain = defaults.digitalGain;
+    p.blackLevelAuto = defaults.blackLevelAuto ? 'Continuous' : 'Off';
+    if (!defaults.blackLevelAuto && defaults.blackLevel !== null) p.blackLevel = defaults.blackLevel;
+    if (defaults.frameRate !== null) p.frameRate = defaults.frameRate;
+  }
+  if (override && typeof override === 'object') {
+    const o = override as Record<string, unknown>;
+    const num = (key: 'digitalGain' | 'blackLevel' | 'frameRate', label: string, min: number, max: number) => {
+      if (o[key] === undefined) return;
+      if (o[key] === null || o[key] === '') {
+        delete p[key];
+        return;
+      }
+      const n = Number(o[key]);
+      if (!(n >= min && n <= max)) problems.push(`${label} must be between ${min} and ${max}.`);
+      else p[key] = n;
+    };
+    num('digitalGain', 'Digital gain', 1, 64);
+    num('blackLevel', 'Black level', 0, 4095);
+    num('frameRate', 'Frame rate limit', 0.1, 1000);
+    if (o.blackLevelAuto !== undefined) p.blackLevelAuto = o.blackLevelAuto === 'Continuous' || o.blackLevelAuto === true ? 'Continuous' : 'Off';
+    if (p.blackLevelAuto === 'Continuous') delete p.blackLevel;
+  }
+  return { parameters: p, problems };
+}
+
+/** The settings the Picture stage starts from: the saved defaults, then the method where it sets them. */
+export function withCameraDefaults(method: CameraSettingsInput, defaults: CameraDefaults | null): CameraSettingsInput {
+  if (!defaults) return method;
+  const from = method.fromMethod ?? { exposure: method.fixed, gain: false, whiteBalance: false };
+  return {
+    ...method,
+    exposureUs: from.exposure ? method.exposureUs : defaults.exposureUs,
+    gain: from.gain ? method.gain : defaults.gain,
+    whiteBalance: from.whiteBalance ? method.whiteBalance : ([...defaults.whiteBalance] as [number, number, number]),
+    fromMethod: from,
+  };
+}
+
 export interface CameraAdjustment {
   exposureUs?: number;
   gain?: number;

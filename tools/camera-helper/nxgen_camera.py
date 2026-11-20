@@ -20,9 +20,20 @@ Commands
                white balance applied on the host so it is exact and recorded)
                -> width, height, bitDepth, sourceBits, pixelFormat, exposureUs, gain,
                   whiteBalance, temperatureC, saturatedFraction, sha256
-  preview_start {serial, maxSize, fps, exposureUs, gain, whiteBalance}
+  preview_start {serial, maxSize, fps, exposureUs, gain, whiteBalance, parameters?}
                -> then {"event":"preview", serial, seq, mime, width, height, data(base64)}
+               A running preview takes the new settings without being restarted.
+  preview_set  {serial, exposureUs?, gain?, whiteBalance?, parameters?}
+               changes the running preview's settings in place (no stream restart)
   preview_stop {serial}
+  auto         {serial, features:["exposure","gain","whiteBalance"], exposureUs, gain, whiteBalance,
+                target?: 0.45}
+               the camera's own auto features ("Once", IDS peak nodes ExposureAuto / GainAuto /
+               BalanceWhiteAuto) where the camera has them, else the same done on the host from raw
+               frames -> {exposureUs, gain, whiteBalance, by: "camera" | "host", stats}
+  apply        {serial, parameters:{frameRate?, digitalGain?, blackLevelAuto?, blackLevel?,
+                throughputLimit?}}
+               advanced camera parameters (IDS peak nodes); -> {applied:{...}, unsupported:[...]}
   close        {serial}
   quit
 
@@ -49,8 +60,8 @@ import time
 import traceback
 import zlib
 
-PROTOCOL_VERSION = 1
-HELPER_VERSION = "1.0.1"
+PROTOCOL_VERSION = 2
+HELPER_VERSION = "1.1.0"
 
 _out_lock = threading.Lock()
 
@@ -149,6 +160,20 @@ def png_decode_rgb8(data: bytes):
 
 
 # ---------------------------------------------------------------------------
+# Advanced camera parameters (IDS peak nodes), beyond exposure / gain / white balance
+# ---------------------------------------------------------------------------
+
+ADVANCED_PARAMETERS = ("frameRate", "digitalGain", "blackLevelAuto", "blackLevel", "throughputLimit")
+SIM_PARAMETER_RANGES = {
+    "frameRate": [0.1, 30.0],
+    "digitalGain": [1.0, 8.0],
+    "blackLevelAuto": ["Off", "Continuous"],
+    "blackLevel": [0.0, 100.0],
+    "throughputLimit": [1_000_000, 400_000_000],
+}
+
+
+# ---------------------------------------------------------------------------
 # Simulated camera (standard library only)
 # ---------------------------------------------------------------------------
 
@@ -169,6 +194,39 @@ class SimCamera:
         self.lock = threading.Lock()
         self.preview_thread = None
         self.preview_stop = threading.Event()
+        self.preview_settings = None
+        self.parameters = {}
+
+    def apply(self, params: dict) -> dict:
+        """The simulator accepts the advanced parameters (they do not change its image)."""
+        applied = {k: params[k] for k in ADVANCED_PARAMETERS if k in params}
+        self.parameters.update(applied)
+        return {"applied": applied, "unsupported": [k for k in params if k not in ADVANCED_PARAMETERS]}
+
+    def frame_stats(self, exposure_us: float, gain: float, wb) -> dict:
+        """Channel means (0..1 of full scale) and the saturated fraction, on a pixel subsample."""
+        # Saturation is a property of the sensor signal (white balance is applied on the host
+        # afterwards, as with the real camera), so judge it before the balance factors.
+        luts = self._luts(exposure_us, gain, (1.0, 1.0, 1.0), self.FULL)
+        step = max(1, (self.width * self.height) // 20000)
+        sums = [0.0, 0.0, 0.0]
+        n = 0
+        saturated = 0
+        for i in range(0, self.width * self.height, step):
+            o = i * 3
+            vals = (luts[0][self.rgb[o]], luts[1][self.rgb[o + 1]], luts[2][self.rgb[o + 2]])
+            n += 1
+            if max(vals) >= self.FULL:
+                saturated += 1
+                continue
+            for c in range(3):
+                sums[c] += vals[c]
+        unsat = max(1, n - saturated)
+        r, g, b = (x / unsat / self.FULL * float(wb[c]) for c, x in enumerate(sums))
+        return {"r": r, "g": g, "b": b, "luma": 0.299 * r + 0.587 * g + 0.114 * b, "saturated": saturated / max(1, n)}
+
+    def auto_camera(self, features, target):
+        return None  # the simulator has no camera-side auto features: the host does it
 
     def describe(self) -> dict:
         return {"serial": self.serial, "model": "Simulated U3-34L0XCP-C", "vendor": "NxGen simulator", "openable": True}
@@ -180,6 +238,7 @@ class SimCamera:
             "temperatureC": 38.5,
             "sensor": {"width": self.width, "height": self.height, "pixelFormat": "BayerRG12", "bits": 12, "shutter": "rolling"},
             "limits": {"exposureUs": [31.0, 2000000.0], "gain": [1.0, 16.0]},
+            "capabilities": {"autoOnCamera": [], "autoOnHost": ["exposure", "gain", "whiteBalance"], "parameters": {k: SIM_PARAMETER_RANGES[k] for k in ADVANCED_PARAMETERS}},
             "simulated": True,
         }
 
@@ -300,7 +359,10 @@ class IdsCamera:
         self.lock = threading.Lock()
         self.preview_thread = None
         self.preview_stop = threading.Event()
+        self.preview_settings = None
         self.applied = None
+        self.parameters = {}
+        self.frame_rate_limit = None
         try:
             self.device = descriptor.OpenDevice(self.p.DeviceAccessType_Control)
         except Exception as e:  # noqa: BLE001
@@ -377,14 +439,161 @@ class IdsCamera:
         if key == self.applied:
             return
         exposure = self._float("ExposureTime", exposure_us)
-        # Long exposures need a lower frame rate; keep it just below 1 / exposure.
-        self._try(lambda: self._float("AcquisitionFrameRate", min(self.nm.FindNode("AcquisitionFrameRate").Maximum(), 0.95e6 / max(exposure, 1.0))))
+        # Long exposures need a lower frame rate; keep it just below 1 / exposure (and under the
+        # frame rate limit set through `apply`, if any).
+        wanted = 0.95e6 / max(exposure, 1.0)
+        if self.frame_rate_limit:
+            wanted = min(wanted, float(self.frame_rate_limit))
+        self._try(lambda: self._float("AcquisitionFrameRate", min(self.nm.FindNode("AcquisitionFrameRate").Maximum(), wanted)))
         self._try(lambda: self._enum("GainSelector", "AnalogAll"))
         self._try(lambda: self._float("Gain", gain))
         self.applied = key
         # Frames already in flight were exposed with the old settings: drop them.
         for _ in range(2):
             self._raw(timeout_ms=int(exposure / 1000.0) * 3 + 2000)
+
+    # -- advanced parameters and auto features --
+    def _entries(self, name):
+        """Symbolic entries of an enumeration node the camera offers, [] when it has none."""
+        try:
+            node = self.nm.FindNode(name)
+            out = []
+            for e in node.Entries():
+                try:
+                    if e.AccessStatus() not in (self.p.NodeAccessStatus_NotAvailable, self.p.NodeAccessStatus_NotImplemented):
+                        out.append(e.SymbolicValue())
+                except Exception:  # noqa: BLE001
+                    pass
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _range(self, name):
+        try:
+            n = self.nm.FindNode(name)
+            return [float(n.Minimum()), float(n.Maximum())]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def capabilities(self) -> dict:
+        on_camera = []
+        if "Once" in self._entries("ExposureAuto"):
+            on_camera.append("exposure")
+        if "Once" in self._entries("GainAuto"):
+            on_camera.append("gain")
+        if "Once" in self._entries("BalanceWhiteAuto"):
+            on_camera.append("whiteBalance")
+        params = {}
+        params["frameRate"] = self._range("AcquisitionFrameRate")
+        self._try(lambda: self._enum("GainSelector", "DigitalAll"))
+        params["digitalGain"] = self._range("Gain") if "DigitalAll" in self._entries("GainSelector") else None
+        self._try(lambda: self._enum("GainSelector", "AnalogAll"))
+        entries = self._entries("BlackLevelAuto")
+        params["blackLevelAuto"] = entries or None
+        params["blackLevel"] = self._range("BlackLevel")
+        params["throughputLimit"] = self._range("DeviceLinkThroughputLimit")
+        return {"autoOnCamera": on_camera, "autoOnHost": ["exposure", "gain", "whiteBalance"], "parameters": params}
+
+    def apply(self, params: dict) -> dict:
+        """Advanced parameters on the camera; unsupported ones are reported, not fatal."""
+        applied = {}
+        unsupported = []
+        with self.lock:
+            for key, value in params.items():
+                ok = False
+                if key == "frameRate":
+                    self.frame_rate_limit = float(value) if value else None
+                    self.applied = None  # re-apply the frame rate with the next frame
+                    ok = self._range("AcquisitionFrameRate") is not None
+                elif key == "digitalGain":
+                    ok = self._try(lambda: (self._enum("GainSelector", "DigitalAll"), self._float("Gain", float(value)), self._enum("GainSelector", "AnalogAll"))) is not None
+                elif key == "blackLevelAuto":
+                    ok = self._try(lambda: self._enum("BlackLevelAuto", "Continuous" if str(value) in ("Continuous", "On", "1", "true", "True") else "Off")) is not None
+                elif key == "blackLevel":
+                    ok = self._try(lambda: (self._try(lambda: self._enum("BlackLevelSelector", "All")), self._float("BlackLevel", float(value)))) is not None
+                elif key == "throughputLimit":
+                    ok = self._try(lambda: self._float("DeviceLinkThroughputLimit", float(value))) is not None
+                else:
+                    unsupported.append(key)
+                    continue
+                if ok:
+                    applied[key] = value
+                    self.parameters[key] = value
+                else:
+                    unsupported.append(key)
+        return {"applied": applied, "unsupported": unsupported}
+
+    def frame_stats(self, exposure_us: float, gain: float, wb) -> dict:
+        """Channel means (0..1 of full scale) and saturated fraction from one raw frame (2x2 cells)."""
+        np = self.np
+        with self.lock:
+            raw = self.grab(exposure_us, gain)
+        full = float((1 << self.bits) - 1)
+        m = self._masks(2, 2)
+        step = max(1, -(-max(raw.shape) // 400))
+        planes = {}
+        for c in "RGB":
+            cells = [(dy, dx) for dy in range(2) for dx in range(2) if m[c][dy, dx]]
+            acc = None
+            for dy, dx in cells:
+                s = raw[dy::2 * step, dx::2 * step].astype(np.float32)
+                acc = s if acc is None else acc[: s.shape[0], : s.shape[1]] + s[: acc.shape[0], : acc.shape[1]]
+            planes[c] = acc / len(cells)
+        hh = min(p.shape[0] for p in planes.values())
+        ww = min(p.shape[1] for p in planes.values())
+        r, g, b = (planes[c][:hh, :ww] for c in "RGB")
+        sat = (np.maximum(np.maximum(r, g), b) >= full * 0.995)
+        keep = ~sat
+        n = max(1, int(keep.sum()))
+        rm, gm, bm = (float(x[keep].sum()) / n / full * float(wb[i]) for i, x in enumerate((r, g, b)))
+        return {"r": rm, "g": gm, "b": bm, "luma": 0.299 * rm + 0.587 * gm + 0.114 * bm, "saturated": float(sat.mean())}
+
+    def auto_camera(self, features, target):
+        """
+        The camera's own auto features, run once (IDS peak: ExposureAuto / GainAuto /
+        BalanceWhiteAuto = "Once"); returns the settings the camera arrived at, or None when the
+        camera has none of the requested features (the host then does it).
+        """
+        wanted = {
+            "exposure": "ExposureAuto" if "exposure" in features and "Once" in self._entries("ExposureAuto") else None,
+            "gain": "GainAuto" if "gain" in features and "Once" in self._entries("GainAuto") else None,
+            "whiteBalance": "BalanceWhiteAuto" if "whiteBalance" in features and "Once" in self._entries("BalanceWhiteAuto") else None,
+        }
+        nodes = [n for n in wanted.values() if n]
+        if not nodes:
+            return None
+        with self.lock:
+            # Brightness target for the camera's auto exposure / gain (0..100 % in IDS peak).
+            if target is not None:
+                self._try(lambda: self._float("BrightnessAutoTarget", float(target) * 100.0))
+            for n in nodes:
+                self._enum(n, "Once")
+            # The camera converges on the frames it acquires: keep them flowing, up to ~6 s.
+            deadline = time.monotonic() + 6.0
+            while time.monotonic() < deadline:
+                self._raw(timeout_ms=3000)
+                if all(self._value(n) == "Off" for n in nodes):
+                    break
+            for n in nodes:
+                self._try(lambda n=n: self._enum(n, "Off"))
+            out = {"by": "camera"}
+            if wanted["exposure"]:
+                out["exposureUs"] = float(self._value("ExposureTime"))
+            if wanted["gain"]:
+                self._try(lambda: self._enum("GainSelector", "AnalogAll"))
+                out["gain"] = float(self._value("Gain"))
+            if wanted["whiteBalance"]:
+                # Read the camera's balance ratios, then put them back to 1: white balance stays a
+                # host operation so it is exact and recorded with every image.
+                ratios = []
+                for ch in ("Red", "Green", "Blue"):
+                    self._enum("BalanceRatioSelector", ch)
+                    ratios.append(float(self._value("BalanceRatio", 1.0)))
+                    self._try(lambda: self._float("BalanceRatio", 1.0))
+                g = ratios[1] or 1.0
+                out["whiteBalance"] = [round(ratios[0] / g, 3), 1.0, round(ratios[2] / g, 3)]
+            self.applied = None  # exposure / gain changed under us: configure() re-applies next time
+            return out
 
     def _raw(self, timeout_ms: int):
         np = self.np
@@ -554,6 +763,7 @@ class IdsCamera:
                 "shutter": "rolling",
             },
             "limits": {"exposureUs": limits("ExposureTime"), "gain": limits("Gain")},
+            "capabilities": self.capabilities(),
             "simulated": False,
         }
 
@@ -663,19 +873,84 @@ class Helper:
             cam.preview_thread.join(timeout=5)
             cam.preview_thread = None
 
-    def _preview_loop(self, cam, serial, max_size, fps, exposure_us, gain, wb):
+    def _preview_loop(self, cam, serial):
         seq = 0
-        period = 1.0 / max(0.5, min(fps, 15.0))
         while not cam.preview_stop.is_set():
             t0 = time.monotonic()
+            s = cam.preview_settings  # replaced as a whole by preview_set: read once per frame
+            period = 1.0 / max(0.5, min(s["fps"], 15.0))
             try:
-                mime, w, h, data = cam.preview_frame(max_size, exposure_us, gain, wb)
+                mime, w, h, data = cam.preview_frame(s["maxSize"], s["exposureUs"], s["gain"], s["wb"])
                 seq += 1
                 emit({"event": "preview", "serial": serial, "seq": seq, "mime": mime, "width": w, "height": h, "data": base64.b64encode(data).decode("ascii")})
             except Exception as e:  # noqa: BLE001
                 emit({"event": "lost", "serial": serial, "error": str(e)})
                 return
             cam.preview_stop.wait(max(0.0, period - (time.monotonic() - t0)))
+
+    # -- auto features --
+    def _auto(self, cam, features, target, exposure_us, gain, wb) -> dict:
+        """
+        Camera-side first (IDS peak "Once"), else on the host from raw frame statistics:
+          exposure: towards a mean brightness of `target` (0..1), halving while > 2 % is saturated,
+                    at most 8x per step, up to 6 steps; gain only rises once the exposure is at its
+                    maximum and the frame is still dark (and falls back to 1 when it is not needed)
+          white balance: grey world on the unsaturated pixels (red and blue follow green)
+        """
+        limits = cam.info()["limits"]
+        e_min, e_max = limits["exposureUs"] or [31.0, 2_000_000.0]
+        g_min, g_max = limits["gain"] or [1.0, 16.0]
+        result = {"exposureUs": float(exposure_us), "gain": float(gain), "whiteBalance": list(wb), "by": "host"}
+        done = cam.auto_camera(features, target)
+        remaining = list(features)
+        if done:
+            for k in ("exposureUs", "gain", "whiteBalance"):
+                if k in done:
+                    result[k] = done[k]
+            remaining = [f for f in features if (f == "exposure" and "exposureUs" not in done) or (f == "gain" and "gain" not in done) or (f == "whiteBalance" and "whiteBalance" not in done)]
+            result["by"] = "camera" if not remaining else "camera+host"
+        stats = None
+        if "exposure" in remaining or "gain" in remaining:
+            e, g = result["exposureUs"], result["gain"]
+            ceiling = None  # brightness (exposure x gain) known to saturate more than 2 %
+            good = None  # last settings measured without saturation
+            for _ in range(8):
+                stats = cam.frame_stats(e, g, result["whiteBalance"])
+                if stats["saturated"] > 0.02:
+                    # Too bright for the sensor even if the mean is still low (a bright plate on a
+                    # dark lamp box): back off and never go above this again.
+                    ceiling = e * g
+                    factor = 0.7
+                else:
+                    good = (e, g)
+                    factor = min(8.0, max(0.125, target / max(1e-4, stats["luma"])))
+                    if ceiling is not None:
+                        factor = min(factor, 0.95 * ceiling / (e * g))
+                    if abs(factor - 1.0) < 0.08:
+                        break
+                if "exposure" in remaining:
+                    ne = min(e_max, max(e_min, e * factor))
+                    if abs(ne - e) > 0.5:
+                        e = ne
+                        continue
+                if "gain" in remaining and ((factor > 1.0 and e >= e_max * 0.999) or (factor < 1.0 and g > g_min)):
+                    g = min(g_max, max(g_min, g * factor))
+                    continue
+                break
+            # The loop may end on settings it set but never measured: measure them, and never hand
+            # back a saturating result when a good one was seen.
+            stats = cam.frame_stats(e, g, result["whiteBalance"])
+            if stats["saturated"] > 0.02 and good is not None:
+                e, g = good
+                stats = cam.frame_stats(e, g, result["whiteBalance"])
+            result["exposureUs"], result["gain"] = round(e, 1), round(g, 3)
+        if "whiteBalance" in remaining:
+            stats = cam.frame_stats(result["exposureUs"], result["gain"], (1.0, 1.0, 1.0))
+            g = max(1e-4, stats["g"])
+            clamp = lambda v: round(min(8.0, max(0.1, v)), 3)  # noqa: E731
+            result["whiteBalance"] = [clamp(g / max(1e-4, stats["r"])), 1.0, clamp(g / max(1e-4, stats["b"]))]
+        result["stats"] = stats or cam.frame_stats(result["exposureUs"], result["gain"], result["whiteBalance"])
+        return result
 
     # -- dispatch --
     def handle(self, req: dict) -> dict:
@@ -692,19 +967,44 @@ class Helper:
             if not path:
                 raise CameraError("still needs a path to write the image to.")
             cam = self._camera(req.get("serial"))
+            if req.get("parameters"):
+                cam.apply(dict(req["parameters"]))
             wb = _wb(req.get("whiteBalance"))
             return {"serial": cam.serial, **cam.still(path, float(req.get("exposureUs", 20000)), float(req.get("gain", 1.0)), wb)}
-        if cmd == "preview_start":
+        if cmd in ("preview_start", "preview_set"):
             cam = self._camera(req.get("serial"))
-            self._stop_preview(cam)
-            cam.preview_stop = threading.Event()
-            cam.preview_thread = threading.Thread(
-                target=self._preview_loop,
-                args=(cam, cam.serial, int(req.get("maxSize", 960)), float(req.get("fps", 5)), float(req.get("exposureUs", 20000)), float(req.get("gain", 1.0)), _wb(req.get("whiteBalance"))),
-                daemon=True,
-            )
-            cam.preview_thread.start()
-            return {"serial": cam.serial}
+            if req.get("parameters"):
+                cam.apply(dict(req["parameters"]))
+            running = cam.preview_thread is not None and cam.preview_thread.is_alive()
+            if cmd == "preview_set" and not running:
+                raise CameraError(f"No live preview is running for camera {cam.serial}.")
+            base = cam.preview_settings if running else {"maxSize": 960, "fps": 5.0, "exposureUs": 20000.0, "gain": 1.0, "wb": (1.0, 1.0, 1.0)}
+            cam.preview_settings = {
+                "maxSize": int(req.get("maxSize", base["maxSize"])),
+                "fps": float(req.get("fps", base["fps"])),
+                "exposureUs": float(req.get("exposureUs", base["exposureUs"])),
+                "gain": float(req.get("gain", base["gain"])),
+                "wb": _wb(req["whiteBalance"]) if req.get("whiteBalance") is not None else base["wb"],
+            }
+            if not running:
+                cam.preview_stop = threading.Event()
+                cam.preview_thread = threading.Thread(target=self._preview_loop, args=(cam, cam.serial), daemon=True)
+                cam.preview_thread.start()
+            return {"serial": cam.serial, "running": True, "settings": {**cam.preview_settings, "wb": list(cam.preview_settings["wb"])}}
+        if cmd == "auto":
+            cam = self._camera(req.get("serial"))
+            features = [f for f in (req.get("features") or ["exposure", "whiteBalance"]) if f in ("exposure", "gain", "whiteBalance")]
+            if not features:
+                raise CameraError("auto needs features: exposure, gain and/or whiteBalance.")
+            target = float(req.get("target", 0.45))
+            result = self._auto(cam, features, target, float(req.get("exposureUs", 20000)), float(req.get("gain", 1.0)), _wb(req.get("whiteBalance")))
+            # The live preview, if running, follows the result at once.
+            if cam.preview_settings is not None and cam.preview_thread is not None and cam.preview_thread.is_alive():
+                cam.preview_settings = {**cam.preview_settings, "exposureUs": result["exposureUs"], "gain": result["gain"], "wb": tuple(result["whiteBalance"])}
+            return {"serial": cam.serial, **result}
+        if cmd == "apply":
+            cam = self._camera(req.get("serial"))
+            return {"serial": cam.serial, **cam.apply(dict(req.get("parameters") or {}))}
         if cmd == "preview_stop":
             cam = self.cameras.get(req.get("serial") or ("SIM-0001" if self.simulate else ""))
             if cam is not None:

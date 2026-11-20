@@ -590,6 +590,10 @@ export class ModuleManagerService implements OnModuleInit {
           if (!this.cameras) throw new CameraError('Cameras are switched off on this server.');
           return this.cameras.info(serial);
         },
+        auto: (request) => {
+          if (!this.cameras) throw new CameraError('Cameras are switched off on this server.');
+          return this.cameras.auto(request);
+        },
         still: (principal, request, origin) => {
           if (!this.cameras) throw new CameraError('Cameras are switched off on this server.');
           return this.cameras.still(principal, {

@@ -52,8 +52,15 @@ quality gate behave as with the real camera.
   scaled to 16 bits and written as a lossless PNG with its SHA-256.
 - Live view: 2 × 2 colour cells, subsampled to ≤ 960 px, about 5 frames/s (JPEG with Pillow,
   else PNG).
-- Exposure, gain and frame rate are set on the camera; auto exposure, auto gain and auto white
-  balance are switched off so every capture is repeatable.
+- Exposure, gain and frame rate are set on the camera; the camera's continuous auto features stay
+  off so every capture is repeatable. `auto` runs them **once** (IDS peak `ExposureAuto` /
+  `GainAuto` / `BalanceWhiteAuto` = Once) where the camera offers them, else the helper does the
+  same on the host from raw frame statistics (brightness target, 2 % saturation guard, grey-world
+  white balance); the result is reported, not left running.
+- A running live preview takes new settings in place (`preview_set`): no stream restart.
+- Advanced parameters (`apply`, also accepted by `still` / `preview_*`): frame rate limit, digital
+  gain, black level (auto / value), throughput limit — IDS peak nodes, reported as unsupported when
+  a camera has no such node. `info` lists the camera's `capabilities`.
 
 ## Status
 
