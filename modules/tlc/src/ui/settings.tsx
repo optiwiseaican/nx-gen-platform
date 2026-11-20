@@ -45,7 +45,7 @@ export function CameraSettingsPage({ principal }: { principal: Principal }) {
       setSaved(s.settings);
       setError(cam.status.error);
       for (const c of cam.cameras) {
-        request(`/api/cameras/${encodeURIComponent(c.serial)}`)
+        request(`/cameras/${encodeURIComponent(c.serial)}`)
           .then((r) => r.json())
           .then((info: { capabilities?: Capabilities | null }) => setCaps((x) => ({ ...x, [c.serial]: info.capabilities ?? null })))
           .catch(() => setCaps((x) => ({ ...x, [c.serial]: null })));

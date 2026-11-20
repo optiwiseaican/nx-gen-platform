@@ -174,7 +174,7 @@ export function PictureStage({
     if (!serial || !v) return;
     if (pushTimer.current) clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(() => {
-      void request(`/api/cameras/${encodeURIComponent(serial)}/preview`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...v, parameters: p }) }).catch((e: Error) => setError(e.message));
+      void request(`/cameras/${encodeURIComponent(serial)}/preview`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...v, parameters: p }) }).catch((e: Error) => setError(e.message));
     }, 150);
   }
   function change(v: CameraValues) {
@@ -199,7 +199,7 @@ export function PictureStage({
     setAutoBusy(true);
     setError(null);
     try {
-      const r = await request(`/api/cameras/${encodeURIComponent(cam.serial)}/auto`, {
+      const r = await request(`/cameras/${encodeURIComponent(cam.serial)}/auto`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ features: [kind], ...values, target: camera?.defaults?.autoTarget ?? 0.45 }),
