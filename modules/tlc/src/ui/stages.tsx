@@ -169,12 +169,22 @@ export function PictureStage({
   const liveImg = useRef<HTMLImageElement | null>(null);
   const liveSerial = useRef<string | null>(null);
   const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // An NxGen service older than 2.0 (camera helper 1.1) has no in-place change: the stream is
+  // reopened with the new settings instead (a short reconnection), and a note says why.
+  const [legacyService, setLegacyService] = useState(false);
+  const [reopenKey, setReopenKey] = useState(0);
   function pushLive(v: CameraValues | null, p: CameraParametersInput) {
     const serial = liveSerial.current;
     if (!serial || !v) return;
     if (pushTimer.current) clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(() => {
-      void request(`/cameras/${encodeURIComponent(serial)}/preview`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...v, parameters: p }) }).catch((e: Error) => setError(e.message));
+      if (legacyService) return setReopenKey((k) => k + 1);
+      void request(`/cameras/${encodeURIComponent(serial)}/preview`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...v, parameters: p }) }).catch((e: Error & { status?: number }) => {
+        if (e.status === 404 || /Cannot PUT/.test(e.message)) {
+          setLegacyService(true);
+          setReopenKey((k) => k + 1);
+        } else setError(e.message);
+      });
     }, 150);
   }
   function change(v: CameraValues) {
@@ -287,6 +297,7 @@ export function PictureStage({
             whiteBalance={(values ?? camSettings)!.whiteBalance}
             illumination={illumination}
             imgRef={liveImg}
+            reopenKey={reopenKey}
             onOpen={(serial) => {
               liveSerial.current = serial;
               // The stream opened with the values of that moment; send the current ones in case they moved.
@@ -389,6 +400,7 @@ export function PictureStage({
                       locked={locked}
                       live={live}
                       busy={autoBusy}
+                      legacy={legacyService}
                       onChange={change}
                       onAutoExposure={() => void autoAdjust("exposure")}
                       onAutoWhiteBalance={() => void autoAdjust("whiteBalance")}
@@ -567,6 +579,7 @@ function CameraControls({
   locked,
   live,
   busy,
+  legacy,
   onChange,
   onAutoExposure,
   onAutoWhiteBalance,
@@ -579,6 +592,7 @@ function CameraControls({
   locked: { exposure: boolean; gain: boolean; whiteBalance: boolean };
   live: boolean;
   busy?: boolean;
+  legacy?: boolean;
   onChange: (v: CameraValues) => void;
   onAutoExposure: () => void;
   onAutoWhiteBalance: () => void;
@@ -668,7 +682,7 @@ function CameraControls({
         </button>
       </div>
       {live ? (
-        <p className="text-[11px] text-muted">Changes apply to the live image at once.</p>
+        <p className="text-[11px] text-muted">{legacy ? "This NxGen service reopens the live image for each change; update NxGen for changes without reconnecting." : "Changes apply to the live image at once."}</p>
       ) : (
         <p className="text-[11px] text-muted">Start the live view to see the effect of the settings.</p>
       )}
@@ -749,6 +763,7 @@ function LivePreview({
   imgRef,
   onOpen,
   onClose,
+  reopenKey = 0,
 }: {
   serial: string;
   simulated: boolean;
@@ -761,6 +776,8 @@ function LivePreview({
   /** The stream is open (or reconnected): later setting changes go through PUT …/preview, not a new stream. */
   onOpen?: (serial: string) => void;
   onClose?: () => void;
+  /** Bumped to reopen the stream with the current settings (services without in-place changes). */
+  reopenKey?: number;
 }) {
   const ref = useRef<HTMLImageElement | null>(null);
   const [failed, setFailed] = useState(false);
@@ -771,9 +788,9 @@ function LivePreview({
   latest.current = { exposureUs, gain, whiteBalance };
   const src = useMemo(() => {
     const s = latest.current;
-    return `/api/cameras/${encodeURIComponent(serial)}/preview?exposureUs=${s.exposureUs}&gain=${s.gain}&wb=${s.whiteBalance.join(",")}&n=${attempt}`;
+    return `/api/cameras/${encodeURIComponent(serial)}/preview?exposureUs=${s.exposureUs}&gain=${s.gain}&wb=${s.whiteBalance.join(",")}&n=${attempt}-${reopenKey}`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serial, attempt]);
+  }, [serial, attempt, reopenKey]);
   useEffect(() => {
     onOpen?.(serial);
     return () => onClose?.();
