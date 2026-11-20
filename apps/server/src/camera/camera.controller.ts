@@ -58,6 +58,15 @@ export class CameraController {
    * Live preview as an image stream (multipart/x-mixed-replace): put the URL in an <img> and the
    * browser shows each new frame. Closing the page or removing the image ends the stream.
    */
+  /** Is a preview running, and why did the last one end (for a page whose <img> only saw it break). */
+  @RequirePermission('devices.view')
+  @PassiveRequest()
+  @Get(':serial/preview-status')
+  previewStatus(@Param('serial') serial: string) {
+    if (!SERIAL.test(serial)) throw new BadRequestException('Unknown camera.');
+    return this.cameras.previewStatus(serial);
+  }
+
   /** Changes the running live preview's settings in place: no reconnection, no stream restart. */
   @RequirePermission('devices.view')
   @PassiveRequest()

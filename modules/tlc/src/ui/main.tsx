@@ -462,6 +462,35 @@ function SetupCard({ a, onSaved }: { a: AnalysisDetail; onSaved: (message: strin
       setBusy(false);
     }
   }
+  // Hidden for this analysis on this computer until the analyst asks for it again (it stays required for submitting).
+  const hideKey = `nxgen.tlc.setup-hidden.${a.id}`;
+  const [hidden, setHidden] = useState(() => {
+    try {
+      return localStorage.getItem(hideKey) === "1";
+    } catch {
+      return false;
+    }
+  });
+  function hide(h: boolean) {
+    setHidden(h);
+    try {
+      if (h) localStorage.setItem(hideKey, "1");
+      else localStorage.removeItem(hideKey);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (hidden)
+    return (
+      <div className="mx-auto flex w-full max-w-[96rem] items-center justify-between gap-3 px-4 pt-3 text-sm sm:px-5">
+        <span className="text-muted">
+          Instrument and method not chosen yet <span className="text-muted/70">· needed before submitting</span>
+        </span>
+        <button type="button" className="font-semibold text-brand hover:underline" onClick={() => hide(false)}>
+          Choose…
+        </button>
+      </div>
+    );
   return (
     <div className="mx-auto w-full max-w-[96rem] px-4 pt-3 sm:px-5">
       <Callout tone="warn" title="Choose the instrument and method">
@@ -489,6 +518,11 @@ function SetupCard({ a, onSaved }: { a: AnalysisDetail; onSaved: (message: strin
           </button>
         </div>
         {error && <p className="mt-2 text-sm font-semibold text-fail">{error}</p>}
+        <div className="mt-2 text-right">
+          <button type="button" className="text-xs font-semibold text-muted hover:text-ink hover:underline" onClick={() => hide(true)}>
+            Hide for now
+          </button>
+        </div>
       </Callout>
     </div>
   );

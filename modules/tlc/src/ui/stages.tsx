@@ -177,6 +177,7 @@ export function PictureStage({
     const serial = liveSerial.current;
     if (!serial || !v) return;
     if (pushTimer.current) clearTimeout(pushTimer.current);
+    // A service that reopens the stream for each change gets changes less often (no restart storms).
     pushTimer.current = setTimeout(() => {
       if (legacyService) return setReopenKey((k) => k + 1);
       void request(`/cameras/${encodeURIComponent(serial)}/preview`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...v, parameters: p }) }).catch((e: Error & { status?: number }) => {
@@ -185,7 +186,7 @@ export function PictureStage({
           setReopenKey((k) => k + 1);
         } else setError(e.message);
       });
-    }, 150);
+    }, legacyService ? 700 : 150);
   }
   function change(v: CameraValues) {
     setValues(v);
@@ -800,6 +801,16 @@ function LivePreview({
   const onFailed = () => {
     setFailed(true);
     setReason(null);
+    // The service remembers why the camera's last preview ended (newer services); else probe the stream.
+    request(`/cameras/${encodeURIComponent(serial)}/preview-status`)
+      .then((r) => r.json())
+      .then((st: { lastEnd: { at: string; error: string } | null }) => {
+        if (st.lastEnd && Date.now() - Date.parse(st.lastEnd.at) < 120_000) setReason(st.lastEnd.error);
+        else probe();
+      })
+      .catch(probe);
+  };
+  const probe = () => {
     const ctrl = new AbortController();
     fetch(`${src}&probe=1`, { credentials: "include", signal: ctrl.signal })
       .then(async (res) => {

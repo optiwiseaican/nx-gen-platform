@@ -95,6 +95,8 @@ export class CameraService implements OnModuleDestroy {
   };
   private stillQueue: Promise<unknown> = Promise.resolve();
   private readonly previews = new Map<string, PreviewGroup>();
+  /** Why the last preview of a camera ended, for the screen that only sees a broken image. */
+  private readonly previewEnds = new Map<string, { at: string; error: string }>();
 
   constructor(
     @Inject(NXGEN_CONFIG) config: NxGenConfig,
@@ -197,6 +199,12 @@ export class CameraService implements OnModuleDestroy {
         this.command({ cmd: 'preview_stop', serial }).catch(() => undefined);
       }
     };
+  }
+
+  /** Whether a preview runs for this camera, and why the last one ended (if the helper said). */
+  previewStatus(serial: string): { running: boolean; viewers: number; lastEnd: { at: string; error: string } | null } {
+    const g = this.previews.get(serial);
+    return { running: !!g, viewers: g?.listeners.size ?? 0, lastEnd: this.previewEnds.get(serial) ?? null };
   }
 
   /** Changes the running preview's exposure, gain, white balance or parameters without restarting it. */
@@ -491,8 +499,10 @@ export class CameraService implements OnModuleDestroy {
           p.reject(new CameraError(message));
         }
         this.pending.clear();
-        for (const g of this.previews.values())
+        for (const g of this.previews.values()) {
+          this.previewEnds.set(g.serial, { at: new Date().toISOString(), error: message });
           for (const l of g.listeners) l({ kind: 'end', error: message });
+        }
         this.previews.clear();
       });
     });
@@ -516,6 +526,8 @@ export class CameraService implements OnModuleDestroy {
       const g = this.previews.get(serial);
       this.previews.delete(serial);
       const error = `Camera ${serial} stopped sending images: ${String(msg.error ?? '')}`;
+      this.previewEnds.set(serial, { at: new Date().toISOString(), error });
+      this.logger.warn(error);
       if (g) for (const l of g.listeners) l({ kind: 'end', error });
       this.audit
         .record({
